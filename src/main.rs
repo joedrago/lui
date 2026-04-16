@@ -45,6 +45,10 @@ struct Cli {
     #[arg(short = 'l', long = "list")]
     list: bool,
 
+    /// Dump raw llama-server output to a debug log file
+    #[arg(long = "debug")]
+    debug: Option<String>,
+
     /// Extra args passed through to llama-server
     #[arg(last = true)]
     extra_args: Vec<String>,
@@ -489,7 +493,7 @@ async fn main() {
     };
 
     // Spawn llama-server
-    let mut proc = match spawn_server(&config.server) {
+    let mut proc = match spawn_server(&config.server, cli.debug.as_deref()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error: {}", e);

@@ -608,9 +608,57 @@ impl Display {
             SetForegroundColor(Color::White),
             Print(format!("{}", st.request_count)),
             ResetColor,
-            Print("\n\n")
+            Print("\n")
         );
 
+        // Show exit message if the server exited unexpectedly (never became ready)
+        if st.exited && !st.ready {
+            let _ = execute!(
+                stdout,
+                Print("\n"),
+                SetForegroundColor(Color::Red),
+                SetAttribute(Attribute::Bold),
+                Print("  Server exited before becoming ready."),
+                SetAttribute(Attribute::Reset),
+                ResetColor,
+                Print("\n")
+            );
+            if !st.exit_message.is_empty() {
+                let _ = execute!(
+                    stdout,
+                    Print("  "),
+                    SetForegroundColor(Color::DarkGrey),
+                    Print(&st.exit_message),
+                    ResetColor,
+                    Print("\n")
+                );
+            }
+
+            // Show last log lines so the user can see the error
+            let lines: Vec<&String> = st.log_lines.iter().collect();
+            let show = lines.len().min(20);
+            if show > 0 {
+                let _ = execute!(
+                    stdout,
+                    Print("\n"),
+                    SetForegroundColor(LAVENDER),
+                    Print("  Last server output:\n"),
+                    ResetColor,
+                );
+                for line in &lines[lines.len() - show..] {
+                    let _ = execute!(
+                        stdout,
+                        Print("  "),
+                        SetForegroundColor(Color::DarkGrey),
+                        Print(line),
+                        ResetColor,
+                        Print("\n")
+                    );
+                }
+            }
+        }
+
+        println!();
         let _ = stdout.flush();
     }
 }

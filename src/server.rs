@@ -84,6 +84,10 @@ impl ServerState {
 pub struct ServerProcess {
     pub child: Box<dyn portable_pty::Child + Send>,
     pub state: Arc<Mutex<ServerState>>,
+    // On Windows, dropping the slave kills the ConPTY and the child process,
+    // so we keep it alive for the lifetime of the server.
+    #[cfg(windows)]
+    _slave: Box<dyn portable_pty::SlavePty + Send>,
 }
 
 pub fn build_args(config: &ServerConfig) -> Vec<String> {
@@ -122,7 +126,7 @@ pub fn build_args(config: &ServerConfig) -> Vec<String> {
     args
 }
 
-pub fn spawn_server(config: &ServerConfig) -> Result<ServerProcess, String> {
+pub fn spawn_server(config: &ServerConfig, debug_log: Option<&str>) -> Result<ServerProcess, String> {
     let args = build_args(config);
 
     let pty_system = native_pty_system();
@@ -151,10 +155,14 @@ pub fn spawn_server(config: &ServerConfig) -> Result<ServerProcess, String> {
 
     let state = Arc::new(Mutex::new(ServerState::default()));
 
+    let debug_file = debug_log.map(|path| {
+        std::fs::File::create(path).expect("Failed to create debug log file")
+    });
+
     // Spawn blocking reader task (pty reader is sync)
     let state_clone = state.clone();
     let reader_handle = tokio::task::spawn_blocking(move || {
-        read_output_sync(reader, state_clone);
+        read_output_sync(reader, state_clone, debug_file);
     });
 
     // Monitor for exit
@@ -169,22 +177,36 @@ pub fn spawn_server(config: &ServerConfig) -> Result<ServerProcess, String> {
         }
     });
 
-    // Drop slave so reads on master will EOF when child exits
+    // On Unix, drop slave so reads on master will EOF when child exits.
+    // On Windows, dropping the slave kills the ConPTY (and the child), so keep it alive.
+    #[cfg(not(windows))]
     drop(pty_pair.slave);
 
-    Ok(ServerProcess { child, state })
+    Ok(ServerProcess {
+        child,
+        state,
+        #[cfg(windows)]
+        _slave: pty_pair.slave,
+    })
 }
 
 /// Strip ANSI escape sequences from a string
 fn strip_ansi(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][\x20-\x7e]*(?:\x07|\x1b\\)").unwrap()
+        // CSI sequences (includes ? for DEC private modes like ?25l),
+        // OSC sequences, and single-character escapes (e.g. \x1b=)
+        Regex::new(r"\x1b\[[\x20-\x3f]*[\x40-\x7e]|\x1b\][\x20-\x7e]*(?:\x07|\x1b\\)|\x1b[\x20-\x2f]*[\x30-\x7e]").unwrap()
     });
     re.replace_all(s, "").to_string()
 }
 
-fn read_output_sync(mut reader: Box<dyn std::io::Read + Send>, state: Arc<Mutex<ServerState>>) {
+fn read_output_sync(
+    mut reader: impl std::io::Read,
+    state: Arc<Mutex<ServerState>>,
+    mut debug_file: Option<std::fs::File>,
+) {
+    use std::io::Write;
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -193,6 +215,10 @@ fn read_output_sync(mut reader: Box<dyn std::io::Read + Send>, state: Arc<Mutex<
                 if !buf.is_empty() {
                     let raw = String::from_utf8_lossy(&buf).to_string();
                     let line = strip_ansi(&raw);
+                    if let Some(f) = debug_file.as_mut() {
+                        let _ = writeln!(f, "RAW: {:?}", raw);
+                        let _ = writeln!(f, "STRIPPED: {}", line);
+                    }
                     if !line.is_empty() {
                         let mut st = state.lock().unwrap();
                         parse_line(&line, &mut st);
@@ -206,6 +232,10 @@ fn read_output_sync(mut reader: Box<dyn std::io::Read + Send>, state: Arc<Mutex<
                     if !buf.is_empty() {
                         let raw = String::from_utf8_lossy(&buf).to_string();
                         let line = strip_ansi(&raw);
+                        if let Some(f) = debug_file.as_mut() {
+                            let _ = writeln!(f, "RAW: {:?}", raw);
+                            let _ = writeln!(f, "STRIPPED: {}", line);
+                        }
                         if !line.is_empty() {
                             let mut st = state.lock().unwrap();
                             let is_progress = parse_line(&line, &mut st);
@@ -226,23 +256,26 @@ fn read_output_sync(mut reader: Box<dyn std::io::Read + Send>, state: Arc<Mutex<
 
 /// Parse a log line. Returns true if this is a transient progress line (don't add to log ring).
 fn parse_line(line: &str, state: &mut ServerState) -> bool {
-    // Download progress: "Downloading qwen2.5-coder-32b-instruct-q4_k_m-00003…               16%"
-    if line.starts_with("Downloading ") {
-        if let Some(pct_pos) = line.rfind('%') {
-            let before_pct = line[..pct_pos].trim_end();
-            if let Some(space_pos) = before_pct.rfind(|c: char| !c.is_ascii_digit()) {
-                if let Ok(pct) = before_pct[space_pos + 1..].parse::<u32>() {
-                    // Extract filename: first word after "Downloading " (GGUF filenames have no spaces)
-                    let rest = &line["Downloading ".len()..];
-                    let name = rest.split_whitespace().next().unwrap_or("");
-                    if !name.is_empty() {
-                        state.downloads.insert(name.to_string(), pct);
-                    }
-                    return true;
-                }
+    // Download progress: "Downloading Qwen3.6-35B-A3B-UD-Q4_K_M.gguf ──       9%"
+    // ConPTY on Windows can concatenate multiple progress lines into one,
+    // so we use captures_iter with a non-greedy match to extract all entries.
+    if line.contains("Downloading ") {
+        static RE_DL: OnceLock<Regex> = OnceLock::new();
+        let re = RE_DL.get_or_init(|| {
+            Regex::new(r"Downloading (\S+\.\S+)\s.*?(\d{1,3})%").unwrap()
+        });
+        let mut found = false;
+        for caps in re.captures_iter(line) {
+            let name = caps[1].to_string();
+            let pct: u32 = caps[2].parse().unwrap_or(0);
+            // Only update if progress moved forward (avoid glitchy backward jumps)
+            let entry = state.downloads.entry(name).or_insert(0);
+            if pct >= *entry {
+                *entry = pct;
             }
+            found = true;
         }
-        return false;
+        return found;
     }
     // general.name
     if is_kv_line(line) && line.contains("general.name") && line.contains("str") {
@@ -319,20 +352,20 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
             state.cpu_mem_mib += mib;
         }
     }
-    // MTL0_Mapped model buffer size (may appear multiple times, sum them)
-    else if line.contains("MTL0_Mapped model buffer size") {
+    // GPU model buffer size (MTL0 on macOS, CUDA0 on NVIDIA, Vulkan0, etc.)
+    else if line.contains("model buffer size") && !line.contains("CPU") {
         if let Some(mib) = extract_mib(line) {
             state.gpu_mem_mib += mib;
         }
     }
-    // KV buffer size
-    else if line.contains("MTL0 KV buffer size") {
+    // KV buffer size (any GPU backend)
+    else if line.contains("KV buffer size") && !line.contains("CPU") {
         if let Some(mib) = extract_mib(line) {
             state.kv_cache_mib = mib;
         }
     }
-    // Compute buffer size
-    else if line.contains("MTL0 compute buffer size") {
+    // Compute buffer size (any GPU backend)
+    else if line.contains("compute buffer size") && !line.contains("CPU") {
         if let Some(mib) = extract_mib(line) {
             state.compute_buf_mib = mib;
         }
