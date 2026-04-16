@@ -243,13 +243,13 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
         return false;
     }
     // general.name
-    if line.contains("general.name") && line.contains("str") {
+    if is_kv_line(line) && line.contains("general.name") && line.contains("str") {
         if let Some(val) = extract_kv_str(line) {
             state.model_name = val;
         }
     }
     // general.size_label
-    else if line.contains("general.size_label") && line.contains("str") {
+    else if is_kv_line(line) && line.contains("general.size_label") && line.contains("str") {
         if let Some(val) = extract_kv_str(line) {
             state.size_label = val;
         }
@@ -474,10 +474,17 @@ fn extract_slot_task(line: &str) -> Option<(u32, u32)> {
     Some((slot_id, task_id))
 }
 
+fn is_kv_line(line: &str) -> bool {
+    // Pattern: "llama_model_loader: - kv  N:  ..."
+    line.contains("llama_model_loader:") && line.contains("kv")
+}
+
 fn extract_kv_str(line: &str) -> Option<String> {
     // Pattern: "kv  N:   key str    = value"
-    let eq_pos = line.rfind("= ")?;
-    Some(line[eq_pos + 2..].trim().to_string())
+    // Use the first occurrence of " = " on a known-safe KV line to avoid
+    // pulling junk from tail content that happens to contain "= ".
+    let eq_pos = line.find(" = ")?;
+    Some(line[eq_pos + 3..].trim().to_string())
 }
 
 fn extract_mib(line: &str) -> Option<f64> {
