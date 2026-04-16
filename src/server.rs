@@ -178,7 +178,9 @@ pub fn spawn_server(config: &ServerConfig) -> Result<ServerProcess, String> {
 /// Strip ANSI escape sequences from a string
 fn strip_ansi(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][\x20-\x7e]*(?:\x07|\x1b\\)").unwrap());
+    let re = RE.get_or_init(|| {
+        Regex::new(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][\x20-\x7e]*(?:\x07|\x1b\\)").unwrap()
+    });
     re.replace_all(s, "").to_string()
 }
 
@@ -363,14 +365,17 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
     else if line.contains("launch_slot_") && line.contains("processing task") {
         if let Some((slot_id, _)) = extract_slot_task(line) {
             state.active_requests += 1;
-            state.active_slots.insert(slot_id, SlotInfo {
+            state.active_slots.insert(
                 slot_id,
-                n_tokens: 0,
-                prompt_tps: 0.0,
-                gen_tps: 0.0,
-                gen_tokens: 0,
-                total_time_ms: 0.0,
-            });
+                SlotInfo {
+                    slot_id,
+                    n_tokens: 0,
+                    prompt_tps: 0.0,
+                    gen_tps: 0.0,
+                    gen_tokens: 0,
+                    total_time_ms: 0.0,
+                },
+            );
         }
     }
     // Token count: "slot update_slots: id  3 | task 0 | new prompt, ..., task.n_tokens = 536"
@@ -440,7 +445,8 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
     // Total timing: "      total time =   25690.22 ms / 14289 tokens"
     else if line.starts_with("      total time =") {
         static RE_TIME: OnceLock<Regex> = OnceLock::new();
-        let re = RE_TIME.get_or_init(|| Regex::new(r"(\d+\.?\d*)\s+ms\s*/\s*(\d+)\s+tokens").unwrap());
+        let re =
+            RE_TIME.get_or_init(|| Regex::new(r"(\d+\.?\d*)\s+ms\s*/\s*(\d+)\s+tokens").unwrap());
         if let Some(caps) = re.captures(line) {
             let time_ms: f64 = caps[1].parse().unwrap_or(0.0);
             let tokens: u32 = caps[2].parse().unwrap_or(0);

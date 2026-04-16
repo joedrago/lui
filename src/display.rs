@@ -130,12 +130,21 @@ impl Display {
         }
 
         let _ = terminal::disable_raw_mode();
-        let _ = execute!(stdout, Clear(ClearType::All), MoveTo(0, 0), EnableLineWrap, Show);
+        let _ = execute!(
+            stdout,
+            Clear(ClearType::All),
+            MoveTo(0, 0),
+            EnableLineWrap,
+            Show
+        );
     }
 
     fn check_quit() -> bool {
         if event::poll(Duration::ZERO).unwrap_or(false) {
-            if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
+            if let Ok(Event::Key(KeyEvent {
+                code, modifiers, ..
+            })) = event::read()
+            {
                 if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
                     return true;
                 }
@@ -158,7 +167,7 @@ impl Display {
         // Header
         let left = "  ── ";
         let mid_text = "lui";
-        let right_text = " · llama.cpp server ";
+        let right_text = " ── llama.cpp ui ";
         let right_fill = width.saturating_sub(left.len() + mid_text.len() + right_text.len());
         let _ = queue!(
             t.stdout,
@@ -304,16 +313,30 @@ impl Display {
             let params_display = if st.file_size_n.is_empty() {
                 format!("{} {}", st.model_params_n, st.model_params_unit)
             } else if st.file_bpw.is_empty() {
-                format!("{} {} · {} {} on disk", st.model_params_n, st.model_params_unit, st.file_size_n, st.file_size_unit)
+                format!(
+                    "{} {} · {} {} on disk",
+                    st.model_params_n, st.model_params_unit, st.file_size_n, st.file_size_unit
+                )
             } else {
-                format!("{} {} · {} {} on disk ({} BPW)", st.model_params_n, st.model_params_unit, st.file_size_n, st.file_size_unit, st.file_bpw)
+                format!(
+                    "{} {} · {} {} on disk ({} BPW)",
+                    st.model_params_n,
+                    st.model_params_unit,
+                    st.file_size_n,
+                    st.file_size_unit,
+                    st.file_bpw
+                )
             };
             self.print_sub(&mut t, &params_display);
         }
 
         // Context (grey sub of Model)
         let ctx_display = if st.max_ctx_size > 0 && st.max_ctx_size != st.ctx_size {
-            format!("{} token context window ({} max)", format_number(st.ctx_size as u64), format_number(st.max_ctx_size as u64))
+            format!(
+                "{} token context window ({} max)",
+                format_number(st.ctx_size as u64),
+                format_number(st.max_ctx_size as u64)
+            )
         } else {
             format!("{} token context window", format_number(st.ctx_size as u64))
         };
@@ -360,10 +383,7 @@ impl Display {
 
         // Performance section
         t.newline();
-        let perf_header = format!(
-            "  ── Performance {}",
-            "─".repeat(width.saturating_sub(18))
-        );
+        let perf_header = format!("  ── Performance {}", "─".repeat(width.saturating_sub(18)));
         let _ = queue!(
             t.stdout,
             SetForegroundColor(MUTED_PURPLE),
@@ -410,7 +430,10 @@ impl Display {
         // Active slots
         for slot in st.active_slots.values() {
             let desc = if slot.n_tokens > 0 {
-                format!("● slot {} processing {} tokens", slot.slot_id, slot.n_tokens)
+                format!(
+                    "● slot {} processing {} tokens",
+                    slot.slot_id, slot.n_tokens
+                )
             } else {
                 format!("● slot {} starting...", slot.slot_id)
             };
@@ -518,10 +541,7 @@ impl Display {
     }
 
     fn render_log(&self, st: &ServerState, t: &mut TermBuf) {
-        let log_header = format!(
-            "  ── Server Log {}",
-            "─".repeat(t.width.saturating_sub(17))
-        );
+        let log_header = format!("  ── Server Log {}", "─".repeat(t.width.saturating_sub(17)));
         let _ = queue!(
             t.stdout,
             SetForegroundColor(MUTED_PURPLE),

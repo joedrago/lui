@@ -12,7 +12,10 @@ use display::Display;
 use server::spawn_server;
 
 #[derive(Parser, Debug)]
-#[command(name = "lui", about = "A friendly TUI wrapper for llama.cpp's llama-server")]
+#[command(
+    name = "lui",
+    about = "A friendly TUI wrapper for llama.cpp's llama-server"
+)]
 struct Cli {
     /// Model file path
     #[arg(short = 'm', long = "model")]
@@ -175,8 +178,8 @@ fn scan_cached_models() -> Vec<CachedModel> {
 }
 
 const KNOWN_QUANTS: &[&str] = &[
-    "q2_k", "q3_k_s", "q3_k_m", "q3_k_l", "q4_0", "q4_k_s", "q4_k_m", "q4_k_l", "q5_0",
-    "q5_k_s", "q5_k_m", "q5_k_l", "q6_k", "q8_0", "f16", "f32",
+    "q2_k", "q3_k_s", "q3_k_m", "q3_k_l", "q4_0", "q4_k_s", "q4_k_m", "q4_k_l", "q5_0", "q5_k_s",
+    "q5_k_m", "q5_k_l", "q6_k", "q8_0", "f16", "f32",
 ];
 
 fn format_size(bytes: u64) -> String {
@@ -242,31 +245,38 @@ fn print_current_config() {
     let _ = crossterm::execute!(stdout, Print("\n\n"));
 
     // Helper closure for config lines
-    let mut print_setting =
-        |label: &str, value: &str, flag: &str, is_default: bool| {
-            let label_color = if is_default { Color::DarkGrey } else { lavender };
-            let value_color = if is_default { Color::DarkGrey } else { Color::Cyan };
-            let _ = crossterm::execute!(
-                stdout,
-                Print("  "),
-                SetForegroundColor(muted),
-                Print("· "),
-                SetForegroundColor(label_color),
-                SetAttribute(Attribute::Bold),
-                Print(label),
-                SetAttribute(Attribute::Reset),
-                Print("  "),
-                SetForegroundColor(value_color),
-                Print(value),
-                ResetColor,
-                Print("\n"),
-                Print("      "),
-                SetForegroundColor(Color::DarkGrey),
-                Print(flag),
-                ResetColor,
-                Print("\n"),
-            );
+    let mut print_setting = |label: &str, value: &str, flag: &str, is_default: bool| {
+        let label_color = if is_default {
+            Color::DarkGrey
+        } else {
+            lavender
         };
+        let value_color = if is_default {
+            Color::DarkGrey
+        } else {
+            Color::Cyan
+        };
+        let _ = crossterm::execute!(
+            stdout,
+            Print("  "),
+            SetForegroundColor(muted),
+            Print("· "),
+            SetForegroundColor(label_color),
+            SetAttribute(Attribute::Bold),
+            Print(label),
+            SetAttribute(Attribute::Reset),
+            Print("  "),
+            SetForegroundColor(value_color),
+            Print(value),
+            ResetColor,
+            Print("\n"),
+            Print("      "),
+            SetForegroundColor(Color::DarkGrey),
+            Print(flag),
+            ResetColor,
+            Print("\n"),
+        );
+    };
 
     // Model
     if !s.hf_repo.is_empty() {
@@ -294,12 +304,7 @@ fn print_current_config() {
     print_setting("GPU layers", &ngl_str, "--ngl <n>", s.gpu_layers == -1);
 
     // Port
-    print_setting(
-        "Port",
-        &s.port.to_string(),
-        "--port <n>",
-        s.port == 8080,
-    );
+    print_setting("Port", &s.port.to_string(), "--port <n>", s.port == 8080);
 
     // Host
     let host_flag = if s.host == "127.0.0.1" {

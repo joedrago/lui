@@ -12,7 +12,10 @@ pub fn read_gguf_metadata(path: &Path) -> io::Result<HashMap<String, String>> {
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     if &magic != b"GGUF" {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a GGUF file"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a GGUF file",
+        ));
     }
 
     // Version: u32
@@ -183,7 +186,10 @@ fn read_u64(f: &mut std::fs::File) -> io::Result<u64> {
 fn read_gguf_string(f: &mut std::fs::File) -> io::Result<String> {
     let len = read_u64(f)? as usize;
     if len > 1_000_000 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "string too long"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "string too long",
+        ));
     }
     let mut buf = vec![0u8; len];
     f.read_exact(&mut buf)?;
@@ -192,10 +198,10 @@ fn read_gguf_string(f: &mut std::fs::File) -> io::Result<String> {
 
 fn skip_array_elements(f: &mut std::fs::File, elem_type: u32, count: u64) -> io::Result<()> {
     let elem_size = match elem_type {
-        0 | 1 | 7 => 1u64,    // u8, i8, bool
-        2 | 3 => 2,           // u16, i16
-        4 | 5 | 6 => 4,      // u32, i32, f32
-        10 | 11 | 12 => 8,   // u64, i64, f64
+        0 | 1 | 7 => 1u64, // u8, i8, bool
+        2 | 3 => 2,        // u16, i16
+        4 | 5 | 6 => 4,    // u32, i32, f32
+        10 | 11 | 12 => 8, // u64, i64, f64
         8 => {
             // Array of strings - read each one
             for _ in 0..count {
