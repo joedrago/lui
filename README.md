@@ -29,3 +29,7 @@ Other useful flags: `-m <path>` for a local GGUF, `--ngl <n>` for GPU layers, `-
 ## Quit
 
 `Ctrl+C` or `q`.
+
+## License
+
+BSD-2-Clause. See [LICENSE](LICENSE).

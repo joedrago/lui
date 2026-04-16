@@ -1,3 +1,6 @@
+// Copyright 2026 Joe Drago. All rights reserved.
+// SPDX-License-Identifier: BSD-2-Clause
+
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

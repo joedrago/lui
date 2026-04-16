@@ -1,3 +1,6 @@
+// Copyright 2026 Joe Drago. All rights reserved.
+// SPDX-License-Identifier: BSD-2-Clause
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
