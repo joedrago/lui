@@ -1,0 +1,22 @@
+[package]
+name = "lui"
+version = "0.1.0"
+edition = "2021"
+description = "A friendly TUI wrapper for llama.cpp's llama-server"
+authors = ["Joe Drago <joedrago@gmail.com>"]
+license = "BSD-2-Clause"
+
+[dependencies]
+tokio = { version = "1", features = ["full", "process"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+serde_json = "1"
+dirs = "6"
+regex = "1"
+portable-pty = "0.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
