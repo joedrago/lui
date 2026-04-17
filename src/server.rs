@@ -105,6 +105,10 @@ pub fn build_args(config: &ServerConfig) -> Vec<String> {
     args.push("--log-colors".to_string());
     args.push("off".to_string());
     args.push("-v".to_string());
+    args.push("-fa".to_string());
+    args.push("on".to_string());
+    args.push("--cache-reuse".to_string());
+    args.push("256".to_string());
 
     if !config.hf_repo.is_empty() {
         args.push("-hf".to_string());
