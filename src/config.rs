@@ -257,8 +257,7 @@ pub fn resolve(config: &LuiConfig) -> ServerConfig {
     // result back into effective.chat_template_kwargs; the drop list stays
     // on the stored config (so it round-trips on save) but is only consulted
     // here during resolution.
-    let key = derive_model_name(&effective);
-    let per_model = config.models.get(&key);
+    let per_model = model_key(&effective).and_then(|k| config.models.get(&k));
     let mut kwargs = default_chat_template_kwargs();
     for (k, v) in &config.server.chat_template_kwargs {
         kwargs.insert(k.clone(), v.clone());
@@ -373,6 +372,22 @@ pub fn save_config(config: &LuiConfig) {
             }
         }
         Err(e) => eprintln!("Warning: failed to serialize config: {}", e),
+    }
+}
+
+/// The identity string used to key per-model overrides. Deliberately the
+/// EXACT text the user typed after `--hf` (or `-m`) — including org prefix
+/// and quantization — so e.g. `unsloth/Foo:Q4_K_M` and `unsloth/Foo:Q8_0`
+/// get separate override entries, and `unsloth/Bar` vs `zai-org/Bar` don't
+/// collide. Distinct from `derive_model_name`, which produces the short
+/// cosmetic name used for opencode's provider/model ID.
+pub fn model_key(config: &ServerConfig) -> Option<String> {
+    if !config.hf_repo.is_empty() {
+        Some(config.hf_repo.clone())
+    } else if !config.model.is_empty() {
+        Some(config.model.clone())
+    } else {
+        None
     }
 }
 

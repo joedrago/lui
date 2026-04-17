@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use config::{
-    config_path, derive_model_name, load_config, resolve, save_config, update_opencode_config,
+    config_path, load_config, model_key, resolve, save_config, update_opencode_config,
     update_websearch_skill, websearch_port, LuiConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
 };
 use display::Display;
@@ -112,10 +112,7 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
     // Seeded from the loaded config so `lui --this --temp 0.3` works with
     // no `-m`/`--hf` on the command line, and updated whenever `-m` or `--hf`
     // is seen so chains like `--hf X --this --temp 0.3` write to X.
-    let mut active_key: Option<String> = {
-        let k = derive_model_name(&config.server);
-        if k == "unknown" { None } else { Some(k) }
-    };
+    let mut active_key: Option<String> = model_key(&config.server);
 
     // Extra-args replacement tracking: if the user passes ANY extra args for
     // a scope in this invocation, those replace the stored list for that
@@ -144,13 +141,13 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
                 let v = take_string(&mut parser, "--model");
                 config.server.model = v;
                 config.server.hf_repo.clear();
-                active_key = Some(derive_model_name(&config.server));
+                active_key = model_key(&config.server);
             }
             Long("hf") => {
                 let v = take_string(&mut parser, "--hf");
                 config.server.hf_repo = v;
                 config.server.model.clear();
-                active_key = Some(derive_model_name(&config.server));
+                active_key = model_key(&config.server);
             }
 
             Short('c') | Long("ctx-size") => {
@@ -518,6 +515,12 @@ fn scan_cached_models() -> Vec<CachedModel> {
                         }
                         has_gguf_files = true;
                         let lower = fname.to_lowercase();
+                        // mmproj-*.gguf is the vision projector sidecar, not
+                        // a quantization of the model itself — its own F16/BF16
+                        // tag would otherwise pollute the quants list.
+                        if lower.starts_with("mmproj") {
+                            continue;
+                        }
                         for q in KNOWN_QUANTS {
                             if lower.contains(q) && !quants.contains(&q.to_uppercase()) {
                                 quants.push(q.to_uppercase());
@@ -822,7 +825,7 @@ fn print_current_config() {
     // [models."Foo"] in the toml and the values here is obvious. The
     // currently-active model's header gets highlighted.
     if !config.models.is_empty() {
-        let active = derive_model_name(s);
+        let active = model_key(s);
         let _ = crossterm::execute!(
             stdout,
             SetForegroundColor(lavender),
@@ -832,7 +835,7 @@ fn print_current_config() {
             ResetColor,
         );
         for (name, ov) in &config.models {
-            let is_active = name == &active;
+            let is_active = active.as_deref() == Some(name.as_str());
             let _ = crossterm::execute!(
                 stdout,
                 Print("  "),
