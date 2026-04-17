@@ -1,6 +1,7 @@
 // Copyright 2026 Joe Drago. All rights reserved.
 // SPDX-License-Identifier: BSD-2-Clause
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,77 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuiConfig {
     pub server: ServerConfig,
+    // Per-model overrides keyed by the short model name produced by
+    // `derive_model_name` (same name shown in `lui -l`). Anything present
+    // here wins over the matching field in `[server]` when that model is
+    // the active one. Missing keys just mean "no model-specific tweaks."
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, ModelOverrides>,
+}
+
+/// Per-model overrides. Only fields that actually vary with the model live
+/// here. Identity (`model`, `hf_repo`) and machine-shape (`port`, `host`,
+/// websearch settings) deliberately stay global — overriding those per model
+/// either doesn't make sense or would silently shadow settings the user
+/// expects to be machine-wide.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_layers: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temp: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ubatch_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads_batch: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_type_k: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_type_v: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swa_full: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_ram: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prio_batch: Option<i32>,
+    // Model-specific extra args append to the global ones at resolve time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
+impl ModelOverrides {
+    /// True when no override fields are set. Used so we can prune empty
+    /// entries from the TOML and keep the file diff-clean.
+    pub fn is_empty(&self) -> bool {
+        self.ctx_size.is_none()
+            && self.gpu_layers.is_none()
+            && self.temp.is_none()
+            && self.top_p.is_none()
+            && self.top_k.is_none()
+            && self.min_p.is_none()
+            && self.ubatch_size.is_none()
+            && self.batch_size.is_none()
+            && self.parallel.is_none()
+            && self.threads_batch.is_none()
+            && self.cache_type_k.is_none()
+            && self.cache_type_v.is_none()
+            && self.swa_full.is_none()
+            && self.cache_ram.is_none()
+            && self.prio_batch.is_none()
+            && self.extra_args.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,8 +202,71 @@ impl Default for LuiConfig {
     fn default() -> Self {
         LuiConfig {
             server: ServerConfig::default(),
+            models: BTreeMap::new(),
         }
     }
+}
+
+/// Merge the active model's overrides on top of the global server config,
+/// producing the effective `ServerConfig` that actually gets handed to
+/// llama-server. Model-shape fields win when Some; extra_args appends.
+/// Call this AFTER the CLI has finished mutating the LuiConfig, not during
+/// parse — the active key only stabilizes once -m / --hf have been applied.
+pub fn resolve(config: &LuiConfig) -> ServerConfig {
+    let mut effective = config.server.clone();
+    let key = derive_model_name(&effective);
+    let Some(ov) = config.models.get(&key) else {
+        return effective;
+    };
+    if let Some(v) = ov.ctx_size {
+        effective.ctx_size = v;
+    }
+    if let Some(v) = ov.gpu_layers {
+        effective.gpu_layers = v;
+    }
+    if ov.temp.is_some() {
+        effective.temp = ov.temp;
+    }
+    if ov.top_p.is_some() {
+        effective.top_p = ov.top_p;
+    }
+    if ov.top_k.is_some() {
+        effective.top_k = ov.top_k;
+    }
+    if ov.min_p.is_some() {
+        effective.min_p = ov.min_p;
+    }
+    if ov.ubatch_size.is_some() {
+        effective.ubatch_size = ov.ubatch_size;
+    }
+    if ov.batch_size.is_some() {
+        effective.batch_size = ov.batch_size;
+    }
+    if ov.parallel.is_some() {
+        effective.parallel = ov.parallel;
+    }
+    if ov.threads_batch.is_some() {
+        effective.threads_batch = ov.threads_batch;
+    }
+    if ov.cache_type_k.is_some() {
+        effective.cache_type_k = ov.cache_type_k.clone();
+    }
+    if ov.cache_type_v.is_some() {
+        effective.cache_type_v = ov.cache_type_v.clone();
+    }
+    if ov.swa_full.is_some() {
+        effective.swa_full = ov.swa_full;
+    }
+    if ov.cache_ram.is_some() {
+        effective.cache_ram = ov.cache_ram;
+    }
+    if ov.prio_batch.is_some() {
+        effective.prio_batch = ov.prio_batch;
+    }
+    // Append, not replace: globals tend to be machine-tuning (thread pins,
+    // mlock) and per-model entries model-tuning; both should reach llama-server.
+    effective.extra_args.extend(ov.extra_args.iter().cloned());
+    effective
 }
 
 pub fn config_path() -> PathBuf {
@@ -161,7 +296,12 @@ pub fn save_config(config: &LuiConfig) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match toml::to_string_pretty(config) {
+    // Drop fully-empty override entries so clearing the last field of a
+    // model's overrides removes the [models."..."] table rather than leaving
+    // a ghost section in the toml.
+    let mut to_write = config.clone();
+    to_write.models.retain(|_, ov| !ov.is_empty());
+    match toml::to_string_pretty(&to_write) {
         Ok(contents) => {
             if let Err(e) = std::fs::write(&path, contents) {
                 eprintln!("Warning: failed to write {}: {}", path.display(), e);

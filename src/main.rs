@@ -7,127 +7,417 @@ mod gguf;
 mod server;
 mod websearch;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::Parser;
-
 use config::{
-    config_path, load_config, save_config, update_opencode_config, update_websearch_skill,
-    websearch_port, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
+    config_path, derive_model_name, load_config, resolve, save_config, update_opencode_config,
+    update_websearch_skill, websearch_port, LuiConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
 };
 use display::Display;
 use server::spawn_server;
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "lui",
-    about = "A friendly TUI wrapper for llama.cpp's llama-server"
-)]
-struct Cli {
-    /// Model file path
-    #[arg(short = 'm', long = "model")]
-    model: Option<String>,
-
-    /// HuggingFace repo (e.g. Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M)
-    #[arg(long = "hf")]
-    hf: Option<String>,
-
-    /// Context window size (0 = model default)
-    #[arg(short = 'c', long = "ctx-size")]
-    ctx_size: Option<u32>,
-
-    /// GPU layers (-1 = all)
-    #[arg(long = "ngl", long = "gpu-layers")]
-    gpu_layers: Option<i32>,
-
-    /// Server port (default: 8080)
-    #[arg(long = "port")]
-    port: Option<u16>,
-
-    /// Bind to 0.0.0.0 instead of 127.0.0.1
-    #[arg(long = "public")]
-    public: bool,
-
-    /// Sampling temperature
-    #[arg(long = "temp")]
-    temp: Option<f32>,
-
-    /// Top-p (nucleus) sampling
-    #[arg(long = "top-p")]
-    top_p: Option<f32>,
-
-    /// Top-k sampling
-    #[arg(long = "top-k")]
-    top_k: Option<i32>,
-
-    /// Min-p sampling
-    #[arg(long = "min-p")]
-    min_p: Option<f32>,
-
-    /// Physical batch size for prefill (llama-server -ub)
-    #[arg(long = "ubatch-size", alias = "ub")]
-    ubatch_size: Option<u32>,
-
-    /// Logical batch size (llama-server -b)
-    #[arg(long = "batch-size")]
-    batch_size: Option<u32>,
-
-    /// Number of server slots (llama-server -np). Default: 1 (single-user TUI).
-    #[arg(long = "parallel", alias = "np")]
-    parallel: Option<i32>,
-
-    /// Threads for prompt/batch processing (llama-server -tb)
-    #[arg(long = "threads-batch", alias = "tb")]
-    threads_batch: Option<i32>,
-
-    /// KV cache key type: f16, q8_0, q4_0, ... (llama-server -ctk)
-    #[arg(long = "cache-type-k", alias = "ctk")]
-    cache_type_k: Option<String>,
-
-    /// KV cache value type: f16, q8_0, q4_0, ... (llama-server -ctv)
-    #[arg(long = "cache-type-v", alias = "ctv")]
-    cache_type_v: Option<String>,
-
-    /// Force full-size SWA cache on (llama-server --swa-full). Overrides auto-detection.
-    #[arg(long = "swa-full", conflicts_with = "no_swa_full")]
-    swa_full: bool,
-
-    /// Force full-size SWA cache off, even if lui's auto-detection would enable it.
-    #[arg(long = "no-swa-full")]
-    no_swa_full: bool,
-
-    /// Host-memory prompt cache size in MiB (llama-server --cache-ram)
-    #[arg(long = "cache-ram")]
-    cache_ram: Option<u32>,
-
-    /// Batch thread priority 0-3 (llama-server --prio-batch)
-    #[arg(long = "prio-batch")]
-    prio_batch: Option<i32>,
-
-    /// List locally cached models
-    #[arg(short = 'l', long = "list")]
-    list: bool,
-
-    /// Disable lui's local web-search endpoint and remove its opencode skill.
-    #[arg(long = "no-websearch", conflicts_with = "websearch")]
-    no_websearch: bool,
-
-    /// Re-enable lui's local web-search endpoint (undoes a prior --no-websearch).
-    #[arg(long = "websearch")]
-    websearch: bool,
-
-    /// Port for lui's local web-search HTTP server (default: llama port + 1).
-    #[arg(long = "web-port")]
-    web_port: Option<u16>,
-
-    /// Dump raw llama-server output to a debug log file
-    #[arg(long = "debug")]
-    debug: Option<String>,
-
-    /// Extra args passed through to llama-server
-    #[arg(last = true)]
-    extra_args: Vec<String>,
+/// Scope tracks which section of the toml gets written by a setting flag.
+/// Sticky: once `--this` is seen, subsequent value flags update the active
+/// model's overrides; `--global` flips back. Default is `Global` so plain
+/// `lui --temp 0.6` keeps behaving as it did before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    Global,
+    This,
 }
+
+struct RunOpts {
+    list: bool,
+    debug: Option<String>,
+}
+
+const HELP: &str = "\
+lui — a friendly TUI wrapper for llama.cpp's llama-server
+
+USAGE:
+    lui [OPTIONS] [-- <EXTRA_LLAMA_ARGS>...]
+
+MODEL (identity — always global):
+    -m, --model <PATH>         Local GGUF model file
+        --hf <REPO[:QUANT]>    HuggingFace repo (e.g. Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M)
+
+SCOPE (sticky; defaults to --global):
+        --global               Subsequent settings update [server] (the global defaults)
+        --this, --local        Subsequent settings update [models.\"<active-model>\"] only
+    Scope toggles may appear multiple times. Example:
+        lui --temp 0.6 --this --temp 0.2       # global=0.6, this model=0.2
+
+SETTINGS (scoped; pass `default` as the value to clear a per-scope override):
+    -c, --ctx-size <N>         Context window (0 = model default)
+        --ngl, --gpu-layers <N>    GPU layers (-1 = all)
+        --temp <F>             Sampling temperature
+        --top-p <F>            Top-p (nucleus)
+        --top-k <N>            Top-k
+        --min-p <F>            Min-p
+        --ub, --ubatch-size <N>      Physical batch size (llama-server -ub)
+        --batch-size <N>       Logical batch size (llama-server -b)
+        --np, --parallel <N>         Server slots (llama-server -np)
+        --tb, --threads-batch <N>    Prompt/batch threads (llama-server -tb)
+        --ctk, --cache-type-k <T>    KV cache key type (f16, q8_0, ...)
+        --ctv, --cache-type-v <T>    KV cache value type
+        --swa-full                   Force --swa-full on
+        --no-swa-full                Force --swa-full off (disables auto-detect)
+        --cache-ram <MIB>            Host-memory prompt cache (llama-server --cache-ram)
+        --prio-batch <0-3>           Batch thread priority
+
+MACHINE SETTINGS (always global; rejected with --this):
+        --port <N>             Server port (default 8080)
+        --public               Bind 0.0.0.0 instead of 127.0.0.1
+        --websearch            Enable lui's local web-search endpoint
+        --no-websearch         Disable and remove its opencode skill
+        --web-port <N>         Port for the local web-search endpoint (default: llama port + 1)
+
+OTHER:
+    -l, --list                 List cached models and show current config
+        --debug <PATH>         Dump raw llama-server output to a file
+    -h, --help                 Show this help
+
+Pass-through (`--`):
+    Everything after `--` is appended to llama-server's argv. The pass-through
+    list is scoped too: `lui --this -- --some-llama-flag` appends to the active
+    model's extra_args; without --this, it appends to the global list.
+";
+
+/// Parse argv, mutating `config` in place and returning per-run options.
+/// We walk the args in order and track a scope cursor — that's the whole
+/// point of not using clap. Anything that can fail the user's intent
+/// (e.g. `--this --port 9`, or `--this` with no model) is reported
+/// and exits cleanly so we don't silently write a bogus toml.
+fn parse_args(config: &mut LuiConfig) -> RunOpts {
+    use lexopt::prelude::*;
+
+    let mut parser = lexopt::Parser::from_env();
+    let mut scope = Scope::Global;
+    let mut list = false;
+    let mut debug: Option<String> = None;
+
+    // Active model key: the one that per-model scoped settings write into.
+    // Seeded from the loaded config so `lui --this --temp 0.3` works with
+    // no `-m`/`--hf` on the command line, and updated whenever `-m` or `--hf`
+    // is seen so chains like `--hf X --this --temp 0.3` write to X.
+    let mut active_key: Option<String> = {
+        let k = derive_model_name(&config.server);
+        if k == "unknown" { None } else { Some(k) }
+    };
+
+    // Extra-args replacement tracking: if the user passes ANY extra args for
+    // a scope in this invocation, those replace the stored list for that
+    // scope. We can't just push-into config.server.extra_args because that
+    // would grow the list across runs. None = untouched (keep stored); Some
+    // = replace with these.
+    let mut new_global_extras: Option<Vec<String>> = None;
+    let mut new_model_extras: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
+    loop {
+        let arg = match parser.next() {
+            Ok(Some(a)) => a,
+            Ok(None) => break,
+            Err(e) => die(&format!("{}", e)),
+        };
+        match arg {
+            Short('h') | Long("help") => {
+                print!("{}", HELP);
+                std::process::exit(0);
+            }
+            Long("global") => scope = Scope::Global,
+            Long("this") | Long("local") => scope = Scope::This,
+
+            Short('m') | Long("model") => {
+                let v = take_string(&mut parser, "--model");
+                config.server.model = v;
+                config.server.hf_repo.clear();
+                active_key = Some(derive_model_name(&config.server));
+            }
+            Long("hf") => {
+                let v = take_string(&mut parser, "--hf");
+                config.server.hf_repo = v;
+                config.server.model.clear();
+                active_key = Some(derive_model_name(&config.server));
+            }
+
+            Short('c') | Long("ctx-size") => {
+                match take_scalar::<u32>(&mut parser, "--ctx-size") {
+                    Some(v) => apply_u32(config, scope, &active_key, "ctx-size", Some(v)),
+                    None => apply_u32(config, scope, &active_key, "ctx-size", None),
+                }
+            }
+            Long("ngl") | Long("gpu-layers") => {
+                match take_scalar::<i32>(&mut parser, "--gpu-layers") {
+                    Some(v) => apply_i32(config, scope, &active_key, "gpu-layers", Some(v)),
+                    None => apply_i32(config, scope, &active_key, "gpu-layers", None),
+                }
+            }
+            Long("temp") => set_temp(config, scope, &active_key, take_scalar::<f32>(&mut parser, "--temp")),
+            Long("top-p") => set_top_p(config, scope, &active_key, take_scalar::<f32>(&mut parser, "--top-p")),
+            Long("top-k") => set_top_k(config, scope, &active_key, take_scalar::<i32>(&mut parser, "--top-k")),
+            Long("min-p") => set_min_p(config, scope, &active_key, take_scalar::<f32>(&mut parser, "--min-p")),
+
+            Long("ubatch-size") | Long("ub") => {
+                let v = take_scalar::<u32>(&mut parser, "--ubatch-size");
+                set_ubatch(config, scope, &active_key, v);
+            }
+            Long("batch-size") => {
+                let v = take_scalar::<u32>(&mut parser, "--batch-size");
+                set_batch(config, scope, &active_key, v);
+            }
+            Long("parallel") | Long("np") => {
+                let v = take_scalar::<i32>(&mut parser, "--parallel");
+                set_parallel(config, scope, &active_key, v);
+            }
+            Long("threads-batch") | Long("tb") => {
+                let v = take_scalar::<i32>(&mut parser, "--threads-batch");
+                set_tb(config, scope, &active_key, v);
+            }
+            Long("cache-type-k") | Long("ctk") => {
+                let v = take_string_or_default(&mut parser, "--cache-type-k");
+                set_ctk(config, scope, &active_key, v);
+            }
+            Long("cache-type-v") | Long("ctv") => {
+                let v = take_string_or_default(&mut parser, "--cache-type-v");
+                set_ctv(config, scope, &active_key, v);
+            }
+            Long("swa-full") => set_swa(config, scope, &active_key, Some(true)),
+            Long("no-swa-full") => set_swa(config, scope, &active_key, Some(false)),
+            Long("cache-ram") => {
+                let v = take_scalar::<u32>(&mut parser, "--cache-ram");
+                set_cache_ram(config, scope, &active_key, v);
+            }
+            Long("prio-batch") => {
+                let v = take_scalar::<i32>(&mut parser, "--prio-batch");
+                set_prio(config, scope, &active_key, v);
+            }
+
+            // Machine-only settings: reject --this so the user doesn't
+            // silently write a key that resolve() will ignore.
+            Long("port") => {
+                require_global(scope, "--port");
+                config.server.port = take_scalar::<u16>(&mut parser, "--port")
+                    .unwrap_or_else(|| die("--port requires a number"));
+            }
+            Long("public") => {
+                require_global(scope, "--public");
+                config.server.host = "0.0.0.0".to_string();
+            }
+            Long("no-websearch") => {
+                require_global(scope, "--no-websearch");
+                config.server.websearch_disabled = true;
+            }
+            Long("websearch") => {
+                require_global(scope, "--websearch");
+                config.server.websearch_disabled = false;
+            }
+            Long("web-port") => {
+                require_global(scope, "--web-port");
+                config.server.web_port = take_scalar::<u16>(&mut parser, "--web-port");
+            }
+
+            Short('l') | Long("list") => list = true,
+            Long("debug") => {
+                debug = Some(take_string(&mut parser, "--debug"));
+            }
+
+            // After `--`, lexopt hands us remaining argv as Value items.
+            // Scope is frozen at whatever it was at that moment (shell
+            // semantics: `--` stops flag parsing), so you *cannot* flip
+            // scope inside the passthrough — which is the right call,
+            // since a literal `--global` intended for llama-server would
+            // be ambiguous otherwise.
+            Value(v) => {
+                let s = os_into_string(v, "extra arg");
+                match scope {
+                    Scope::Global => {
+                        new_global_extras.get_or_insert_with(Vec::new).push(s);
+                    }
+                    Scope::This => {
+                        let key = active_key.clone().unwrap_or_else(|| {
+                            die("--this (for pass-through args) requires an active model; pass --hf or -m first")
+                        });
+                        new_model_extras.entry(key).or_default().push(s);
+                    }
+                }
+            }
+
+            other => die(&format!("unknown argument: {}", other.unexpected())),
+        }
+    }
+
+    if let Some(v) = new_global_extras {
+        config.server.extra_args = v;
+    }
+    for (k, v) in new_model_extras {
+        config.models.entry(k).or_default().extra_args = v;
+    }
+
+    RunOpts { list, debug }
+}
+
+fn die(msg: &str) -> ! {
+    eprintln!("lui: {}", msg);
+    std::process::exit(2);
+}
+
+fn require_global(scope: Scope, flag: &str) {
+    if scope == Scope::This {
+        die(&format!("{} is a machine-wide setting and can't be scoped to --this", flag));
+    }
+}
+
+fn os_into_string(v: OsString, what: &str) -> String {
+    v.into_string().unwrap_or_else(|_| die(&format!("non-UTF8 {}", what)))
+}
+
+fn take_string(parser: &mut lexopt::Parser, flag: &str) -> String {
+    let v = parser.value().unwrap_or_else(|_| die(&format!("{} requires a value", flag)));
+    os_into_string(v, flag)
+}
+
+/// Accept either a concrete value or the literal word `default`, which
+/// clears the override at the current scope. Returns None for "default".
+/// Used by scalar-typed settings (numbers) — the scope handler decides
+/// what None means for the global (usually: clear to llama-server default).
+fn take_scalar<T: std::str::FromStr>(parser: &mut lexopt::Parser, flag: &str) -> Option<T>
+where
+    T::Err: std::fmt::Display,
+{
+    let raw = take_string(parser, flag);
+    if raw == "default" {
+        return None;
+    }
+    match raw.parse::<T>() {
+        Ok(v) => Some(v),
+        Err(e) => die(&format!("{} value {:?} isn't valid: {}", flag, raw, e)),
+    }
+}
+
+/// String-valued settings: "default" clears, anything else is the value.
+fn take_string_or_default(parser: &mut lexopt::Parser, flag: &str) -> Option<String> {
+    let raw = take_string(parser, flag);
+    if raw == "default" { None } else { Some(raw) }
+}
+
+// --- Scope-aware setters. Each one handles a single field for both scopes.
+// Pattern: for per-model overrides, None means "clear" and we prune with
+// save_config; for global, None means "revert to llama-server default"
+// (i.e. set Option<T> fields to None, or the sentinel 0 / -1 for the two
+// fields that still use plain integers).
+
+fn require_active_model(key: &Option<String>, flag: &str) -> String {
+    key.clone().unwrap_or_else(|| {
+        die(&format!("--this {} requires an active model; pass --hf or -m first", flag))
+    })
+}
+
+fn apply_u32(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, flag: &str, v: Option<u32>) {
+    match (scope, flag) {
+        (Scope::Global, "ctx-size") => cfg.server.ctx_size = v.unwrap_or(0),
+        (Scope::This, "ctx-size") => {
+            let k = require_active_model(key, flag);
+            cfg.models.entry(k).or_default().ctx_size = v;
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn apply_i32(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, flag: &str, v: Option<i32>) {
+    match (scope, flag) {
+        (Scope::Global, "gpu-layers") => cfg.server.gpu_layers = v.unwrap_or(-1),
+        (Scope::This, "gpu-layers") => {
+            let k = require_active_model(key, flag);
+            cfg.models.entry(k).or_default().gpu_layers = v;
+        }
+        _ => unreachable!(),
+    }
+}
+
+// The rest are mechanical — one per Option field. Kept as individual
+// setters (rather than a macro) because there are only 12 of them and
+// readable code is nicer to grep than macro-expanded code.
+fn set_temp(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<f32>) {
+    match scope {
+        Scope::Global => cfg.server.temp = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--temp")).or_default().temp = v,
+    }
+}
+fn set_top_p(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<f32>) {
+    match scope {
+        Scope::Global => cfg.server.top_p = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--top-p")).or_default().top_p = v,
+    }
+}
+fn set_top_k(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<i32>) {
+    match scope {
+        Scope::Global => cfg.server.top_k = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--top-k")).or_default().top_k = v,
+    }
+}
+fn set_min_p(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<f32>) {
+    match scope {
+        Scope::Global => cfg.server.min_p = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--min-p")).or_default().min_p = v,
+    }
+}
+fn set_ubatch(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<u32>) {
+    match scope {
+        Scope::Global => cfg.server.ubatch_size = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--ubatch-size")).or_default().ubatch_size = v,
+    }
+}
+fn set_batch(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<u32>) {
+    match scope {
+        Scope::Global => cfg.server.batch_size = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--batch-size")).or_default().batch_size = v,
+    }
+}
+fn set_parallel(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<i32>) {
+    match scope {
+        Scope::Global => cfg.server.parallel = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--parallel")).or_default().parallel = v,
+    }
+}
+fn set_tb(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<i32>) {
+    match scope {
+        Scope::Global => cfg.server.threads_batch = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--threads-batch")).or_default().threads_batch = v,
+    }
+}
+fn set_ctk(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<String>) {
+    match scope {
+        Scope::Global => cfg.server.cache_type_k = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--cache-type-k")).or_default().cache_type_k = v,
+    }
+}
+fn set_ctv(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<String>) {
+    match scope {
+        Scope::Global => cfg.server.cache_type_v = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--cache-type-v")).or_default().cache_type_v = v,
+    }
+}
+fn set_swa(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<bool>) {
+    match scope {
+        Scope::Global => cfg.server.swa_full = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--swa-full")).or_default().swa_full = v,
+    }
+}
+fn set_cache_ram(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<u32>) {
+    match scope {
+        Scope::Global => cfg.server.cache_ram = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--cache-ram")).or_default().cache_ram = v,
+    }
+}
+fn set_prio(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<i32>) {
+    match scope {
+        Scope::Global => cfg.server.prio_batch = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--prio-batch")).or_default().prio_batch = v,
+    }
+}
+
 
 struct CachedModel {
     repo: String,
@@ -490,6 +780,72 @@ fn print_current_config() {
     print_setting("Prio batch", &pb_str, "--prio-batch <0-3>", s.prio_batch.is_none());
 
     let _ = crossterm::execute!(stdout, Print("\n"));
+
+    // Per-model overrides. Grouped by model so the relationship between
+    // [models."Foo"] in the toml and the values here is obvious. The
+    // currently-active model's header gets highlighted.
+    if !config.models.is_empty() {
+        let active = derive_model_name(s);
+        let _ = crossterm::execute!(
+            stdout,
+            SetForegroundColor(lavender),
+            SetAttribute(Attribute::Bold),
+            Print("  Per-model overrides\n\n"),
+            SetAttribute(Attribute::Reset),
+            ResetColor,
+        );
+        for (name, ov) in &config.models {
+            let is_active = name == &active;
+            let _ = crossterm::execute!(
+                stdout,
+                Print("  "),
+                SetForegroundColor(if is_active { Color::Cyan } else { Color::DarkGrey }),
+                SetAttribute(Attribute::Bold),
+                Print(if is_active {
+                    format!("{} (active)", name)
+                } else {
+                    name.clone()
+                }),
+                SetAttribute(Attribute::Reset),
+                ResetColor,
+                Print("\n"),
+            );
+            let mut print_kv = |label: &str, val: String| {
+                let _ = crossterm::execute!(
+                    stdout,
+                    Print("      "),
+                    SetForegroundColor(muted),
+                    Print("· "),
+                    SetForegroundColor(lavender),
+                    Print(label),
+                    Print("  "),
+                    SetForegroundColor(Color::Cyan),
+                    Print(val),
+                    ResetColor,
+                    Print("\n"),
+                );
+            };
+            if let Some(v) = ov.ctx_size { print_kv("Context", v.to_string()); }
+            if let Some(v) = ov.gpu_layers { print_kv("GPU layers", v.to_string()); }
+            if let Some(v) = ov.temp { print_kv("Temperature", v.to_string()); }
+            if let Some(v) = ov.top_p { print_kv("Top-p", v.to_string()); }
+            if let Some(v) = ov.top_k { print_kv("Top-k", v.to_string()); }
+            if let Some(v) = ov.min_p { print_kv("Min-p", v.to_string()); }
+            if let Some(v) = ov.ubatch_size { print_kv("Ubatch", v.to_string()); }
+            if let Some(v) = ov.batch_size { print_kv("Batch", v.to_string()); }
+            if let Some(v) = ov.parallel { print_kv("Parallel slots", v.to_string()); }
+            if let Some(v) = ov.threads_batch { print_kv("Threads-batch", v.to_string()); }
+            if let Some(v) = &ov.cache_type_k { print_kv("KV type (K)", v.clone()); }
+            if let Some(v) = &ov.cache_type_v { print_kv("KV type (V)", v.clone()); }
+            if let Some(v) = ov.swa_full { print_kv("SWA full", if v { "on".into() } else { "off".into() }); }
+            if let Some(v) = ov.cache_ram { print_kv("Cache RAM", format!("{} MiB", v)); }
+            if let Some(v) = ov.prio_batch { print_kv("Prio batch", v.to_string()); }
+            if !ov.extra_args.is_empty() {
+                print_kv("Extra args (append)", ov.extra_args.join(" "));
+            }
+        }
+        let _ = crossterm::execute!(stdout, Print("\n"));
+    }
 }
 
 fn list_cached_models() {
@@ -600,89 +956,17 @@ fn list_cached_models() {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    // Load stored config, then walk argv in order to apply CLI edits
+    // (including scope toggles). parse_args mutates `config` directly; at
+    // this point `config` reflects the user's persisted intent.
+    let mut config = load_config();
+    let opts = parse_args(&mut config);
 
-    // Handle --list
-    if cli.list {
+    // Handle --list after the CLI has been applied but before any model
+    // validation, so `lui -l` works even with an empty config.
+    if opts.list {
         list_cached_models();
         return;
-    }
-
-    // Load config
-    let mut config = load_config();
-
-    // Apply CLI overrides
-    if let Some(model) = cli.model {
-        config.server.model = model;
-        config.server.hf_repo.clear();
-    }
-    if let Some(hf) = cli.hf {
-        config.server.hf_repo = hf;
-        config.server.model.clear();
-    }
-    if let Some(ctx) = cli.ctx_size {
-        config.server.ctx_size = ctx;
-    }
-    if let Some(ngl) = cli.gpu_layers {
-        config.server.gpu_layers = ngl;
-    }
-    if let Some(port) = cli.port {
-        config.server.port = port;
-    }
-    if cli.public {
-        config.server.host = "0.0.0.0".to_string();
-    }
-    if let Some(temp) = cli.temp {
-        config.server.temp = Some(temp);
-    }
-    if let Some(top_p) = cli.top_p {
-        config.server.top_p = Some(top_p);
-    }
-    if let Some(top_k) = cli.top_k {
-        config.server.top_k = Some(top_k);
-    }
-    if let Some(min_p) = cli.min_p {
-        config.server.min_p = Some(min_p);
-    }
-    if let Some(v) = cli.ubatch_size {
-        config.server.ubatch_size = Some(v);
-    }
-    if let Some(v) = cli.batch_size {
-        config.server.batch_size = Some(v);
-    }
-    if let Some(v) = cli.parallel {
-        config.server.parallel = Some(v);
-    }
-    if let Some(v) = cli.threads_batch {
-        config.server.threads_batch = Some(v);
-    }
-    if let Some(v) = cli.cache_type_k {
-        config.server.cache_type_k = Some(v);
-    }
-    if let Some(v) = cli.cache_type_v {
-        config.server.cache_type_v = Some(v);
-    }
-    if cli.swa_full {
-        config.server.swa_full = Some(true);
-    } else if cli.no_swa_full {
-        config.server.swa_full = Some(false);
-    }
-    if let Some(v) = cli.cache_ram {
-        config.server.cache_ram = Some(v);
-    }
-    if let Some(v) = cli.prio_batch {
-        config.server.prio_batch = Some(v);
-    }
-    if !cli.extra_args.is_empty() {
-        config.server.extra_args = cli.extra_args;
-    }
-    if cli.no_websearch {
-        config.server.websearch_disabled = true;
-    } else if cli.websearch {
-        config.server.websearch_disabled = false;
-    }
-    if let Some(p) = cli.web_port {
-        config.server.web_port = Some(p);
     }
 
     // Validate we have a model
@@ -694,9 +978,12 @@ async fn main() {
     // Save config (stores user intent only; auto-detected values are resolved below).
     save_config(&config);
 
+    // Fold per-model overrides on top of the global server config to get
+    // the flattened config that actually drives llama-server.
+    let mut effective = resolve(&config);
+
     // Resolve --swa-full when the user hasn't made an explicit choice.
     // Stored as None in TOML so we re-detect next run if the model changes.
-    let mut effective = config.server.clone();
     if effective.swa_full.is_none() {
         if let Some(path) = locate_gguf(&effective) {
             if let Ok(meta) = gguf::read_gguf_metadata(&path) {
@@ -730,7 +1017,7 @@ async fn main() {
     };
 
     // Spawn llama-server
-    let mut proc = match spawn_server(&effective, cli.debug.as_deref()) {
+    let mut proc = match spawn_server(&effective, opts.debug.as_deref()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error: {}", e);

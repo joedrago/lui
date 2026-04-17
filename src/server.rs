@@ -130,6 +130,10 @@ pub fn build_args(config: &ServerConfig) -> Vec<String> {
     args.push(config.port.to_string());
     args.push("--metrics".to_string());
     args.push("--jinja".to_string());
+    // Keep prior assistant <think> blocks in the rebuilt prompt on models whose
+    // template honors this (Qwen3.6+); ignored by templates that don't reference it.
+    args.push("--chat-template-kwargs".to_string());
+    args.push(r#"{"preserve_thinking":true}"#.to_string());
     args.push("--log-colors".to_string());
     args.push("off".to_string());
     args.push("-v".to_string());
