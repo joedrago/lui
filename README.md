@@ -16,11 +16,11 @@ Example first runs:
 
 ```
 lui --hf unsloth/GLM-4.7-Flash-GGUF:Q4_K_M
-lui --hf unsloth/GLM-4.7-Flash-GGUF:Q4_K_M -c 131072
+lui --hf unsloth/GLM-4.7-Flash-GGUF:Q4_K_M --this -c 131072
 
 lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
-lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M -c 131072
-lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M -c 131072 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
+lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --this -c 131072
+lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --this -c 131072 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
 ```
 
 lui will show download progress bars, start `llama-server`, configure opencode, and print **Ready** once the model is loaded.
