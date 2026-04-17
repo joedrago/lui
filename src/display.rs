@@ -13,7 +13,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, DisableLineWrap, EnableLineWrap},
 };
 
-use crate::config::{ServerConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL};
+use crate::config::{websearch_port, ServerConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL};
 use crate::server::ServerState;
 
 const RENDER_INTERVAL_MS: u64 = 250;
@@ -427,8 +427,10 @@ impl Display {
         );
         t.newline();
 
-        // Web search activity (only shown once the user has made at least one).
-        if st.websearch_total > 0 || st.websearch_active > 0 {
+        // Web search panel — always shown when websearch is enabled, so the
+        // setup URL is discoverable before the first search (the bookmarklet
+        // must be installed before searches will work).
+        if !self.config.websearch_disabled {
             let _ = queue!(
                 t.stdout,
                 Print("  "),
@@ -445,6 +447,8 @@ impl Display {
                 ResetColor
             );
             t.newline();
+            let setup_url = format!("setup: http://127.0.0.1:{}/setup", websearch_port(&self.config));
+            self.print_sub(&mut t, &setup_url);
             if !st.websearch_last_query.is_empty() {
                 let q = format!("last: \"{}\"", st.websearch_last_query);
                 self.print_sub(&mut t, &q);

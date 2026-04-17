@@ -17,8 +17,6 @@ dirs = "6"
 regex = "1"
 portable-pty = "0.8"
 axum = "0.7"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
-scraper = "0.20"
 urlencoding = "2"
 
 [profile.release]

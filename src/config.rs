@@ -374,24 +374,27 @@ pub fn update_websearch_skill(config: &ServerConfig) {
     let body = format!(
         r#"---
 name: lui-web-search
-description: Search the web via lui's local search endpoint. Use whenever the user asks to search the web, look up current information, or find documentation online. Returns JSON results with title, url, and snippet.
+description: Search the web via lui's browser-mediated search endpoint. Use whenever the user asks to search the web, look up current information, or find documentation online. Returns JSON results with title, url, and snippet.
 license: BSD-2-Clause
 ---
 
 # lui-web-search
 
-lui runs a small local HTTP server that performs web searches for you.
-No API keys required; the server scrapes a public search frontend and
-returns structured results.
+lui's search endpoint opens a Google search tab in the user's real
+browser. The user clicks a one-time-installed `lui-grab` bookmarklet on
+the resulting page; the bookmarklet POSTs the rendered results back to
+lui, which returns them to you.
 
 ## Endpoint
 
 ```
-GET http://127.0.0.1:{port}/search?q=<URL-ENCODED QUERY>&n=<COUNT>
+GET http://127.0.0.1:{port}/bsearch?q=<URL-ENCODED QUERY>
 ```
 
 - `q` (required): the search query. URL-encode it.
-- `n` (optional, default 10, max 25): how many results to return.
+
+The request **blocks for up to 120 seconds** while waiting for the
+user to click the bookmarklet. On timeout you'll get HTTP 504.
 
 ## Response
 
@@ -403,30 +406,28 @@ JSON array of objects:
 ]
 ```
 
-A 4xx/5xx response or an empty array means the search failed or produced
-no results — say so plainly rather than fabricating answers.
+An HTTP 504 means the user did not click the bookmarklet in time
+(probably they were AFK or the browser tab got buried). Other 4xx/5xx
+or an empty array means the search failed — say so plainly rather than
+fabricating answers.
 
 ## How to invoke
 
-Use `curl` directly. On Linux/macOS:
-
 ```sh
-curl -sG 'http://127.0.0.1:{port}/search' \
-  --data-urlencode 'q=rust async traits 2026' \
-  --data-urlencode 'n=8'
+curl -sG 'http://127.0.0.1:{port}/bsearch' \
+  --data-urlencode 'q=rust async traits 2026'
 ```
 
-On Windows (PowerShell), `curl.exe` is built in:
+On Windows (PowerShell):
 
 ```powershell
 $q = [uri]::EscapeDataString('rust async traits 2026')
-curl.exe -s "http://127.0.0.1:{port}/search?q=$q&n=8"
+curl.exe -s "http://127.0.0.1:{port}/bsearch?q=$q"
 ```
 
-The response is a JSON array of `{{title, url, snippet}}` objects. Read it,
-then write your answer to the user as normal prose with markdown links.
-Do not paste the raw JSON back into the chat. If you need the body of a
-specific page, fetch that page separately.
+Read the JSON, then write your answer as normal prose with markdown
+links. Do not paste the raw JSON back into the chat. If you need the
+body of a specific page, fetch that page separately.
 
 ## When to use
 
@@ -436,6 +437,28 @@ specific page, fetch that page separately.
 
 Do not use this for fetching content from a URL the user already gave
 you — just fetch that URL directly.
+
+## Important: this requires user action
+
+Each call pops a browser tab the user must click on. Before invoking
+this for the first time in a conversation, **tell the user what's about
+to happen** so they can be ready, e.g.:
+
+> "I'm going to search the web for that. When I do, a Google tab will
+> open in your browser — click the **lui-grab** bookmarklet on it. If
+> you haven't installed lui-grab yet, visit
+> `http://127.0.0.1:{port}/setup` and drag it to your bookmarks bar
+> first. (This URL is also shown in the lui status panel.)"
+
+Then call `/bsearch` and wait. If the call returns HTTP 504, the user
+didn't click in time — most likely they don't have the bookmarklet
+installed yet. Stop, point them at the setup page, wait for them to
+say it's ready, then retry.
+
+Be deliberate about when to search:
+- One search at a time. Do not fire parallel searches.
+- Pick the best query first instead of iterating with small variations.
+- Don't search for things you already know.
 "#
     );
 
