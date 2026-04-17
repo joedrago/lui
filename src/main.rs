@@ -11,8 +11,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use config::{
-    config_path, load_config, model_key, resolve, save_config, update_opencode_config,
-    update_websearch_skill, websearch_port, LuiConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
+    config_path, load_config, model_key, resolve, resolve_alias, save_config,
+    update_opencode_config, update_websearch_skill, websearch_port, LuiConfig,
+    DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
 };
 use display::Display;
 use server::spawn_server;
@@ -48,7 +49,8 @@ USAGE:
 
 MODEL (identity — always global):
     -m, --model <PATH>             Local GGUF model file
-        --hf <REPO[:QUANT]>        HuggingFace repo (e.g. Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M)
+        --hf <REPO[:QUANT]>        HuggingFace repo (or alias)
+        --alias <NAME[=REPO]>      Create a shorthand alias for --hf
 
 SCOPE (sticky; defaults to --global):
         --global                   Subsequent settings update [server] (the global defaults)
@@ -139,15 +141,44 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
 
             Short('m') | Long("model") => {
                 let v = take_string(&mut parser, "--model");
-                config.server.model = v;
-                config.server.hf_repo.clear();
+                let resolved = resolve_alias(config, &v);
+                if resolved != v {
+                    // Alias hit: the target is an HF repo, not a local path.
+                    config.server.hf_repo = resolved;
+                    config.server.model.clear();
+                } else {
+                    config.server.model = v;
+                    config.server.hf_repo.clear();
+                }
                 active_key = model_key(&config.server);
             }
             Long("hf") => {
                 let v = take_string(&mut parser, "--hf");
+                let v = resolve_alias(config, &v);
                 config.server.hf_repo = v;
                 config.server.model.clear();
                 active_key = model_key(&config.server);
+            }
+
+            Long("alias") => {
+                let v = take_string(&mut parser, "--alias");
+                if let Some((name, target)) = v.split_once('=') {
+                    // Explicit: --alias qwen=unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
+                    if name.is_empty() || name.contains('/') {
+                        die("--alias name must be a bare word (no '/')");
+                    }
+                    config.aliases.insert(name.to_string(), target.to_string());
+                } else {
+                    // Shorthand: --alias qwen (uses current --hf value)
+                    if v.is_empty() || v.contains('/') {
+                        die("--alias name must be a bare word (no '/')");
+                    }
+                    let target = config.server.hf_repo.clone();
+                    if target.is_empty() {
+                        die("--alias requires an active --hf model; pass --hf first or use --alias name=repo");
+                    }
+                    config.aliases.insert(v, target);
+                }
             }
 
             Short('c') | Long("ctx-size") => {
@@ -883,6 +914,35 @@ fn print_current_config() {
             if !ov.extra_args.is_empty() {
                 print_kv("Extra args (append)", ov.extra_args.join(" "));
             }
+        }
+        let _ = crossterm::execute!(stdout, Print("\n"));
+    }
+
+    // Aliases
+    if !config.aliases.is_empty() {
+        let _ = crossterm::execute!(
+            stdout,
+            SetForegroundColor(lavender),
+            SetAttribute(Attribute::Bold),
+            Print("  Aliases\n\n"),
+            SetAttribute(Attribute::Reset),
+            ResetColor,
+        );
+        for (name, target) in &config.aliases {
+            let _ = crossterm::execute!(
+                stdout,
+                Print("    "),
+                SetForegroundColor(Color::Cyan),
+                SetAttribute(Attribute::Bold),
+                Print(name),
+                SetAttribute(Attribute::Reset),
+                SetForegroundColor(Color::DarkGrey),
+                Print(" → "),
+                SetForegroundColor(lavender),
+                Print(target),
+                ResetColor,
+                Print("\n"),
+            );
         }
         let _ = crossterm::execute!(stdout, Print("\n"));
     }

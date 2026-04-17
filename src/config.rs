@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuiConfig {
     pub server: ServerConfig,
+    // Short aliases for long --hf strings. e.g. qwen = "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M"
+    // When --hf receives a bare word (no '/'), it checks here first.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases: BTreeMap<String, String>,
     // Per-model overrides keyed by the short model name produced by
     // `derive_model_name` (same name shown in `lui -l`). Anything present
     // here wins over the matching field in `[server]` when that model is
@@ -245,6 +249,7 @@ impl Default for LuiConfig {
     fn default() -> Self {
         LuiConfig {
             server: ServerConfig::default(),
+            aliases: BTreeMap::new(),
             models: BTreeMap::new(),
         }
     }
@@ -412,6 +417,24 @@ pub fn save_config(config: &LuiConfig) {
         out.push('\n');
     }
 
+    // Aliases section, if any.
+    if !to_write.aliases.is_empty() {
+        #[derive(Serialize)]
+        struct AliasesOnly<'a> {
+            aliases: &'a BTreeMap<String, String>,
+        }
+        match toml::to_string_pretty(&AliasesOnly {
+            aliases: &to_write.aliases,
+        }) {
+            Ok(s) => {
+                out.push('\n');
+                out.push_str(s.trim_end());
+                out.push('\n');
+            }
+            Err(e) => eprintln!("Warning: failed to serialize aliases: {}", e),
+        }
+    }
+
     // Non-empty model sections next, alphabetical. Serializing each one
     // through a single-entry map gives us toml's own key-quoting for free.
     #[derive(Serialize)]
@@ -470,6 +493,17 @@ fn toml_quote_key(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// If `name` doesn't contain '/' it might be an alias. Returns the
+/// resolved full string, or the original name unchanged.
+pub fn resolve_alias(config: &LuiConfig, name: &str) -> String {
+    if !name.contains('/') {
+        if let Some(full) = config.aliases.get(name) {
+            return full.clone();
+        }
+    }
+    name.to_string()
 }
 
 /// The identity string used to key per-model overrides. Deliberately the
