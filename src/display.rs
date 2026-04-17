@@ -167,11 +167,14 @@ impl Display {
 
         let mut t = TermBuf::new(&mut stdout, width, term_height);
 
-        // Header
+        // Header: "  ── lui ── llama.cpp ui ─────────"
+        // Width math is in display *columns*, not bytes — `─` is 3 bytes but
+        // 1 column, so using .len() on strings containing it under-counts.
         let left = "  ── ";
         let mid_text = "lui";
         let right_text = " ── llama.cpp ui ";
-        let right_fill = width.saturating_sub(left.len() + mid_text.len() + right_text.len());
+        let prefix_cols = left.chars().count() + mid_text.chars().count() + right_text.chars().count();
+        let right_fill = width.saturating_sub(prefix_cols);
         let _ = queue!(
             t.stdout,
             SetForegroundColor(MUTED_PURPLE),
@@ -240,6 +243,20 @@ impl Display {
             return;
         }
 
+        // Blank line below the header doubles as the always-visible home of
+        // the websearch setup URL, right-aligned in gray. Discoverable before
+        // the first search without needing its own row later.
+        if !self.config.websearch_disabled {
+            let url = format!("http://127.0.0.1:{}/setup", websearch_port(&self.config));
+            let pad = width.saturating_sub(url.chars().count());
+            let _ = queue!(
+                t.stdout,
+                Print(" ".repeat(pad)),
+                SetForegroundColor(Color::DarkGrey),
+                Print(&url),
+                ResetColor
+            );
+        }
         t.newline();
 
         // Memory
@@ -394,7 +411,12 @@ impl Display {
 
         // Performance section
         t.newline();
-        let perf_header = format!("  ── Performance {}", "─".repeat(width.saturating_sub(18)));
+        let perf_prefix = "  ── Performance ";
+        let perf_header = format!(
+            "{}{}",
+            perf_prefix,
+            "─".repeat(width.saturating_sub(perf_prefix.chars().count()))
+        );
         let _ = queue!(
             t.stdout,
             SetForegroundColor(MUTED_PURPLE),
@@ -410,177 +432,79 @@ impl Display {
             self.print_tps(&mut t, "Generate", st.last_gen_tps, st.avg_gen_tps);
         }
 
+        // Blank line separates the static perf stats above from the
+        // potentially-in-flight sections (WebSearch, Requests) below.
+        t.newline();
+
+        // WebSearch first: parallel layout to Requests. Setup URL lives on
+        // the blank line below the header now; here we just show counts.
+        if !self.config.websearch_disabled {
+            let _ = queue!(
+                t.stdout,
+                Print("  "),
+                SetForegroundColor(MUTED_PURPLE),
+                Print("WebSearch: "),
+                SetForegroundColor(COLOR_NUMBER),
+                Print(format!("{:>4}", st.websearch_total)),
+                SetForegroundColor(Color::White),
+                Print(" total · "),
+                SetForegroundColor(COLOR_NUMBER),
+                Print(format!("{:>4}", st.active_searches.len())),
+                SetForegroundColor(Color::White),
+                Print(" active"),
+                ResetColor
+            );
+            t.newline();
+        }
+
+        // Requests: one-line summary with cache-health counts as further
+        // dot-separated stats. Non-zero `reproc` or `invalidated` mean the
+        // prompt cache isn't being reused turn-to-turn — the smoking gun for
+        // "why did it get slow at long context".
         let _ = queue!(
             t.stdout,
             Print("  "),
             SetForegroundColor(MUTED_PURPLE),
             Print("Requests : "),
             SetForegroundColor(COLOR_NUMBER),
-            Print(format!("{}", st.request_count)),
+            Print(format!("{:>4}", st.request_count)),
             SetForegroundColor(Color::White),
             Print(" total · "),
             SetForegroundColor(COLOR_NUMBER),
-            Print(format!("{}", st.active_requests)),
+            Print(format!("{:>4}", st.active_requests)),
             SetForegroundColor(Color::White),
-            Print(" active"),
+            Print(" active · "),
+            SetForegroundColor(COLOR_NUMBER),
+            Print(format!("{:>4}", st.full_reprocess_count)),
+            SetForegroundColor(Color::White),
+            Print(" reproc · "),
+            SetForegroundColor(COLOR_NUMBER),
+            Print(format!("{:>4}", st.invalidated_checkpoint_count)),
+            SetForegroundColor(Color::White),
+            Print(" invalidated"),
             ResetColor
         );
         t.newline();
-
-        // Web search panel — always shown when websearch is enabled, so the
-        // setup URL is discoverable before the first search (the bookmarklet
-        // must be installed before searches will work).
-        if !self.config.websearch_disabled {
-            let _ = queue!(
-                t.stdout,
-                Print("  "),
-                SetForegroundColor(MUTED_PURPLE),
-                Print("Search   : "),
-                SetForegroundColor(COLOR_NUMBER),
-                Print(format!("{}", st.websearch_total)),
-                SetForegroundColor(Color::White),
-                Print(" total · "),
-                SetForegroundColor(COLOR_NUMBER),
-                Print(format!("{}", st.websearch_active)),
-                SetForegroundColor(Color::White),
-                Print(" active"),
-                ResetColor
-            );
-            t.newline();
-            let setup_url = format!("setup: http://127.0.0.1:{}/setup", websearch_port(&self.config));
-            self.print_sub(&mut t, &setup_url);
-            if !st.websearch_last_query.is_empty() {
-                let q = format!("last: \"{}\"", st.websearch_last_query);
-                self.print_sub(&mut t, &q);
-            }
-        }
-
-        // Cache health: only render when something has gone wrong. Any non-zero
-        // count means llama-server redid the whole prefill at least once -
-        // the smoking gun for "why did it get slow at long context".
-        if st.full_reprocess_count > 0 || st.invalidated_checkpoint_count > 0 {
-            let warn_color = Color::Rgb {
-                r: 255,
-                g: 170,
-                b: 80,
-            };
-            let _ = queue!(
-                t.stdout,
-                Print("  "),
-                SetForegroundColor(MUTED_PURPLE),
-                Print("Cache    : "),
-                SetForegroundColor(warn_color),
-                Print(format!("{}", st.full_reprocess_count)),
-                SetForegroundColor(Color::White),
-                Print(" full reprocess · "),
-                SetForegroundColor(warn_color),
-                Print(format!("{}", st.invalidated_checkpoint_count)),
-                SetForegroundColor(Color::White),
-                Print(" invalidated checkpoints"),
-                ResetColor
-            );
+        if !st.active_slots.is_empty() || !st.active_searches.is_empty() {
             t.newline();
         }
 
-        if st.prompt_tps_samples == 0 && st.gen_tps_samples == 0 {
-            let _ = queue!(
-                t.stdout,
-                Print("    "),
-                SetForegroundColor(Color::DarkGrey),
-                Print("No requests yet"),
-                ResetColor
-            );
-            t.newline();
-        }
-
-        // Active slots
         for slot in st.active_slots.values() {
-            let _ = queue!(t.stdout, Print("    "), SetForegroundColor(COLOR_NUMBER));
-            if slot.n_tokens == 0 {
-                let desc = format!("● slot {} starting...", slot.slot_id);
-                let _ = queue!(
-                    t.stdout,
-                    Print(truncate(&desc, t.width.saturating_sub(4))),
-                    ResetColor
-                );
-            } else if slot.progress > 0.0 && slot.progress < 1.0 {
-                // Still prefilling: show a little progress bar.
-                let head = format!(
-                    "● slot {} prefilling {} tokens  ",
-                    slot.slot_id, slot.n_tokens
-                );
-                let pct = (slot.progress * 100.0).round() as u32;
-                // ETA uses a quadratic model: elapsed ∝ progress². Attention
-                // cost per prefilled token grows with prompt position, so the
-                // last 30% of progress takes roughly as long as the first 70%.
-                // A linear extrapolation pins at a stale value; the windowed-
-                // rate approach also underestimates because it doesn't account
-                // for future batches being slower than current. Quadratic is a
-                // decent first-principles fit for attention-dominated prefill
-                // on long prompts, and it monotonically decreases.
-                let eta_str = slot
-                    .processing_started
-                    .and_then(|started| {
-                        let p = slot.progress as f64;
-                        // Wait until 20% progress - the quadratic model is
-                        // noisy early on, but stabilizes well past this point.
-                        if p > 0.20 {
-                            let elapsed = started.elapsed().as_secs_f64();
-                            let remaining = elapsed * (1.0 / (p * p) - 1.0);
-                            Some(format!(" · {} left", format_eta(remaining)))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
-                let pct_str = format!(" {:>3}%{}", pct, eta_str);
-                let bar_space = t
-                    .width
-                    .saturating_sub(4 + head.chars().count() + pct_str.chars().count());
-                let bar_width = bar_space.min(30);
-                if bar_width >= 4 {
-                    let filled = ((slot.progress as f64) * bar_width as f64).round() as usize;
-                    let filled = filled.min(bar_width);
-                    let empty = bar_width - filled;
-                    let _ = queue!(
-                        t.stdout,
-                        Print(&head),
-                        SetForegroundColor(LAVENDER),
-                        Print("█".repeat(filled)),
-                        SetForegroundColor(MUTED_PURPLE),
-                        Print("░".repeat(empty)),
-                        SetForegroundColor(COLOR_NUMBER),
-                        Print(pct_str),
-                        ResetColor
-                    );
-                } else {
-                    // Not enough room for a bar; fall back to plain line.
-                    let desc = format!(
-                        "● slot {} prefilling {} tokens ({}%{})",
-                        slot.slot_id, slot.n_tokens, pct, eta_str
-                    );
-                    let _ = queue!(
-                        t.stdout,
-                        Print(truncate(&desc, t.width.saturating_sub(4))),
-                        ResetColor
-                    );
-                }
-            } else {
-                // Prefill done (or unknown): generating tokens.
-                let desc = format!(
-                    "● slot {} generating ({} tokens prompt)",
-                    slot.slot_id, slot.n_tokens
-                );
-                let _ = queue!(
-                    t.stdout,
-                    Print(truncate(&desc, t.width.saturating_sub(4))),
-                    ResetColor
-                );
-            }
+            self.render_active_slot(&mut t, slot);
+        }
+
+        for query in st.active_searches.values() {
+            let desc = format!("● websearch: {}", query);
+            let _ = queue!(
+                t.stdout,
+                Print("             "),
+                SetForegroundColor(COLOR_NUMBER),
+                Print(truncate(&desc, t.width.saturating_sub(13))),
+                ResetColor
+            );
             t.newline();
         }
 
-        // Recent completed
         for slot in st.recent_completed.iter().rev() {
             let time_str = if slot.total_time_ms > 0.0 {
                 format!(" in {:.1}s", slot.total_time_ms / 1000.0)
@@ -598,9 +522,9 @@ impl Display {
             );
             let _ = queue!(
                 t.stdout,
-                Print("    "),
+                Print("             "),
                 SetForegroundColor(Color::DarkGrey),
-                Print(truncate(&desc, t.width.saturating_sub(4))),
+                Print(truncate(&desc, t.width.saturating_sub(13))),
                 ResetColor
             );
             t.newline();
@@ -644,6 +568,83 @@ impl Display {
         t.newline();
     }
 
+    fn render_active_slot(&self, t: &mut TermBuf, slot: &crate::server::SlotInfo) {
+        // Indent 13 to align with the KV value column under "Requests : ".
+        let _ = queue!(t.stdout, Print("             "), SetForegroundColor(COLOR_NUMBER));
+        if slot.n_tokens == 0 {
+            let desc = format!("● slot {} starting...", slot.slot_id);
+            let _ = queue!(
+                t.stdout,
+                Print(truncate(&desc, t.width.saturating_sub(13))),
+                ResetColor
+            );
+        } else if slot.progress > 0.0 && slot.progress < 1.0 {
+            let head = format!(
+                "● slot {} prefilling {} tokens  ",
+                slot.slot_id, slot.n_tokens
+            );
+            let pct = (slot.progress * 100.0).round() as u32;
+            // ETA uses a quadratic model: elapsed ∝ progress². Attention
+            // cost per prefilled token grows with prompt position, so the
+            // last 30% of progress takes roughly as long as the first 70%.
+            let eta_str = slot
+                .processing_started
+                .and_then(|started| {
+                    let p = slot.progress as f64;
+                    if p > 0.20 {
+                        let elapsed = started.elapsed().as_secs_f64();
+                        let remaining = elapsed * (1.0 / (p * p) - 1.0);
+                        Some(format!(" · {} left", format_eta(remaining)))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            let pct_str = format!(" {:>3}%{}", pct, eta_str);
+            let bar_space = t
+                .width
+                .saturating_sub(13 + head.chars().count() + pct_str.chars().count());
+            let bar_width = bar_space.min(30);
+            if bar_width >= 4 {
+                let filled = ((slot.progress as f64) * bar_width as f64).round() as usize;
+                let filled = filled.min(bar_width);
+                let empty = bar_width - filled;
+                let _ = queue!(
+                    t.stdout,
+                    Print(&head),
+                    SetForegroundColor(LAVENDER),
+                    Print("█".repeat(filled)),
+                    SetForegroundColor(MUTED_PURPLE),
+                    Print("░".repeat(empty)),
+                    SetForegroundColor(COLOR_NUMBER),
+                    Print(pct_str),
+                    ResetColor
+                );
+            } else {
+                let desc = format!(
+                    "● slot {} prefilling {} tokens ({}%{})",
+                    slot.slot_id, slot.n_tokens, pct, eta_str
+                );
+                let _ = queue!(
+                    t.stdout,
+                    Print(truncate(&desc, t.width.saturating_sub(13))),
+                    ResetColor
+                );
+            }
+        } else {
+            let desc = format!(
+                "● slot {} generating ({} tokens prompt)",
+                slot.slot_id, slot.n_tokens
+            );
+            let _ = queue!(
+                t.stdout,
+                Print(truncate(&desc, t.width.saturating_sub(13))),
+                ResetColor
+            );
+        }
+        t.newline();
+    }
+
     fn print_sub(&self, t: &mut TermBuf, value: &str) {
         let prefix_len = 17;
         let max_val = t.width.saturating_sub(prefix_len);
@@ -674,7 +675,12 @@ impl Display {
     }
 
     fn render_log(&self, st: &ServerState, t: &mut TermBuf) {
-        let log_header = format!("  ── Server Log {}", "─".repeat(t.width.saturating_sub(17)));
+        let log_prefix = "  ── Server Log ";
+        let log_header = format!(
+            "{}{}",
+            log_prefix,
+            "─".repeat(t.width.saturating_sub(log_prefix.chars().count()))
+        );
         let _ = queue!(
             t.stdout,
             SetForegroundColor(MUTED_PURPLE),

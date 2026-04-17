@@ -95,10 +95,12 @@ pub struct ServerState {
     // after print_summary renders the reason.
     pub fatal_reason: Option<String>,
 
-    // Web search tracking (local /search endpoint; see src/websearch.rs)
-    pub websearch_active: u32,
+    // Web search tracking (local /bsearch endpoint; see src/websearch.rs).
+    // `active_searches` holds one entry per in-flight search, keyed by the
+    // request id; the display iterates values() to render them as sub-lines
+    // under the WebSearch KV. Active count is just `.len()`.
     pub websearch_total: u64,
-    pub websearch_last_query: String,
+    pub active_searches: HashMap<String, String>,
 }
 
 impl ServerState {

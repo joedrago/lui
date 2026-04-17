@@ -183,9 +183,8 @@ async fn handle_bsearch(
 
     {
         let mut st = state.server_state.lock().unwrap();
-        st.websearch_active += 1;
         st.websearch_total += 1;
-        st.websearch_last_query = query.clone();
+        st.active_searches.insert(id.clone(), query.clone());
     }
 
     let google_url = format!(
@@ -195,8 +194,7 @@ async fn handle_bsearch(
     );
     if let Err(e) = open_in_browser(&google_url) {
         state.pending.lock().unwrap().remove(&id);
-        let mut st = state.server_state.lock().unwrap();
-        st.websearch_active = st.websearch_active.saturating_sub(1);
+        state.server_state.lock().unwrap().active_searches.remove(&id);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to open browser: {}", e),
@@ -205,10 +203,7 @@ async fn handle_bsearch(
 
     let outcome = tokio::time::timeout(BSEARCH_TIMEOUT, rx).await;
 
-    {
-        let mut st = state.server_state.lock().unwrap();
-        st.websearch_active = st.websearch_active.saturating_sub(1);
-    }
+    state.server_state.lock().unwrap().active_searches.remove(&id);
 
     match outcome {
         Ok(Ok(results)) => Ok(Json(results)),
