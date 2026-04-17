@@ -30,8 +30,16 @@ enum Scope {
 struct RunOpts {
     list: bool,
     debug: Option<String>,
+    // Dry-run: print the fully-resolved llama-server command line and exit
+    // without spawning. Useful for "what would this actually run?" debugging
+    // after a chain of --global / --this edits plus SWA auto-detection.
+    cmd: bool,
 }
 
+// Descriptions all start at column 36 so the right-hand column is aligned
+// across every row. The widest entry is `--tb, --threads-batch <N>` at 33
+// chars incl. its 8-space indent; column 36 leaves 2 spaces of breathing
+// room after that longest row, and more on every shorter row.
 const HELP: &str = "\
 lui — a friendly TUI wrapper for llama.cpp's llama-server
 
@@ -39,44 +47,46 @@ USAGE:
     lui [OPTIONS] [-- <EXTRA_LLAMA_ARGS>...]
 
 MODEL (identity — always global):
-    -m, --model <PATH>         Local GGUF model file
-        --hf <REPO[:QUANT]>    HuggingFace repo (e.g. Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M)
+    -m, --model <PATH>             Local GGUF model file
+        --hf <REPO[:QUANT]>        HuggingFace repo (e.g. Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M)
 
 SCOPE (sticky; defaults to --global):
-        --global               Subsequent settings update [server] (the global defaults)
-        --this, --local        Subsequent settings update [models.\"<active-model>\"] only
+        --global                   Subsequent settings update [server] (the global defaults)
+        --this, --local            Subsequent settings update [models.\"<active-model>\"] only
+
     Scope toggles may appear multiple times. Example:
         lui --temp 0.6 --this --temp 0.2       # global=0.6, this model=0.2
 
 SETTINGS (scoped; pass `default` as the value to clear a per-scope override):
-    -c, --ctx-size <N>         Context window (0 = model default)
+    -c, --ctx-size <N>             Context window (0 = model default)
         --ngl, --gpu-layers <N>    GPU layers (-1 = all)
-        --temp <F>             Sampling temperature
-        --top-p <F>            Top-p (nucleus)
-        --top-k <N>            Top-k
-        --min-p <F>            Min-p
-        --ub, --ubatch-size <N>      Physical batch size (llama-server -ub)
-        --batch-size <N>       Logical batch size (llama-server -b)
-        --np, --parallel <N>         Server slots (llama-server -np)
-        --tb, --threads-batch <N>    Prompt/batch threads (llama-server -tb)
-        --ctk, --cache-type-k <T>    KV cache key type (f16, q8_0, ...)
-        --ctv, --cache-type-v <T>    KV cache value type
-        --swa-full                   Force --swa-full on
-        --no-swa-full                Force --swa-full off (disables auto-detect)
-        --cache-ram <MIB>            Host-memory prompt cache (llama-server --cache-ram)
-        --prio-batch <0-3>           Batch thread priority
+        --temp <F>                 Sampling temperature
+        --top-p <F>                Top-p (nucleus)
+        --top-k <N>                Top-k
+        --min-p <F>                Min-p
+        --ub, --ubatch-size <N>    Physical batch size (llama-server -ub)
+        --batch-size <N>           Logical batch size (llama-server -b)
+        --np, --parallel <N>       Server slots (llama-server -np)
+        --tb, --threads-batch <N>  Prompt/batch threads (llama-server -tb)
+        --ctk, --cache-type-k <T>  KV cache key type (f16, q8_0, ...)
+        --ctv, --cache-type-v <T>  KV cache value type
+        --swa-full                 Force --swa-full on
+        --no-swa-full              Force --swa-full off (disables auto-detect)
+        --cache-ram <MIB>          Host-memory prompt cache (llama-server --cache-ram)
+        --prio-batch <0-3>         Batch thread priority
 
 MACHINE SETTINGS (always global; rejected with --this):
-        --port <N>             Server port (default 8080)
-        --public               Bind 0.0.0.0 instead of 127.0.0.1
-        --websearch            Enable lui's local web-search endpoint
-        --no-websearch         Disable and remove its opencode skill
-        --web-port <N>         Port for the local web-search endpoint (default: llama port + 1)
+        --port <N>                 Server port (default 8080)
+        --public                   Bind 0.0.0.0 instead of 127.0.0.1
+        --websearch                Enable lui's local web-search endpoint
+        --no-websearch             Disable and remove its opencode skill
+        --web-port <N>             Port for the local web-search endpoint (default: llama port + 1)
 
 OTHER:
-    -l, --list                 List cached models and show current config
-        --debug <PATH>         Dump raw llama-server output to a file
-    -h, --help                 Show this help
+    -l, --list                     List cached models and show current config
+        --cmd                      Print the resolved llama-server command and exit
+        --debug <PATH>             Dump raw llama-server output to a file
+    -h, --help                     Show this help
 
 Pass-through (`--`):
     Everything after `--` is appended to llama-server's argv. The pass-through
@@ -96,6 +106,7 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
     let mut scope = Scope::Global;
     let mut list = false;
     let mut debug: Option<String> = None;
+    let mut cmd = false;
 
     // Active model key: the one that per-model scoped settings write into.
     // Seeded from the loaded config so `lui --this --temp 0.3` works with
@@ -219,6 +230,7 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
             }
 
             Short('l') | Long("list") => list = true,
+            Long("cmd") => cmd = true,
             Long("debug") => {
                 debug = Some(take_string(&mut parser, "--debug"));
             }
@@ -255,7 +267,32 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
         config.models.entry(k).or_default().extra_args = v;
     }
 
-    RunOpts { list, debug }
+    RunOpts { list, debug, cmd }
+}
+
+/// Minimal POSIX-style shell quoting for `--cmd` output, so the printed
+/// line is directly copy-pasteable. Bare if the arg is strictly
+/// alphanum/`-._/:=,+`; otherwise single-quoted with embedded single quotes
+/// escaped as `'\''`. Good enough for the llama-server args we emit
+/// (notably the JSON kwargs blob, which contains braces and quotes).
+fn shell_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | ',' | '+'));
+    if safe {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 fn die(msg: &str) -> ! {
@@ -993,6 +1030,22 @@ async fn main() {
                 }
             }
         }
+    }
+
+    // --cmd: print the fully-resolved llama-server invocation and exit.
+    // Placed after SWA auto-detect so the printed line matches what we'd
+    // actually launch, but BEFORE any side effects (opencode config,
+    // websearch skill, brew check, spawning) — a dry run shouldn't mutate
+    // anything outside lui.toml (which save_config already handled above).
+    if opts.cmd {
+        let args = server::build_args(&effective);
+        let mut line = String::from("llama-server");
+        for a in &args {
+            line.push(' ');
+            line.push_str(&shell_quote(a));
+        }
+        println!("{}", line);
+        return;
     }
 
     // Update opencode config

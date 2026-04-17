@@ -54,6 +54,12 @@ pub struct ModelOverrides {
     pub cache_ram: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prio_batch: Option<i32>,
+    // Merged into the global chat_template_kwargs at resolve time (not
+    // last-wins replace). See the note on ServerConfig::chat_template_kwargs.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub chat_template_kwargs: std::collections::BTreeMap<String, toml::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chat_template_kwargs_drop: Vec<String>,
     // Model-specific extra args append to the global ones at resolve time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_args: Vec<String>,
@@ -78,6 +84,8 @@ impl ModelOverrides {
             && self.swa_full.is_none()
             && self.cache_ram.is_none()
             && self.prio_batch.is_none()
+            && self.chat_template_kwargs.is_empty()
+            && self.chat_template_kwargs_drop.is_empty()
             && self.extra_args.is_empty()
     }
 }
@@ -125,6 +133,18 @@ pub struct ServerConfig {
     pub cache_ram: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prio_batch: Option<i32>,
+
+    // Chat-template kwargs are merge-semantics, not last-wins: llama-server's
+    // --chat-template-kwargs takes a single JSON object, so passing the flag
+    // twice just replaces the earlier value. We store an explicit map here
+    // (global) and on each ModelOverrides (per-model). resolve() seeds a
+    // code-level default (`preserve_thinking: true`), then layers global on
+    // top, then per-model, applying the matching `_drop` list at each layer.
+    // Emitted as exactly one `--chat-template-kwargs <json>` from build_args.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub chat_template_kwargs: std::collections::BTreeMap<String, toml::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chat_template_kwargs_drop: Vec<String>,
 
     #[serde(default)]
     pub extra_args: Vec<String>,
@@ -185,11 +205,26 @@ impl Default for ServerConfig {
             swa_full: None,
             cache_ram: None,
             prio_batch: None,
+            chat_template_kwargs: std::collections::BTreeMap::new(),
+            chat_template_kwargs_drop: Vec::new(),
             extra_args: Vec::new(),
             websearch_disabled: false,
             web_port: None,
         }
     }
+}
+
+/// Keys lui seeds into chat_template_kwargs before any user merging. Kept
+/// in code (not toml) so the default survives a user-written global map —
+/// the toml only sees keys the user explicitly set.
+///
+/// preserve_thinking=true: keeps prior assistant <think> blocks in the
+/// rebuilt prompt on templates that honor the flag (Qwen3.6+); ignored by
+/// templates that don't reference it.
+fn default_chat_template_kwargs() -> std::collections::BTreeMap<String, toml::Value> {
+    let mut m = std::collections::BTreeMap::new();
+    m.insert("preserve_thinking".to_string(), toml::Value::Boolean(true));
+    m
 }
 
 /// Resolve the port the local websearch HTTP server binds to.
@@ -214,8 +249,37 @@ impl Default for LuiConfig {
 /// parse — the active key only stabilizes once -m / --hf have been applied.
 pub fn resolve(config: &LuiConfig) -> ServerConfig {
     let mut effective = config.server.clone();
+
+    // Build the final chat-template kwargs map up front, since it has its
+    // own layered merge/drop semantics that don't match the rest of the
+    // "per-model Some() wins" fields. Layer order: code default → global
+    // map → global drops → per-model map → per-model drops. Write the
+    // result back into effective.chat_template_kwargs; the drop list stays
+    // on the stored config (so it round-trips on save) but is only consulted
+    // here during resolution.
     let key = derive_model_name(&effective);
-    let Some(ov) = config.models.get(&key) else {
+    let per_model = config.models.get(&key);
+    let mut kwargs = default_chat_template_kwargs();
+    for (k, v) in &config.server.chat_template_kwargs {
+        kwargs.insert(k.clone(), v.clone());
+    }
+    for k in &config.server.chat_template_kwargs_drop {
+        kwargs.remove(k);
+    }
+    if let Some(ov) = per_model {
+        for (k, v) in &ov.chat_template_kwargs {
+            kwargs.insert(k.clone(), v.clone());
+        }
+        for k in &ov.chat_template_kwargs_drop {
+            kwargs.remove(k);
+        }
+    }
+    effective.chat_template_kwargs = kwargs;
+    // Drop list only matters during resolve; clearing it on the effective
+    // config keeps build_args from having to know about it.
+    effective.chat_template_kwargs_drop.clear();
+
+    let Some(ov) = per_model else {
         return effective;
     };
     if let Some(v) = ov.ctx_size {
@@ -266,6 +330,7 @@ pub fn resolve(config: &LuiConfig) -> ServerConfig {
     // Append, not replace: globals tend to be machine-tuning (thread pins,
     // mlock) and per-model entries model-tuning; both should reach llama-server.
     effective.extra_args.extend(ov.extra_args.iter().cloned());
+
     effective
 }
 

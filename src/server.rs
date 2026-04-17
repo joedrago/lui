@@ -121,6 +121,45 @@ pub struct ServerProcess {
     _slave: Box<dyn portable_pty::SlavePty + Send>,
 }
 
+/// Convert a toml-valued map into a flat JSON object suitable for
+/// llama-server's --chat-template-kwargs. We only support the scalar +
+/// array + nested-table cases (which is everything jinja templates care
+/// about); datetimes — which JSON can't represent — get serialized as
+/// their RFC 3339 string form rather than erroring, since a user who
+/// types a datetime here almost certainly wants the string value in the
+/// template's render context anyway.
+fn toml_map_to_json_object(
+    map: &std::collections::BTreeMap<String, toml::Value>,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::with_capacity(map.len());
+    for (k, v) in map {
+        obj.insert(k.clone(), toml_value_to_json(v));
+    }
+    serde_json::Value::Object(obj)
+}
+
+fn toml_value_to_json(v: &toml::Value) -> serde_json::Value {
+    match v {
+        toml::Value::String(s) => serde_json::Value::String(s.clone()),
+        toml::Value::Integer(i) => serde_json::Value::Number((*i).into()),
+        toml::Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
+        toml::Value::Array(a) => {
+            serde_json::Value::Array(a.iter().map(toml_value_to_json).collect())
+        }
+        toml::Value::Table(t) => {
+            let mut obj = serde_json::Map::with_capacity(t.len());
+            for (k, v) in t {
+                obj.insert(k.clone(), toml_value_to_json(v));
+            }
+            serde_json::Value::Object(obj)
+        }
+    }
+}
+
 pub fn build_args(config: &ServerConfig) -> Vec<String> {
     let mut args = Vec::new();
 
@@ -130,10 +169,16 @@ pub fn build_args(config: &ServerConfig) -> Vec<String> {
     args.push(config.port.to_string());
     args.push("--metrics".to_string());
     args.push("--jinja".to_string());
-    // Keep prior assistant <think> blocks in the rebuilt prompt on models whose
-    // template honors this (Qwen3.6+); ignored by templates that don't reference it.
-    args.push("--chat-template-kwargs".to_string());
-    args.push(r#"{"preserve_thinking":true}"#.to_string());
+    // chat_template_kwargs is a merged map (see resolve() in config.rs for
+    // the layering). llama-server's --chat-template-kwargs is last-wins on
+    // the whole JSON object, so we emit it exactly once with the merged
+    // result. Omit entirely if the map is empty (e.g. user dropped the
+    // code default and didn't add anything), since passing `{}` is noise.
+    if !config.chat_template_kwargs.is_empty() {
+        let json = toml_map_to_json_object(&config.chat_template_kwargs);
+        args.push("--chat-template-kwargs".to_string());
+        args.push(json.to_string());
+    }
     args.push("--log-colors".to_string());
     args.push("off".to_string());
     args.push("-v".to_string());
