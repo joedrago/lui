@@ -9,16 +9,33 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuiConfig {
     pub server: ServerConfig,
-    // Short aliases for long --hf strings. e.g. qwen = "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M"
-    // When --hf receives a bare word (no '/'), it checks here first.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub aliases: BTreeMap<String, String>,
+    // Two typed alias pools. `hf` maps short names to HuggingFace repo
+    // strings (as passed to --hf); `model` maps short names to local
+    // GGUF paths (as passed to -m). Positional arguments (bare words
+    // before `--`) check both pools; the typed flags check only their
+    // own pool.
+    #[serde(default, skip_serializing_if = "AliasPools::is_empty")]
+    pub aliases: AliasPools,
     // Per-model overrides keyed by the short model name produced by
     // `derive_model_name` (same name shown in `lui -l`). Anything present
     // here wins over the matching field in `[server]` when that model is
     // the active one. Missing keys just mean "no model-specific tweaks."
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, ModelOverrides>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AliasPools {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hf: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model: BTreeMap<String, String>,
+}
+
+impl AliasPools {
+    pub fn is_empty(&self) -> bool {
+        self.hf.is_empty() && self.model.is_empty()
+    }
 }
 
 /// Per-model overrides. Only fields that actually vary with the model live
@@ -249,7 +266,7 @@ impl Default for LuiConfig {
     fn default() -> Self {
         LuiConfig {
             server: ServerConfig::default(),
-            aliases: BTreeMap::new(),
+            aliases: AliasPools::default(),
             models: BTreeMap::new(),
         }
     }
@@ -417,11 +434,12 @@ pub fn save_config(config: &LuiConfig) {
         out.push('\n');
     }
 
-    // Aliases section, if any.
+    // Aliases section, if any. Serializing the AliasPools struct directly
+    // makes toml emit [aliases.hf] and [aliases.model] sub-tables.
     if !to_write.aliases.is_empty() {
         #[derive(Serialize)]
         struct AliasesOnly<'a> {
-            aliases: &'a BTreeMap<String, String>,
+            aliases: &'a AliasPools,
         }
         match toml::to_string_pretty(&AliasesOnly {
             aliases: &to_write.aliases,
@@ -495,11 +513,28 @@ fn toml_quote_key(s: &str) -> String {
     out
 }
 
-/// If `name` doesn't contain '/' it might be an alias. Returns the
-/// resolved full string, or the original name unchanged.
-pub fn resolve_alias(config: &LuiConfig, name: &str) -> String {
+/// Resolve `name` via `[aliases.hf]`. If `name` looks like a real HF
+/// repo (contains '/') we never consult the pool — users can't shadow
+/// real repos. Returns the original string if no alias matches.
+pub fn resolve_hf_alias(config: &LuiConfig, name: &str) -> String {
     if !name.contains('/') {
-        if let Some(full) = config.aliases.get(name) {
+        if let Some(full) = config.aliases.hf.get(name) {
+            return full.clone();
+        }
+    }
+    name.to_string()
+}
+
+/// Resolve `name` via `[aliases.model]`. We treat anything path-shaped
+/// (contains '/', '\', or starts with '.'/'~') as a literal path and
+/// don't consult the pool, so users can't shadow real files.
+pub fn resolve_model_alias(config: &LuiConfig, name: &str) -> String {
+    let path_shaped = name.contains('/')
+        || name.contains('\\')
+        || name.starts_with('.')
+        || name.starts_with('~');
+    if !path_shaped {
+        if let Some(full) = config.aliases.model.get(name) {
             return full.clone();
         }
     }

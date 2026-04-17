@@ -11,8 +11,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use config::{
-    config_path, load_config, model_key, resolve, resolve_alias, save_config,
-    update_opencode_config, update_websearch_skill, websearch_port, LuiConfig,
+    config_path, load_config, model_key, resolve, resolve_hf_alias, resolve_model_alias,
+    save_config, update_opencode_config, update_websearch_skill, websearch_port, LuiConfig,
     DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
 };
 use display::Display;
@@ -48,9 +48,10 @@ USAGE:
     lui [OPTIONS] [-- <EXTRA_LLAMA_ARGS>...]
 
 MODEL (identity — always global):
-    -m, --model <PATH>             Local GGUF model file
-        --hf <REPO[:QUANT]>        HuggingFace repo (or alias)
-        --alias <NAME[=REPO]>      Create a shorthand alias for --hf
+    -m, --model <PATH>             Local GGUF path (or [aliases.model] name)
+        --hf <REPO[:QUANT]>        HuggingFace repo (or [aliases.hf] name)
+        <NAME>                     Bare positional: looks up either pool
+        --alias <NAME>             Alias current --hf or -m as NAME
 
 SCOPE (sticky; defaults to --global):
         --global                   Subsequent settings update [server] (the global defaults)
@@ -104,7 +105,32 @@ Pass-through (`--`):
 fn parse_args(config: &mut LuiConfig) -> RunOpts {
     use lexopt::prelude::*;
 
-    let mut parser = lexopt::Parser::from_env();
+    // Split argv at `--` so the lexopt loop below only ever sees pre-`--`
+    // args. That turns a `Value(v)` match into an unambiguous "bare
+    // positional", which we treat as an alias lookup. Everything after
+    // `--` bypasses lexopt entirely and lands in extras at the end.
+    let all: Vec<OsString> = std::env::args_os().collect();
+    let (pre_argv, post_argv): (Vec<OsString>, Vec<OsString>) = {
+        let mut iter = all.into_iter();
+        let prog = iter.next(); // program name
+        let mut pre: Vec<OsString> = prog.into_iter().collect();
+        let mut post: Vec<OsString> = Vec::new();
+        let mut in_post = false;
+        for a in iter {
+            if !in_post && a == "--" {
+                in_post = true;
+                continue;
+            }
+            if in_post {
+                post.push(a);
+            } else {
+                pre.push(a);
+            }
+        }
+        (pre, post)
+    };
+
+    let mut parser = lexopt::Parser::from_args(pre_argv.into_iter().skip(1));
     let mut scope = Scope::Global;
     let mut list = false;
     let mut debug: Option<String> = None;
@@ -141,43 +167,33 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
 
             Short('m') | Long("model") => {
                 let v = take_string(&mut parser, "--model");
-                let resolved = resolve_alias(config, &v);
-                if resolved != v {
-                    // Alias hit: the target is an HF repo, not a local path.
-                    config.server.hf_repo = resolved;
-                    config.server.model.clear();
-                } else {
-                    config.server.model = v;
-                    config.server.hf_repo.clear();
-                }
+                let v = resolve_model_alias(config, &v);
+                config.server.model = v;
+                config.server.hf_repo.clear();
                 active_key = model_key(&config.server);
             }
             Long("hf") => {
                 let v = take_string(&mut parser, "--hf");
-                let v = resolve_alias(config, &v);
+                let v = resolve_hf_alias(config, &v);
                 config.server.hf_repo = v;
                 config.server.model.clear();
                 active_key = model_key(&config.server);
             }
 
             Long("alias") => {
-                let v = take_string(&mut parser, "--alias");
-                if let Some((name, target)) = v.split_once('=') {
-                    // Explicit: --alias qwen=unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
-                    if name.is_empty() || name.contains('/') {
-                        die("--alias name must be a bare word (no '/')");
-                    }
-                    config.aliases.insert(name.to_string(), target.to_string());
+                let name = take_string(&mut parser, "--alias");
+                if name.is_empty() || name.contains('/') || name.contains('=') {
+                    die("--alias NAME must be a bare word (no '/' or '=')");
+                }
+                // Pool inferred from what's currently set:
+                //   hf_repo active → [aliases.hf]
+                //   model active   → [aliases.model]
+                if !config.server.hf_repo.is_empty() {
+                    config.aliases.hf.insert(name, config.server.hf_repo.clone());
+                } else if !config.server.model.is_empty() {
+                    config.aliases.model.insert(name, config.server.model.clone());
                 } else {
-                    // Shorthand: --alias qwen (uses current --hf value)
-                    if v.is_empty() || v.contains('/') {
-                        die("--alias name must be a bare word (no '/')");
-                    }
-                    let target = config.server.hf_repo.clone();
-                    if target.is_empty() {
-                        die("--alias requires an active --hf model; pass --hf first or use --alias name=repo");
-                    }
-                    config.aliases.insert(v, target);
+                    die("--alias requires an active model; pass --hf <repo> or -m <path> first");
                 }
             }
 
@@ -263,28 +279,52 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
                 debug = Some(take_string(&mut parser, "--debug"));
             }
 
-            // After `--`, lexopt hands us remaining argv as Value items.
-            // Scope is frozen at whatever it was at that moment (shell
-            // semantics: `--` stops flag parsing), so you *cannot* flip
-            // scope inside the passthrough — which is the right call,
-            // since a literal `--global` intended for llama-server would
-            // be ambiguous otherwise.
+            // Bare positional before `--`: must be an alias in either pool.
+            // We check both; an unknown name is a hard error so typos don't
+            // silently become llama-server passthrough args.
             Value(v) => {
-                let s = os_into_string(v, "extra arg");
-                match scope {
-                    Scope::Global => {
-                        new_global_extras.get_or_insert_with(Vec::new).push(s);
+                let s = os_into_string(v, "positional");
+                let hf_hit = config.aliases.hf.get(&s).cloned();
+                let model_hit = config.aliases.model.get(&s).cloned();
+                match (hf_hit, model_hit) {
+                    (Some(_), Some(_)) => {
+                        die(&format!("alias {:?} is defined in both [aliases.hf] and [aliases.model]; disambiguate with --hf {} or -m {}", s, s, s));
                     }
-                    Scope::This => {
-                        let key = active_key.clone().unwrap_or_else(|| {
-                            die("--this (for pass-through args) requires an active model; pass --hf or -m first")
-                        });
-                        new_model_extras.entry(key).or_default().push(s);
+                    (Some(target), None) => {
+                        config.server.hf_repo = target;
+                        config.server.model.clear();
+                        active_key = model_key(&config.server);
+                    }
+                    (None, Some(target)) => {
+                        config.server.model = target;
+                        config.server.hf_repo.clear();
+                        active_key = model_key(&config.server);
+                    }
+                    (None, None) => {
+                        die(&format!("unknown alias: {}", s));
                     }
                 }
             }
 
             other => die(&format!("unknown argument: {}", other.unexpected())),
+        }
+    }
+
+    // Anything after `--` is pure llama-server passthrough. Scope at the
+    // time the loop ended determines whether it appends to global or the
+    // active model's extras.
+    for a in post_argv {
+        let s = os_into_string(a, "extra arg");
+        match scope {
+            Scope::Global => {
+                new_global_extras.get_or_insert_with(Vec::new).push(s);
+            }
+            Scope::This => {
+                let key = active_key.clone().unwrap_or_else(|| {
+                    die("--this (for pass-through args) requires an active model; pass --hf or -m first")
+                });
+                new_model_extras.entry(key).or_default().push(s);
+            }
         }
     }
 
@@ -918,7 +958,8 @@ fn print_current_config() {
         let _ = crossterm::execute!(stdout, Print("\n"));
     }
 
-    // Aliases
+    // Aliases — split into the two pools so users can see which flag each
+    // alias resolves under. Positional `lui NAME` checks both pools.
     if !config.aliases.is_empty() {
         let _ = crossterm::execute!(
             stdout,
@@ -928,22 +969,37 @@ fn print_current_config() {
             SetAttribute(Attribute::Reset),
             ResetColor,
         );
-        for (name, target) in &config.aliases {
+        let mut print_pool = |label: &str, pool: &std::collections::BTreeMap<String, String>| {
+            if pool.is_empty() {
+                return;
+            }
             let _ = crossterm::execute!(
                 stdout,
                 Print("    "),
-                SetForegroundColor(Color::Cyan),
-                SetAttribute(Attribute::Bold),
-                Print(name),
-                SetAttribute(Attribute::Reset),
                 SetForegroundColor(Color::DarkGrey),
-                Print(" → "),
-                SetForegroundColor(lavender),
-                Print(target),
+                Print(label),
                 ResetColor,
                 Print("\n"),
             );
-        }
+            for (name, target) in pool {
+                let _ = crossterm::execute!(
+                    stdout,
+                    Print("      "),
+                    SetForegroundColor(Color::Cyan),
+                    SetAttribute(Attribute::Bold),
+                    Print(name),
+                    SetAttribute(Attribute::Reset),
+                    SetForegroundColor(Color::DarkGrey),
+                    Print(" → "),
+                    SetForegroundColor(lavender),
+                    Print(target),
+                    ResetColor,
+                    Print("\n"),
+                );
+            }
+        };
+        print_pool("[aliases.hf]", &config.aliases.hf);
+        print_pool("[aliases.model]", &config.aliases.model);
         let _ = crossterm::execute!(stdout, Print("\n"));
     }
 }
@@ -951,6 +1007,7 @@ fn print_current_config() {
 fn list_cached_models() {
     print_current_config();
 
+    let config = load_config();
     let models = scan_cached_models();
 
     if models.is_empty() {
@@ -1050,6 +1107,24 @@ fn list_cached_models() {
             Print(format!("lui --hf {}{}\n", model.repo, quant_suffix)),
             ResetColor,
         );
+
+        // Any [aliases.hf] entries that target this repo — show each as
+        // the terser positional form `lui <alias>`.
+        for (alias_name, alias_target) in &config.aliases.hf {
+            let target_repo = alias_target.split(':').next().unwrap_or(alias_target);
+            if target_repo == model.repo {
+                let _ = crossterm::execute!(
+                    stdout,
+                    Print("    "),
+                    SetForegroundColor(Color::DarkGrey),
+                    Print("lui "),
+                    SetForegroundColor(Color::Cyan),
+                    Print(alias_name),
+                    ResetColor,
+                    Print("\n"),
+                );
+            }
+        }
     }
     println!();
 }
