@@ -13,7 +13,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, DisableLineWrap, EnableLineWrap},
 };
 
-use crate::config::ServerConfig;
+use crate::config::{ServerConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL};
 use crate::server::ServerState;
 
 const RENDER_INTERVAL_MS: u64 = 250;
@@ -345,6 +345,11 @@ impl Display {
         };
         self.print_sub(&mut t, &ctx_display);
 
+        // Sampling (grey sub of Model) — only if any sampler was overridden.
+        if let Some(sampling) = format_sampling(&self.config) {
+            self.print_sub(&mut t, &sampling);
+        }
+
         // llamacpp + status
         let uptime = self.start_time.elapsed();
         let uptime_str = format_duration(uptime);
@@ -384,6 +389,9 @@ impl Display {
         let bind_display = format!("{}:{}", self.config.host, self.config.port);
         self.print_sub(&mut t, &bind_display);
 
+        // Tuning (grey sub-line under llamacpp) — effective performance knobs.
+        self.print_sub(&mut t, &format_tuning(&self.config));
+
         // Performance section
         t.newline();
         let perf_header = format!("  ── Performance {}", "─".repeat(width.saturating_sub(18)));
@@ -419,6 +427,33 @@ impl Display {
         );
         t.newline();
 
+        // Cache health: only render when something has gone wrong. Any non-zero
+        // count means llama-server redid the whole prefill at least once -
+        // the smoking gun for "why did it get slow at long context".
+        if st.full_reprocess_count > 0 || st.invalidated_checkpoint_count > 0 {
+            let warn_color = Color::Rgb {
+                r: 255,
+                g: 170,
+                b: 80,
+            };
+            let _ = queue!(
+                t.stdout,
+                Print("  "),
+                SetForegroundColor(MUTED_PURPLE),
+                Print("Cache    : "),
+                SetForegroundColor(warn_color),
+                Print(format!("{}", st.full_reprocess_count)),
+                SetForegroundColor(Color::White),
+                Print(" full reprocess · "),
+                SetForegroundColor(warn_color),
+                Print(format!("{}", st.invalidated_checkpoint_count)),
+                SetForegroundColor(Color::White),
+                Print(" invalidated checkpoints"),
+                ResetColor
+            );
+            t.newline();
+        }
+
         if st.prompt_tps_samples == 0 && st.gen_tps_samples == 0 {
             let _ = queue!(
                 t.stdout,
@@ -432,21 +467,88 @@ impl Display {
 
         // Active slots
         for slot in st.active_slots.values() {
-            let desc = if slot.n_tokens > 0 {
-                format!(
-                    "● slot {} processing {} tokens",
+            let _ = queue!(t.stdout, Print("    "), SetForegroundColor(COLOR_NUMBER));
+            if slot.n_tokens == 0 {
+                let desc = format!("● slot {} starting...", slot.slot_id);
+                let _ = queue!(
+                    t.stdout,
+                    Print(truncate(&desc, t.width.saturating_sub(4))),
+                    ResetColor
+                );
+            } else if slot.progress > 0.0 && slot.progress < 1.0 {
+                // Still prefilling: show a little progress bar.
+                let head = format!(
+                    "● slot {} prefilling {} tokens  ",
                     slot.slot_id, slot.n_tokens
-                )
+                );
+                let pct = (slot.progress * 100.0).round() as u32;
+                // ETA uses a quadratic model: elapsed ∝ progress². Attention
+                // cost per prefilled token grows with prompt position, so the
+                // last 30% of progress takes roughly as long as the first 70%.
+                // A linear extrapolation pins at a stale value; the windowed-
+                // rate approach also underestimates because it doesn't account
+                // for future batches being slower than current. Quadratic is a
+                // decent first-principles fit for attention-dominated prefill
+                // on long prompts, and it monotonically decreases.
+                let eta_str = slot
+                    .processing_started
+                    .and_then(|started| {
+                        let p = slot.progress as f64;
+                        // Wait until 20% progress - the quadratic model is
+                        // noisy early on, but stabilizes well past this point.
+                        if p > 0.20 {
+                            let elapsed = started.elapsed().as_secs_f64();
+                            let remaining = elapsed * (1.0 / (p * p) - 1.0);
+                            Some(format!(" · {} left", format_eta(remaining)))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                let pct_str = format!(" {:>3}%{}", pct, eta_str);
+                let bar_space = t
+                    .width
+                    .saturating_sub(4 + head.chars().count() + pct_str.chars().count());
+                let bar_width = bar_space.min(30);
+                if bar_width >= 4 {
+                    let filled = ((slot.progress as f64) * bar_width as f64).round() as usize;
+                    let filled = filled.min(bar_width);
+                    let empty = bar_width - filled;
+                    let _ = queue!(
+                        t.stdout,
+                        Print(&head),
+                        SetForegroundColor(LAVENDER),
+                        Print("█".repeat(filled)),
+                        SetForegroundColor(MUTED_PURPLE),
+                        Print("░".repeat(empty)),
+                        SetForegroundColor(COLOR_NUMBER),
+                        Print(pct_str),
+                        ResetColor
+                    );
+                } else {
+                    // Not enough room for a bar; fall back to plain line.
+                    let desc = format!(
+                        "● slot {} prefilling {} tokens ({}%{})",
+                        slot.slot_id, slot.n_tokens, pct, eta_str
+                    );
+                    let _ = queue!(
+                        t.stdout,
+                        Print(truncate(&desc, t.width.saturating_sub(4))),
+                        ResetColor
+                    );
+                }
             } else {
-                format!("● slot {} starting...", slot.slot_id)
-            };
-            let _ = queue!(
-                t.stdout,
-                Print("    "),
-                SetForegroundColor(COLOR_NUMBER),
-                Print(truncate(&desc, t.width.saturating_sub(4))),
-                ResetColor
-            );
+                // Prefill done (or unknown): generating tokens.
+                let desc = format!(
+                    "● slot {} generating ({} tokens prompt)",
+                    slot.slot_id, slot.n_tokens
+                );
+                let _ = queue!(
+                    t.stdout,
+                    Print(truncate(&desc, t.width.saturating_sub(4))),
+                    ResetColor
+                );
+            }
             t.newline();
         }
 
@@ -614,6 +716,42 @@ impl Display {
             Print("\n")
         );
 
+        // Fatal reason: lui aborted with a specific, actionable explanation
+        // (e.g. GPU VRAM oversubscribed at load time). Rendered prominently in
+        // red so it stands out from the generic "server exited" path below.
+        if let Some(ref reason) = st.fatal_reason {
+            let _ = execute!(
+                stdout,
+                Print("\n"),
+                SetForegroundColor(Color::Red),
+                SetAttribute(Attribute::Bold),
+                Print("  lui aborted: "),
+                SetAttribute(Attribute::Reset),
+                ResetColor,
+            );
+            for (i, line) in reason.lines().enumerate() {
+                if i == 0 {
+                    let _ = execute!(
+                        stdout,
+                        SetForegroundColor(Color::Red),
+                        Print(line),
+                        ResetColor,
+                        Print("\n"),
+                    );
+                } else {
+                    let _ = execute!(
+                        stdout,
+                        SetForegroundColor(Color::White),
+                        Print(line),
+                        ResetColor,
+                        Print("\n"),
+                    );
+                }
+            }
+            println!();
+            let _ = stdout.flush();
+            return;
+        }
         // Show exit message if the server exited unexpectedly (never became ready)
         if st.exited && !st.ready {
             let _ = execute!(
@@ -687,6 +825,83 @@ fn format_number(n: u64) -> String {
         result.push(c);
     }
     result.chars().rev().collect()
+}
+
+fn format_sampling(cfg: &ServerConfig) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = cfg.temp {
+        parts.push(format!("temp={}", v));
+    }
+    if let Some(v) = cfg.top_p {
+        parts.push(format!("top-p={}", v));
+    }
+    if let Some(v) = cfg.top_k {
+        parts.push(format!("top-k={}", v));
+    }
+    if let Some(v) = cfg.min_p {
+        parts.push(format!("min-p={}", v));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("sampling: {}", parts.join(" · ")))
+    }
+}
+
+fn format_tuning(cfg: &ServerConfig) -> String {
+    let np = cfg.parallel.unwrap_or(DEFAULT_PARALLEL);
+    let mut parts = vec![format!("np={}", np)];
+    if let Some(ub) = cfg.ubatch_size {
+        parts.push(format!("ubatch={}", ub));
+    }
+
+    let ctk = cfg.cache_type_k.as_deref().unwrap_or("f16");
+    let ctv = cfg.cache_type_v.as_deref().unwrap_or("f16");
+    if ctk != "f16" || ctv != "f16" {
+        parts.push(format!("KV={}/{}", ctk, ctv));
+    }
+    let default_b = cfg
+        .ubatch_size
+        .map(|ub| ub.max(DEFAULT_BATCH_SIZE))
+        .unwrap_or(DEFAULT_BATCH_SIZE);
+    parts.push(format!("batch={}", cfg.batch_size.unwrap_or(default_b)));
+    if let Some(v) = cfg.threads_batch {
+        parts.push(format!("tb={}", v));
+    }
+    if let Some(v) = cfg.cache_ram {
+        parts.push(format!("cache-ram={}MiB", v));
+    }
+    if let Some(v) = cfg.prio_batch {
+        parts.push(format!("prio-batch={}", v));
+    }
+    match cfg.swa_full {
+        Some(true) => parts.push("swa-full".to_string()),
+        Some(false) => parts.push("swa-full=off".to_string()),
+        None => {}
+    }
+    if !cfg.extra_args.is_empty() {
+        parts.push(format!("+{} extra", cfg.extra_args.len()));
+    }
+    parts.join(" · ")
+}
+
+fn format_eta(seconds: f64) -> String {
+    let s = seconds.round() as u64;
+    if s < 60 {
+        format!("{}s", s)
+    } else if s < 3600 {
+        let m = s / 60;
+        let sec = s % 60;
+        if m < 10 {
+            format!("{}m {:02}s", m, sec)
+        } else {
+            format!("{}m", m)
+        }
+    } else {
+        let h = s / 3600;
+        let m = (s % 3600) / 60;
+        format!("{}h {:02}m", h, m)
+    }
 }
 
 fn format_duration(d: Duration) -> String {

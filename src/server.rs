@@ -3,11 +3,12 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use regex::Regex;
 
-use crate::config::ServerConfig;
+use crate::config::{ServerConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL};
 
 const LOG_RING_SIZE: usize = 200;
 const MAX_RECENT_REQUESTS: usize = 3;
@@ -20,6 +21,16 @@ pub struct SlotInfo {
     pub gen_tps: f64,
     pub gen_tokens: u32,
     pub total_time_ms: f64,
+    // Prefill progress 0.0..1.0, from "prompt processing progress" lines.
+    // Reaches ~1.0 when prefill finishes and generation begins.
+    pub progress: f32,
+
+    // When the slot started processing. Used with the quadratic prefill model
+    // (elapsed ∝ progress²) to estimate remaining time. Attention cost per
+    // token scales with prompt position, so a linear elapsed/progress
+    // extrapolation is badly optimistic at long context - the last 30% of
+    // progress can take as long as the first 70%.
+    pub processing_started: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -64,6 +75,11 @@ pub struct ServerState {
     pub prompt_tps_samples: u64,
     pub gen_tps_samples: u64,
 
+    // Cache-health diagnostics. High counts = prompt cache not being reused
+    // turn-to-turn (the usual cause of "it got slow at long context").
+    pub full_reprocess_count: u64,
+    pub invalidated_checkpoint_count: u64,
+
     // Download progress: filename -> percentage
     pub downloads: HashMap<String, u32>,
 
@@ -73,6 +89,11 @@ pub struct ServerState {
     // Process exited?
     pub exited: bool,
     pub exit_message: String,
+
+    // Set when lui wants to abort with a specific, user-actionable explanation
+    // (e.g. GPU VRAM oversubscribed at load time). Causes main() to exit 1
+    // after print_summary renders the reason.
+    pub fatal_reason: Option<String>,
 }
 
 impl ServerState {
@@ -109,6 +130,21 @@ pub fn build_args(config: &ServerConfig) -> Vec<String> {
     args.push("on".to_string());
     args.push("--cache-reuse".to_string());
     args.push("256".to_string());
+    // Unified KV so slot contexts aren't silently partitioned at long ctx.
+    args.push("-kvu".to_string());
+
+    // Physical batch size is opt-in. llama-server's default (512) is safe for
+    // any context size; raising it speeds up prefill but inflates the compute
+    // buffer linearly and can OOM at long ctx on memory-tight GPUs.
+    if let Some(v) = config.ubatch_size {
+        args.push("-ub".to_string());
+        args.push(v.to_string());
+    }
+
+    // Single slot by default: a TUI has one conversation and wants the full
+    // context window held in one slot (no fragmentation, no slot-thrash).
+    args.push("-np".to_string());
+    args.push(config.parallel.unwrap_or(DEFAULT_PARALLEL).to_string());
 
     if !config.hf_repo.is_empty() {
         args.push("-hf".to_string());
@@ -126,6 +162,56 @@ pub fn build_args(config: &ServerConfig) -> Vec<String> {
     if config.gpu_layers != 0 {
         args.push("-ngl".to_string());
         args.push(config.gpu_layers.to_string());
+    }
+
+    if let Some(temp) = config.temp {
+        args.push("--temp".to_string());
+        args.push(temp.to_string());
+    }
+    if let Some(top_p) = config.top_p {
+        args.push("--top-p".to_string());
+        args.push(top_p.to_string());
+    }
+    if let Some(top_k) = config.top_k {
+        args.push("--top-k".to_string());
+        args.push(top_k.to_string());
+    }
+    if let Some(min_p) = config.min_p {
+        args.push("--min-p".to_string());
+        args.push(min_p.to_string());
+    }
+
+    // Logical batch: default to DEFAULT_BATCH_SIZE so prefill progress updates
+    // are granular. Floor at -ub so llama.cpp's n_batch >= n_ubatch check passes
+    // when the user has explicitly raised ubatch_size.
+    let default_b = match config.ubatch_size {
+        Some(ub) => ub.max(DEFAULT_BATCH_SIZE),
+        None => DEFAULT_BATCH_SIZE,
+    };
+    args.push("-b".to_string());
+    args.push(config.batch_size.unwrap_or(default_b).to_string());
+    if let Some(v) = config.threads_batch {
+        args.push("-tb".to_string());
+        args.push(v.to_string());
+    }
+    if let Some(ref v) = config.cache_type_k {
+        args.push("-ctk".to_string());
+        args.push(v.clone());
+    }
+    if let Some(ref v) = config.cache_type_v {
+        args.push("-ctv".to_string());
+        args.push(v.clone());
+    }
+    if config.swa_full == Some(true) {
+        args.push("--swa-full".to_string());
+    }
+    if let Some(v) = config.cache_ram {
+        args.push("--cache-ram".to_string());
+        args.push(v.to_string());
+    }
+    if let Some(v) = config.prio_batch {
+        args.push("--prio-batch".to_string());
+        args.push(v.to_string());
     }
 
     args.extend(config.extra_args.iter().cloned());
@@ -223,8 +309,7 @@ fn read_output_sync(
                     let raw = String::from_utf8_lossy(&buf).to_string();
                     let line = strip_ansi(&raw);
                     if let Some(f) = debug_file.as_mut() {
-                        let _ = writeln!(f, "RAW: {:?}", raw);
-                        let _ = writeln!(f, "STRIPPED: {}", line);
+                        let _ = writeln!(f, "{}", line);
                     }
                     if !line.is_empty() {
                         let mut st = state.lock().unwrap();
@@ -240,8 +325,7 @@ fn read_output_sync(
                         let raw = String::from_utf8_lossy(&buf).to_string();
                         let line = strip_ansi(&raw);
                         if let Some(f) = debug_file.as_mut() {
-                            let _ = writeln!(f, "RAW: {:?}", raw);
-                            let _ = writeln!(f, "STRIPPED: {}", line);
+                            let _ = writeln!(f, "{}", line);
                         }
                         if !line.is_empty() {
                             let mut st = state.lock().unwrap();
@@ -377,6 +461,33 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
             state.compute_buf_mib = mib;
         }
     }
+    // GPU memory breakdown. Format (whitespace varies):
+    //   "llama_memory_breakdown_print: |   - MTL0 (Apple M4 Max) |
+    //    28753 = 28690 + (28872 = 20583 + 5182 + 3106) + 17592186015607 |"
+    //      total   free     self   model   context   compute   unaccounted
+    // If self > total the GPU is already over budget at load time and the
+    // server will almost certainly crash later. Kill lui now with a clear
+    // explanation instead of letting the user discover it 60k tokens in.
+    else if line.contains("llama_memory_breakdown_print:") && !line.contains("CPU") {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        let re = RE.get_or_init(|| {
+            Regex::new(r"(\d+)\s*=\s*\d+\s*\+\s*\(\s*(\d+)\s*=").unwrap()
+        });
+        if let Some(caps) = re.captures(line) {
+            let total: u64 = caps[1].parse().unwrap_or(0);
+            let selfsz: u64 = caps[2].parse().unwrap_or(0);
+            if total > 0 && selfsz > total {
+                let over = selfsz - total;
+                let msg = format!(
+                    "GPU VRAM oversubscribed: model + KV + compute = {} MiB but device has only {} MiB ({} MiB over).\n  Try one or more of:\n    --ctk q8_0 --ctv q8_0   (halves KV cache)\n    --ubatch-size 512       (smaller compute buffer)\n    -c <smaller>            (reduce context window)",
+                    selfsz, total, over
+                );
+                state.fatal_reason = Some(msg.clone());
+                state.exit_message = msg;
+                state.exited = true;
+            }
+        }
+    }
     // Context size: "n_ctx         = 131072"
     else if line.contains("llama_context: n_ctx") {
         static RE: OnceLock<Regex> = OnceLock::new();
@@ -396,13 +507,29 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
     else if line.contains("done request: POST") {
         state.request_count += 1;
     }
-    // All slots idle
-    else if line.contains("all slots are idle") {
+    // Prompt cache reuse failed: llama-server is redoing the whole prefill.
+    // Message shape: "forcing full prompt re-processing due to lack of cache data
+    // (likely due to SWA or hybrid/recurrent memory)"
+    else if line.contains("forcing full prompt re-processing") {
+        state.full_reprocess_count += 1;
+    }
+    // SWA checkpoint got discarded (hybrid-model reprocessing bug smell).
+    else if line.contains("invalidated context checkpoint")
+        || line.contains("invalidated checkpoint")
+    {
+        state.invalidated_checkpoint_count += 1;
+    }
+    // All slots idle: "srv  update_slots: all slots are idle"
+    else if line.starts_with("srv") && line.contains("all slots are idle") {
         state.active_requests = 0;
         state.active_slots.clear();
     }
     // New slot processing a task: "slot launch_slot_: id  3 | task 0 | processing task, is_child = 0"
-    else if line.contains("launch_slot_") && line.contains("processing task") {
+    // Require the line to start with "slot " so we don't match against the
+    // verbose request dump (srv log_server_r:) that echoes prompt text -
+    // a prompt containing this codebase as context will otherwise create
+    // phantom "slot 3" entries in the UI.
+    else if line.starts_with("slot launch_slot_") && line.contains("processing task") {
         if let Some((slot_id, _)) = extract_slot_task(line) {
             state.active_requests += 1;
             state.active_slots.insert(
@@ -414,12 +541,14 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
                     gen_tps: 0.0,
                     gen_tokens: 0,
                     total_time_ms: 0.0,
+                    progress: 0.0,
+                    processing_started: Some(Instant::now()),
                 },
             );
         }
     }
     // Token count: "slot update_slots: id  3 | task 0 | new prompt, ..., task.n_tokens = 536"
-    else if line.contains("update_slots:") && line.contains("new prompt") {
+    else if line.starts_with("slot update_slots:") && line.contains("new prompt") {
         if let Some((slot_id, _)) = extract_slot_task(line) {
             static RE: OnceLock<Regex> = OnceLock::new();
             let re = RE.get_or_init(|| Regex::new(r"task\.n_tokens\s*=\s*(\d+)").unwrap());
@@ -431,8 +560,23 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
             }
         }
     }
+    // Prefill progress: "slot update_slots: id  0 | task 0 | prompt processing progress,
+    //   n_tokens = 4096, batch.n_tokens = 2048, progress = 0.024940"
+    else if line.starts_with("slot update_slots:") && line.contains("prompt processing progress") {
+        if let Some((slot_id, _)) = extract_slot_task(line) {
+            static RE: OnceLock<Regex> = OnceLock::new();
+            let re = RE.get_or_init(|| Regex::new(r"progress\s*=\s*([0-9.]+)").unwrap());
+            if let Some(caps) = re.captures(line) {
+                if let Ok(p) = caps[1].parse::<f32>() {
+                    if let Some(slot) = state.active_slots.get_mut(&slot_id) {
+                        slot.progress = p.clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
+    }
     // Slot released: "slot release: id  3 | task 0 | stop processing: n_tokens = 538"
-    else if line.contains("release:") && line.contains("stop processing") {
+    else if line.starts_with("slot release:") && line.contains("stop processing") {
         if let Some((slot_id, _)) = extract_slot_task(line) {
             if let Some(mut slot) = state.active_slots.remove(&slot_id) {
                 // Extract final n_tokens
@@ -499,7 +643,7 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
     }
     // Timing header: "slot print_timing: id  3 | task 0 |"
     // Sets which slot the next timing lines belong to
-    else if line.contains("print_timing:") {
+    else if line.starts_with("slot print_timing:") {
         if let Some((slot_id, _)) = extract_slot_task(line) {
             // Store last gen tps into this slot when we next see eval time
             if let Some(slot) = state.active_slots.get_mut(&slot_id) {

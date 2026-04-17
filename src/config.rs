@@ -24,9 +24,51 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default = "default_host")]
     pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temp: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f32>,
+
+    // Performance knobs. Overriding these changes the value actually passed to
+    // llama-server; leaving them unset uses lui's defaults (see DEFAULT_* below).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ubatch_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads_batch: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_type_k: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_type_v: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swa_full: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_ram: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prio_batch: Option<i32>,
+
     #[serde(default)]
     pub extra_args: Vec<String>,
 }
+
+// Defaults applied when the user hasn't set a value in CLI or TOML.
+// Kept narrow on purpose: a default that's great at 32k context can OOM a
+// memory-constrained GPU at 200k, so we only default values where the win
+// is unambiguous regardless of context/model size.
+pub const DEFAULT_PARALLEL: i32 = 1;
+
+// Logical batch size for prefill. llama.cpp's own default is 2048, which
+// means a progress update every ~2048 tokens decoded. At 512 we get ~4x
+// more frequent progress (smoother progress bar) for a negligible prefill
+// throughput cost on single-user workloads.
+pub const DEFAULT_BATCH_SIZE: u32 = 512;
 
 fn default_ctx_size() -> u32 {
     0
@@ -50,6 +92,19 @@ impl Default for ServerConfig {
             gpu_layers: default_gpu_layers(),
             port: default_port(),
             host: default_host(),
+            temp: None,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            ubatch_size: None,
+            batch_size: None,
+            parallel: None,
+            threads_batch: None,
+            cache_type_k: None,
+            cache_type_v: None,
+            swa_full: None,
+            cache_ram: None,
+            prio_batch: None,
             extra_args: Vec::new(),
         }
     }
@@ -63,9 +118,12 @@ impl Default for LuiConfig {
     }
 }
 
-fn config_path() -> PathBuf {
-    let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    config_dir.join("lui.toml")
+pub fn config_path() -> PathBuf {
+    // XDG-style path (~/.config/lui.toml on all platforms). On macOS this
+    // is not the system "config_dir" (~/Library/Application Support/) but
+    // it's what most CLI tools actually use and what users expect.
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".config").join("lui.toml")
 }
 
 pub fn load_config() -> LuiConfig {
@@ -148,6 +206,23 @@ pub fn update_opencode_config(config: &ServerConfig) {
         "model".to_string(),
         serde_json::json!(format!("lui/{}", model_name)),
     );
+
+    // Disable opencode's tool-output pruning. Pruning replaces old tool results
+    // with "[Old tool result content cleared]" between turns, which mutates the
+    // prompt prefix and invalidates llama-server's prompt cache - on a 160k
+    // context that's tens of thousands of tokens re-prefilled per turn.
+    // Only set if the user hasn't explicitly configured compaction, so we
+    // don't clobber their override.
+    if !obj.contains_key("compaction") {
+        obj.insert("compaction".to_string(), serde_json::json!({}));
+    }
+    let compaction = obj
+        .get_mut("compaction")
+        .and_then(|v| v.as_object_mut())
+        .unwrap();
+    if !compaction.contains_key("prune") {
+        compaction.insert("prune".to_string(), serde_json::json!(false));
+    }
 
     // Ensure provider section exists
     if !obj.contains_key("provider") {

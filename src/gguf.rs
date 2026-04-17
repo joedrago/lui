@@ -5,6 +5,24 @@ use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
+/// True if the model uses sliding-window attention or hybrid/recurrent state
+/// (Mamba/SSM blocks). These are the architectures where llama-server's
+/// prompt-cache checkpoint logic misfires and --swa-full avoids the fallout.
+pub fn uses_sliding_window(meta: &HashMap<String, String>) -> bool {
+    for (k, v) in meta {
+        if k.ends_with(".attention.sliding_window") {
+            // Treat any non-zero window as SWA.
+            if v.parse::<i64>().map(|n| n > 0).unwrap_or(true) {
+                return true;
+            }
+        }
+        if k.contains(".ssm.") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Reads select metadata from a GGUF file header without loading the full file.
 /// Returns a map of key -> string representation of value.
 pub fn read_gguf_metadata(path: &Path) -> io::Result<HashMap<String, String>> {
@@ -50,11 +68,14 @@ pub fn read_gguf_metadata(path: &Path) -> io::Result<HashMap<String, String>> {
             Err(_) => break,
         };
 
-        // We only care about certain keys
+        // We only care about certain keys. Include SWA / hybrid markers so
+        // callers can decide whether to enable --swa-full automatically.
         let dominated = key.ends_with(".context_length")
             || key == "general.name"
             || key == "general.size_label"
-            || key == "general.architecture";
+            || key == "general.architecture"
+            || key.ends_with(".attention.sliding_window")
+            || key.contains(".ssm.");
 
         match value_type {
             // UINT8 = 0
