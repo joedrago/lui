@@ -56,6 +56,14 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub extra_args: Vec<String>,
+
+    // Local web-search HTTP endpoint (see src/websearch.rs). On by default;
+    // disable with --no-websearch. Port defaults to llama-server port + 1
+    // when `web_port` is None.
+    #[serde(default)]
+    pub websearch_disabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_port: Option<u16>,
 }
 
 // Defaults applied when the user hasn't set a value in CLI or TOML.
@@ -106,8 +114,16 @@ impl Default for ServerConfig {
             cache_ram: None,
             prio_batch: None,
             extra_args: Vec::new(),
+            websearch_disabled: false,
+            web_port: None,
         }
     }
+}
+
+/// Resolve the port the local websearch HTTP server binds to.
+/// Defaults to `llama_port + 1` unless the user set `--web-port`.
+pub fn websearch_port(config: &ServerConfig) -> u16 {
+    config.web_port.unwrap_or_else(|| config.port.saturating_add(1))
 }
 
 impl Default for LuiConfig {
@@ -185,6 +201,56 @@ fn opencode_config_path() -> PathBuf {
     home.join(".config").join("opencode").join("opencode.json")
 }
 
+fn websearch_bash_pattern(port: u16) -> String {
+    // opencode's permission.bash keys use simple `*` / `?` wildcard matching
+    // (see https://opencode.ai/docs/permissions/). This narrowly allows only
+    // curl calls to lui's local search endpoint on the configured port.
+    format!("curl*http://127.0.0.1:{}/*", port)
+}
+
+/// Manage the `permission.bash` entry that allows curl to lui's local search
+/// endpoint, so opencode doesn't prompt for every search. We only touch keys
+/// shaped like our pattern (any port) — anything else the user put there is
+/// left untouched. When websearch is disabled, we remove stale entries.
+fn update_websearch_permission(root: &mut serde_json::Map<String, serde_json::Value>, config: &ServerConfig) {
+    let current_pattern = websearch_bash_pattern(websearch_port(config));
+
+    if !root.contains_key("permission") {
+        if config.websearch_disabled {
+            return;
+        }
+        root.insert("permission".to_string(), serde_json::json!({}));
+    }
+    let permission = match root.get_mut("permission").and_then(|v| v.as_object_mut()) {
+        Some(p) => p,
+        None => return,
+    };
+
+    if !permission.contains_key("bash") {
+        if config.websearch_disabled {
+            return;
+        }
+        permission.insert("bash".to_string(), serde_json::json!({}));
+    }
+    let bash = match permission.get_mut("bash").and_then(|v| v.as_object_mut()) {
+        Some(b) => b,
+        None => return,
+    };
+
+    // Drop any prior lui-webseach keys (e.g. stale port after --web-port
+    // change) so we never leave a dead allowlist entry behind.
+    bash.retain(|k, _| {
+        !(k.starts_with("curl*http://127.0.0.1:") && k.ends_with("/*"))
+            || k == &current_pattern
+    });
+
+    if config.websearch_disabled {
+        bash.remove(&current_pattern);
+    } else {
+        bash.insert(current_pattern, serde_json::json!("allow"));
+    }
+}
+
 pub fn update_opencode_config(config: &ServerConfig) {
     let path = opencode_config_path();
     let model_name = derive_model_name(config);
@@ -253,6 +319,12 @@ pub fn update_opencode_config(config: &ServerConfig) {
         }),
     );
 
+    // Pre-allow the web-search curl pattern so opencode doesn't prompt the
+    // user for every search call. Pattern is narrow — only curl to lui's
+    // local search port is allowed, nothing else. We manage *only* entries
+    // matching our port so the user can freely add their own bash rules.
+    update_websearch_permission(obj, config);
+
     // Write back
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -261,5 +333,125 @@ pub fn update_opencode_config(config: &ServerConfig) {
         if let Err(e) = std::fs::write(&path, contents) {
             eprintln!("Warning: failed to write {}: {}", path.display(), e);
         }
+    }
+}
+
+fn websearch_skill_dir() -> PathBuf {
+    // Skills live under ~/.config/opencode/skills/<name>/SKILL.md — see
+    // https://opencode.ai/docs/skills/. The directory name must match the
+    // `name:` field in frontmatter.
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".config")
+        .join("opencode")
+        .join("skills")
+        .join("lui-web-search")
+}
+
+/// Write (or rewrite) the `lui-web-search` skill so opencode knows how to
+/// invoke lui's local /search endpoint. The port is baked in at write time
+/// so the skill stays correct across restarts/port changes. Removes the
+/// skill instead when websearch is disabled, so turning it off cleanly
+/// withdraws the capability rather than leaving a stale SKILL.md pointing
+/// at a dead port.
+pub fn update_websearch_skill(config: &ServerConfig) {
+    let dir = websearch_skill_dir();
+    let skill_path = dir.join("SKILL.md");
+
+    if config.websearch_disabled {
+        // Remove SKILL.md first, then the now-empty directory. We intentionally
+        // only remove the dir if it's empty, so we don't wipe out anything a
+        // user may have stashed alongside.
+        if skill_path.exists() {
+            let _ = std::fs::remove_file(&skill_path);
+        }
+        if dir.exists() {
+            let _ = std::fs::remove_dir(&dir);
+        }
+        return;
+    }
+
+    let port = websearch_port(config);
+    let body = format!(
+        r#"---
+name: lui-web-search
+description: Search the web via lui's local search endpoint. Use whenever the user asks to search the web, look up current information, or find documentation online. Returns JSON results with title, url, and snippet.
+license: BSD-2-Clause
+---
+
+# lui-web-search
+
+lui runs a small local HTTP server that performs web searches for you.
+No API keys required; the server scrapes a public search frontend and
+returns structured results.
+
+## Endpoint
+
+```
+GET http://127.0.0.1:{port}/search?q=<URL-ENCODED QUERY>&n=<COUNT>
+```
+
+- `q` (required): the search query. URL-encode it.
+- `n` (optional, default 10, max 25): how many results to return.
+
+## Response
+
+JSON array of objects:
+
+```json
+[
+  {{"title": "...", "url": "https://...", "snippet": "..."}}
+]
+```
+
+A 4xx/5xx response or an empty array means the search failed or produced
+no results — say so plainly rather than fabricating answers.
+
+## How to invoke
+
+Use `curl` directly. On Linux/macOS:
+
+```sh
+curl -sG 'http://127.0.0.1:{port}/search' \
+  --data-urlencode 'q=rust async traits 2026' \
+  --data-urlencode 'n=8'
+```
+
+On Windows (PowerShell), `curl.exe` is built in:
+
+```powershell
+$q = [uri]::EscapeDataString('rust async traits 2026')
+curl.exe -s "http://127.0.0.1:{port}/search?q=$q&n=8"
+```
+
+The response is a JSON array of `{{title, url, snippet}}` objects. Read it,
+then write your answer to the user as normal prose with markdown links.
+Do not paste the raw JSON back into the chat. If you need the body of a
+specific page, fetch that page separately.
+
+## When to use
+
+- User asks to "search the web", "look up", "google", "find recent", etc.
+- You need information that post-dates your training cutoff.
+- You need a canonical URL for documentation, a release, a spec, or an issue.
+
+Do not use this for fetching content from a URL the user already gave
+you — just fetch that URL directly.
+"#
+    );
+
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!(
+            "Warning: failed to create {}: {}",
+            dir.display(),
+            e
+        );
+        return;
+    }
+    if let Err(e) = std::fs::write(&skill_path, body) {
+        eprintln!(
+            "Warning: failed to write {}: {}",
+            skill_path.display(),
+            e
+        );
     }
 }

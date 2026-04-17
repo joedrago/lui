@@ -427,6 +427,30 @@ impl Display {
         );
         t.newline();
 
+        // Web search activity (only shown once the user has made at least one).
+        if st.websearch_total > 0 || st.websearch_active > 0 {
+            let _ = queue!(
+                t.stdout,
+                Print("  "),
+                SetForegroundColor(MUTED_PURPLE),
+                Print("Search   : "),
+                SetForegroundColor(COLOR_NUMBER),
+                Print(format!("{}", st.websearch_total)),
+                SetForegroundColor(Color::White),
+                Print(" total · "),
+                SetForegroundColor(COLOR_NUMBER),
+                Print(format!("{}", st.websearch_active)),
+                SetForegroundColor(Color::White),
+                Print(" active"),
+                ResetColor
+            );
+            t.newline();
+            if !st.websearch_last_query.is_empty() {
+                let q = format!("last: \"{}\"", st.websearch_last_query);
+                self.print_sub(&mut t, &q);
+            }
+        }
+
         // Cache health: only render when something has gone wrong. Any non-zero
         // count means llama-server redid the whole prefill at least once -
         // the smoking gun for "why did it get slow at long context".

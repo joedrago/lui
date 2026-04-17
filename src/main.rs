@@ -5,12 +5,16 @@ mod config;
 mod display;
 mod gguf;
 mod server;
+mod websearch;
 
 use std::path::PathBuf;
 
 use clap::Parser;
 
-use config::{config_path, load_config, save_config, update_opencode_config, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL};
+use config::{
+    config_path, load_config, save_config, update_opencode_config, update_websearch_skill,
+    websearch_port, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
+};
 use display::Display;
 use server::spawn_server;
 
@@ -103,6 +107,18 @@ struct Cli {
     /// List locally cached models
     #[arg(short = 'l', long = "list")]
     list: bool,
+
+    /// Disable lui's local web-search endpoint and remove its opencode skill.
+    #[arg(long = "no-websearch", conflicts_with = "websearch")]
+    no_websearch: bool,
+
+    /// Re-enable lui's local web-search endpoint (undoes a prior --no-websearch).
+    #[arg(long = "websearch")]
+    websearch: bool,
+
+    /// Port for lui's local web-search HTTP server (default: llama port + 1).
+    #[arg(long = "web-port")]
+    web_port: Option<u16>,
 
     /// Dump raw llama-server output to a debug log file
     #[arg(long = "debug")]
@@ -660,6 +676,14 @@ async fn main() {
     if !cli.extra_args.is_empty() {
         config.server.extra_args = cli.extra_args;
     }
+    if cli.no_websearch {
+        config.server.websearch_disabled = true;
+    } else if cli.websearch {
+        config.server.websearch_disabled = false;
+    }
+    if let Some(p) = cli.web_port {
+        config.server.web_port = Some(p);
+    }
 
     // Validate we have a model
     if config.server.model.is_empty() && config.server.hf_repo.is_empty() {
@@ -687,6 +711,9 @@ async fn main() {
     // Update opencode config
     update_opencode_config(&effective);
 
+    // Write (or remove) the lui-web-search opencode skill.
+    update_websearch_skill(&effective);
+
     // Get llama-server version
     let llama_version = match std::process::Command::new("llama-server")
         .arg("--version")
@@ -710,6 +737,11 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Spawn the local websearch HTTP server (bound to 127.0.0.1 only).
+    if !effective.websearch_disabled {
+        websearch::spawn(websearch_port(&effective), proc.state.clone());
+    }
 
     // Store version and kick off brew update check in background
     {

@@ -94,6 +94,11 @@ pub struct ServerState {
     // (e.g. GPU VRAM oversubscribed at load time). Causes main() to exit 1
     // after print_summary renders the reason.
     pub fatal_reason: Option<String>,
+
+    // Web search tracking (local /search endpoint; see src/websearch.rs)
+    pub websearch_active: u32,
+    pub websearch_total: u64,
+    pub websearch_last_query: String,
 }
 
 impl ServerState {
