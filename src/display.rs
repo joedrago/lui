@@ -163,7 +163,11 @@ impl Display {
         let mut stdout = io::stdout();
         let st = self.state.lock().unwrap();
         let (term_width, term_height) = terminal::size().unwrap_or((80, 24));
-        let width = term_width as usize;
+        // Windows Terminal truncates characters written to the last column(s)
+        // (e.g. the trailing "p" of "/setup" disappears). Treat the usable
+        // width as 2 columns shy of reported width so rules, the right-
+        // aligned setup URL, and header fills all stay inside the safe zone.
+        let width = (term_width as usize).saturating_sub(2);
 
         let mut t = TermBuf::new(&mut stdout, width, term_height);
 
@@ -773,13 +777,22 @@ impl Display {
                         Print("\n"),
                     );
                 } else {
-                    let _ = execute!(
-                        stdout,
-                        SetForegroundColor(Color::White),
-                        Print(line),
-                        ResetColor,
-                        Print("\n"),
-                    );
+                    let _ = execute!(stdout, SetForegroundColor(Color::Yellow));
+                    let mut rest = line;
+                    while let Some(pos) = rest.find("--avo") {
+                        let (before, after) = rest.split_at(pos);
+                        let _ = execute!(
+                            stdout,
+                            Print(before),
+                            SetForegroundColor(Color::Cyan),
+                            SetAttribute(Attribute::Bold),
+                            Print("--avo"),
+                            SetAttribute(Attribute::Reset),
+                            SetForegroundColor(Color::Yellow),
+                        );
+                        rest = &after["--avo".len()..];
+                    }
+                    let _ = execute!(stdout, Print(rest), ResetColor, Print("\n"));
                 }
             }
             println!();

@@ -84,6 +84,8 @@ MACHINE SETTINGS (always global; rejected with --this):
         --websearch                Enable lui's local web-search endpoint
         --no-websearch             Disable and remove its opencode skill
         --web-port <N>             Port for the local web-search endpoint (default: llama port + 1)
+        --avo                      Allow VRAM oversubscription (skip lui's abort on GPU over-budget)
+        --no-avo                   Abort on VRAM oversubscription (default)
 
 OTHER:
     -l, --list                     List cached models and show current config
@@ -271,6 +273,14 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
             Long("web-port") => {
                 require_global(scope, "--web-port");
                 config.server.web_port = take_scalar::<u16>(&mut parser, "--web-port");
+            }
+            Long("avo") => {
+                require_global(scope, "--avo");
+                config.server.allow_vram_oversubscription = true;
+            }
+            Long("no-avo") => {
+                require_global(scope, "--no-avo");
+                config.server.allow_vram_oversubscription = false;
             }
 
             Short('l') | Long("list") => list = true,

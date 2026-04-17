@@ -120,7 +120,11 @@ pub fn spawn(port: u16, server_state: Arc<Mutex<ServerState>>) {
 
 #[derive(Debug, Deserialize)]
 struct ResultsQuery {
-    id: String,
+    // Both are optional because Google rewrites SERP URLs on load (via
+    // history.replaceState) and can drop unknown params like `lui`. We
+    // fall back to matching by `q` since the query param always survives.
+    id: Option<String>,
+    q: Option<String>,
 }
 
 fn cors_headers() -> HeaderMap {
@@ -148,10 +152,28 @@ async fn handle_results_preflight() -> impl IntoResponse {
 
 async fn handle_results(
     State(state): State<AppState>,
-    Query(q): Query<ResultsQuery>,
+    Query(rq): Query<ResultsQuery>,
     Json(results): Json<Vec<SearchResult>>,
 ) -> impl IntoResponse {
-    let sender = state.pending.lock().unwrap().remove(&q.id);
+    // Try the bookmarklet-provided id first; if it's missing or unknown
+    // (Google stripped the `lui` param), fall back to matching the pending
+    // search by query string.
+    let id_match = rq.id.as_ref().and_then(|id| {
+        if state.pending.lock().unwrap().contains_key(id) {
+            Some(id.clone())
+        } else {
+            None
+        }
+    });
+    let id_to_use = id_match.or_else(|| {
+        let query = rq.q.as_ref().filter(|s| !s.is_empty())?;
+        let active = state.server_state.lock().unwrap();
+        active
+            .active_searches
+            .iter()
+            .find_map(|(k, v)| if v == query { Some(k.clone()) } else { None })
+    });
+    let sender = id_to_use.and_then(|id| state.pending.lock().unwrap().remove(&id));
     match sender {
         Some(tx) => {
             // If the receiver was dropped (timeout fired), tx.send returns
@@ -261,7 +283,9 @@ fn bookmarklet_js(port: u16) -> String {
     format!(
         r#"(function(){{
   try {{
-    var id = new URL(location.href).searchParams.get('lui') || 'last';
+    var params = new URL(location.href).searchParams;
+    var id = params.get('lui') || '';
+    var q = params.get('q') || '';
     var nodes = document.querySelectorAll('div.g, div.tF2Cxc, div.MjjYud');
     var results = [];
     var seen = {{}};
@@ -284,7 +308,7 @@ fn bookmarklet_js(port: u16) -> String {
       alert('lui-grab: found no results on this page. Are you on a Google search results page?');
       return;
     }}
-    fetch('http://127.0.0.1:{port}/results?id=' + encodeURIComponent(id), {{
+    fetch('http://127.0.0.1:{port}/results?id=' + encodeURIComponent(id) + '&q=' + encodeURIComponent(q), {{
       method: 'POST',
       headers: {{ 'Content-Type': 'application/json' }},
       body: JSON.stringify(results)

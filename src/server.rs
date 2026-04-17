@@ -95,6 +95,11 @@ pub struct ServerState {
     // after print_summary renders the reason.
     pub fatal_reason: Option<String>,
 
+    // Seeded from ServerConfig::allow_vram_oversubscription at spawn time so
+    // parse_line can consult it without plumbing a &ServerConfig reference
+    // down. When true, the VRAM-oversubscribed detection below is skipped.
+    pub allow_vram_oversubscription: bool,
+
     // Web search tracking (local /bsearch endpoint; see src/websearch.rs).
     // `active_searches` holds one entry per in-flight search, keyed by the
     // request id; the display iterates values() to render them as sub-lines
@@ -302,7 +307,10 @@ pub fn spawn_server(config: &ServerConfig, debug_log: Option<&str>) -> Result<Se
         .try_clone_reader()
         .map_err(|e| format!("Failed to clone pty reader: {}", e))?;
 
-    let state = Arc::new(Mutex::new(ServerState::default()));
+    let state = Arc::new(Mutex::new(ServerState {
+        allow_vram_oversubscription: config.allow_vram_oversubscription,
+        ..ServerState::default()
+    }));
 
     let debug_file = debug_log.map(|path| {
         std::fs::File::create(path).expect("Failed to create debug log file")
@@ -532,10 +540,10 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
         if let Some(caps) = re.captures(line) {
             let total: u64 = caps[1].parse().unwrap_or(0);
             let selfsz: u64 = caps[2].parse().unwrap_or(0);
-            if total > 0 && selfsz > total {
+            if total > 0 && selfsz > total && !state.allow_vram_oversubscription {
                 let over = selfsz - total;
                 let msg = format!(
-                    "GPU VRAM oversubscribed: model + KV + compute = {} MiB but device has only {} MiB ({} MiB over).\n  Try one or more of:\n    --ctk q8_0 --ctv q8_0   (halves KV cache)\n    --ubatch-size 512       (smaller compute buffer)\n    -c <smaller>            (reduce context window)",
+                    "GPU VRAM oversubscribed: model + KV + compute = {} MiB but device has only {} MiB ({} MiB over).\n  Try one or more of:\n    --ctk q8_0 --ctv q8_0   (halves KV cache)\n    --ubatch-size 512       (smaller compute buffer)\n    -c <smaller>            (reduce context window)\n\n  This check can be a false positive when the driver is willing to page\n  GPU memory to host RAM instead of failing the allocation:\n    - NVIDIA on Windows with \"CUDA Sysmem Fallback Policy\" enabled\n      (NVIDIA Control Panel > Manage 3D Settings; on by default)\n    - macOS Metal, which treats its working-set limit as a soft cap\n\n  If that applies to you, load will succeed but long-context inference\n  will pay a PCIe/paging cost. Pass --avo (or set allow_vram_oversub-\n  scription = true in [server]) to skip this check and accept that\n  trade-off.",
                     selfsz, total, over
                 );
                 state.fatal_reason = Some(msg.clone());

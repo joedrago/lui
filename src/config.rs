@@ -184,6 +184,13 @@ pub struct ServerConfig {
     // they can jump back to one and start tweaking without retyping.
     #[serde(default)]
     pub prune_unused_model_configs: bool,
+
+    // When true, lui will not abort even if llama-server's memory-breakdown
+    // log indicates the GPU is over budget at load time. Leave off unless
+    // you know llama-server can still cope (e.g. relying on driver spill to
+    // system RAM) and you'd rather take that risk than have lui exit.
+    #[serde(default)]
+    pub allow_vram_oversubscription: bool,
 }
 
 // Defaults applied when the user hasn't set a value in CLI or TOML.
@@ -239,6 +246,7 @@ impl Default for ServerConfig {
             websearch_disabled: false,
             web_port: None,
             prune_unused_model_configs: false,
+            allow_vram_oversubscription: false,
         }
     }
 }
