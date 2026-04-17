@@ -156,6 +156,13 @@ pub struct ServerConfig {
     pub websearch_disabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_port: Option<u16>,
+
+    // When true, save_config strips per-model sections that have no
+    // overrides set. Off by default: the empty sections at the bottom of
+    // the file act as a history of every --hf the user has ever run, so
+    // they can jump back to one and start tweaking without retyping.
+    #[serde(default)]
+    pub prune_unused_model_configs: bool,
 }
 
 // Defaults applied when the user hasn't set a value in CLI or TOML.
@@ -210,6 +217,7 @@ impl Default for ServerConfig {
             extra_args: Vec::new(),
             websearch_disabled: false,
             web_port: None,
+            prune_unused_model_configs: false,
         }
     }
 }
@@ -360,19 +368,108 @@ pub fn save_config(config: &LuiConfig) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // Drop fully-empty override entries so clearing the last field of a
-    // model's overrides removes the [models."..."] table rather than leaving
-    // a ghost section in the toml.
+
     let mut to_write = config.clone();
-    to_write.models.retain(|_, ov| !ov.is_empty());
-    match toml::to_string_pretty(&to_write) {
-        Ok(contents) => {
-            if let Err(e) = std::fs::write(&path, contents) {
-                eprintln!("Warning: failed to write {}: {}", path.display(), e);
-            }
-        }
-        Err(e) => eprintln!("Warning: failed to serialize config: {}", e),
+
+    // Make sure the active model has *some* entry in [models.*], even if
+    // it has no overrides. This turns the tail of the toml into a history
+    // of every --hf the user has tried; users can delete stale ones by
+    // hand, or flip prune_unused_model_configs to have save_config do it.
+    if let Some(k) = model_key(&to_write.server) {
+        to_write.models.entry(k).or_default();
     }
+    if to_write.server.prune_unused_model_configs {
+        to_write.models.retain(|_, ov| !ov.is_empty());
+    }
+
+    // BTreeMap iterates in sorted-key order; partition into "has overrides"
+    // and "empty" while preserving that order.
+    let mut non_empty: Vec<(&String, &ModelOverrides)> = Vec::new();
+    let mut empty: Vec<&String> = Vec::new();
+    for (k, ov) in &to_write.models {
+        if ov.is_empty() {
+            empty.push(k);
+        } else {
+            non_empty.push((k, ov));
+        }
+    }
+
+    // Serialize [server] on its own so we fully control what follows.
+    #[derive(Serialize)]
+    struct GlobalOnly<'a> {
+        server: &'a ServerConfig,
+    }
+    let mut out = match toml::to_string_pretty(&GlobalOnly {
+        server: &to_write.server,
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Warning: failed to serialize config: {}", e);
+            return;
+        }
+    };
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+
+    // Non-empty model sections next, alphabetical. Serializing each one
+    // through a single-entry map gives us toml's own key-quoting for free.
+    #[derive(Serialize)]
+    struct ModelsOnly<'a> {
+        models: &'a BTreeMap<String, ModelOverrides>,
+    }
+    for (k, ov) in &non_empty {
+        let mut single: BTreeMap<String, ModelOverrides> = BTreeMap::new();
+        single.insert((*k).clone(), (*ov).clone());
+        match toml::to_string_pretty(&ModelsOnly { models: &single }) {
+            Ok(s) => {
+                out.push('\n');
+                out.push_str(s.trim_end());
+                out.push('\n');
+            }
+            Err(e) => eprintln!("Warning: failed to serialize model section: {}", e),
+        }
+    }
+
+    // Empty model sections last, packed tight — just header lines with no
+    // blank line between them, so the "history" block stays compact.
+    if !empty.is_empty() {
+        out.push('\n');
+        for k in &empty {
+            out.push_str(&format!("[models.{}]\n", toml_quote_key(k)));
+        }
+    }
+
+    if let Err(e) = std::fs::write(&path, out) {
+        eprintln!("Warning: failed to write {}: {}", path.display(), e);
+    }
+}
+
+/// Quote a string for use as a TOML key. Bare keys (`[A-Za-z0-9_-]+`) are
+/// emitted as-is; anything else gets basic-string quoting. Matches what
+/// the `toml` crate produces so round-tripping stays stable.
+fn toml_quote_key(s: &str) -> String {
+    let bare = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if bare {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The identity string used to key per-model overrides. Deliberately the
