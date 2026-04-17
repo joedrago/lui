@@ -1029,7 +1029,6 @@ async fn main() {
             if let Ok(meta) = gguf::read_gguf_metadata(&path) {
                 if gguf::uses_sliding_window(&meta) {
                     effective.swa_full = Some(true);
-                    eprintln!("lui: detected SWA/hybrid attention -> enabling --swa-full (disable with --no-swa-full).");
                 }
             }
         }
