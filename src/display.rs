@@ -12,11 +12,18 @@ use crossterm::{
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{self, Clear, ClearType, DisableLineWrap, EnableLineWrap},
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::time::timeout;
 
 use crate::config::{websearch_port, ServerConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL};
-use crate::server::ServerState;
+use crate::server::{ServerState, SlotSnapshot, UiSnapshot, UI_SNAPSHOT_VERSION};
 
 const RENDER_INTERVAL_MS: u64 = 250;
+/// Timeout for a single `/data` poll. Well under the render interval so a
+/// stuck localhost fetch can't wedge the UI — we fall back to the last
+/// good snapshot and try again on the next tick.
+const FETCH_TIMEOUT_MS: u64 = 200;
 const LAVENDER: Color = Color::Rgb {
     r: 180,
     g: 150,
@@ -34,8 +41,23 @@ const COLOR_NUMBER: Color = Color::Rgb {
 };
 
 pub struct Display {
-    state: Arc<Mutex<ServerState>>,
+    /// Host to poll `/data` on. `"127.0.0.1"` locally; a Lui's hostname
+    /// when this Display is driving a Remote view.
+    snapshot_host: String,
+    /// Port of the lui HTTP server (`web_port`), not llama-server's port.
+    snapshot_port: u16,
+    /// Present only in local mode. Lets the Server Log panel read the log
+    /// ring directly without going through HTTP — logs are large and
+    /// high-volume; polling them at 4 Hz over HTTP would be wasteful, and
+    /// under `--remote` there's no way to get them anyway, so we deliberately
+    /// leave that panel showing "Not available in remote mode" there.
+    local_state: Option<Arc<Mutex<ServerState>>>,
     config: ServerConfig,
+    /// When this Display was created. Only consulted by `print_summary`
+    /// (which runs after the poll loop stops and therefore has no
+    /// `/data` response in hand). The main render loop uses
+    /// `UiSnapshot::uptime_seconds` instead, so a Remote renderer agrees
+    /// with the Lui on actual lifetime.
     start_time: Instant,
 }
 
@@ -93,9 +115,16 @@ impl<'a> TermBuf<'a> {
 }
 
 impl Display {
-    pub fn new(state: Arc<Mutex<ServerState>>, config: ServerConfig) -> Self {
+    pub fn new(
+        snapshot_host: String,
+        snapshot_port: u16,
+        local_state: Option<Arc<Mutex<ServerState>>>,
+        config: ServerConfig,
+    ) -> Self {
         Display {
-            state,
+            snapshot_host,
+            snapshot_port,
+            local_state,
             config,
             start_time: Instant::now(),
         }
@@ -114,19 +143,28 @@ impl Display {
         );
         let _ = terminal::enable_raw_mode();
 
+        // Last successful snapshot. Polls that fail (server not up yet,
+        // transient error) leave this unchanged so the UI stays on the
+        // last-good frame instead of flickering to empty.
+        let mut last: Option<UiSnapshot> = None;
+
         loop {
-            self.render();
+            if let Some(snap) = self.fetch_snapshot().await {
+                last = Some(snap);
+            }
+
+            match &last {
+                Some(snap) => self.render(snap),
+                None => self.render_starting(),
+            }
 
             if Self::check_quit() {
                 let _ = shutdown_tx.send(true);
                 break;
             }
 
-            {
-                let st = self.state.lock().unwrap();
-                if st.exited {
-                    break;
-                }
+            if last.as_ref().map(|s| s.exited).unwrap_or(false) {
+                break;
             }
 
             tokio::time::sleep(Duration::from_millis(RENDER_INTERVAL_MS)).await;
@@ -140,6 +178,62 @@ impl Display {
             EnableLineWrap,
             Show
         );
+    }
+
+    async fn fetch_snapshot(&self) -> Option<UiSnapshot> {
+        let t = Duration::from_millis(FETCH_TIMEOUT_MS);
+        let addr = format!("{}:{}", self.snapshot_host, self.snapshot_port);
+
+        let mut stream = timeout(t, TcpStream::connect(&addr)).await.ok()?.ok()?;
+        let req = "GET /data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept: application/json\r\n\r\n";
+        timeout(t, stream.write_all(req.as_bytes())).await.ok()?.ok()?;
+
+        let mut buf = Vec::new();
+        timeout(t, stream.read_to_end(&mut buf)).await.ok()?.ok()?;
+
+        let text = String::from_utf8(buf).ok()?;
+        let body_start = text.find("\r\n\r\n")? + 4;
+        let body_section = &text[body_start..];
+        // Axum emits Content-Length (no chunked) for Json<T>, and we set
+        // Connection: close, so the body is a plain byte slice with no
+        // dechunking needed. But in case a proxy ever intervenes, tolerate
+        // stray trailing whitespace by trimming.
+        let snap: UiSnapshot = serde_json::from_str(body_section.trim()).ok()?;
+        if snap.version != UI_SNAPSHOT_VERSION {
+            // Version mismatch means the server's /data schema is newer
+            // (or older) than what we can parse. Treat as a fetch failure
+            // rather than rendering something half-understood.
+            return None;
+        }
+        Some(snap)
+    }
+
+    /// Frame shown only during the brief window before the first successful
+    /// `/data` poll — typically one tick. Kept deliberately sparse so the
+    /// "real" UI takes over as soon as the server's listener is up.
+    fn render_starting(&self) {
+        let mut stdout = io::stdout();
+        let (term_width, term_height) = terminal::size().unwrap_or((80, 24));
+        let width = (term_width as usize).saturating_sub(2);
+        let mut t = TermBuf::new(&mut stdout, width, term_height);
+        let _ = queue!(
+            t.stdout,
+            SetForegroundColor(MUTED_PURPLE),
+            Print("  ── lui ── llama.cpp ui "),
+            ResetColor
+        );
+        t.newline();
+        t.newline();
+        let _ = queue!(
+            t.stdout,
+            Print("  "),
+            SetForegroundColor(COLOR_NUMBER),
+            Print("Starting..."),
+            ResetColor
+        );
+        t.newline();
+        t.clear_rest();
+        t.flush();
     }
 
     fn check_quit() -> bool {
@@ -159,9 +253,9 @@ impl Display {
         false
     }
 
-    fn render(&self) {
+    fn render(&self, snap: &UiSnapshot) {
         let mut stdout = io::stdout();
-        let st = self.state.lock().unwrap();
+        let st = snap;
         let (term_width, term_height) = terminal::size().unwrap_or((80, 24));
         // Windows Terminal truncates characters written to the last column(s)
         // (e.g. the trailing "p" of "/setup" disappears). Treat the usable
@@ -198,22 +292,20 @@ impl Display {
             t.newline();
 
             if !st.downloads.is_empty() {
-                // Show download progress
+                // Show download progress (already sorted by filename server-side).
                 let bar_width = width.saturating_sub(30);
-                let mut downloads: Vec<_> = st.downloads.iter().collect();
-                downloads.sort_by_key(|(name, _)| (*name).clone());
-                for (name, pct) in &downloads {
-                    let filled = ((**pct as usize) * bar_width) / 100;
+                for dl in &st.downloads {
+                    let filled = ((dl.pct as usize) * bar_width) / 100;
                     let empty = bar_width.saturating_sub(filled);
                     let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
                     let _ = queue!(
                         t.stdout,
                         Print("  "),
                         SetForegroundColor(Color::White),
-                        Print(truncate(name, 20)),
+                        Print(truncate(&dl.filename, 20)),
                     );
                     // Pad name to 20 chars
-                    let name_len = name.chars().count().min(20);
+                    let name_len = dl.filename.chars().count().min(20);
                     let _ = queue!(
                         t.stdout,
                         Print(" ".repeat(21 - name_len)),
@@ -221,7 +313,7 @@ impl Display {
                         Print(&bar),
                         Print(" "),
                         SetForegroundColor(COLOR_NUMBER),
-                        Print(format!("{:>3}%", pct)),
+                        Print(format!("{:>3}%", dl.pct)),
                         ResetColor
                     );
                     t.newline();
@@ -241,7 +333,7 @@ impl Display {
             self.render_source(&mut t);
             t.newline();
 
-            self.render_log(&st, &mut t);
+            self.render_log(&mut t);
             t.clear_rest();
             t.flush();
             return;
@@ -372,7 +464,7 @@ impl Display {
         }
 
         // llamacpp + status
-        let uptime = self.start_time.elapsed();
+        let uptime = Duration::from_secs(snap.uptime_seconds);
         let uptime_str = format_duration(uptime);
         let _ = queue!(
             t.stdout,
@@ -493,11 +585,11 @@ impl Display {
             t.newline();
         }
 
-        for slot in st.active_slots.values() {
+        for slot in st.active_slots.iter() {
             self.render_active_slot(&mut t, slot);
         }
 
-        for query in st.active_searches.values() {
+        for query in st.active_searches.iter() {
             let desc = format!("● websearch: {}", query);
             let _ = queue!(
                 t.stdout,
@@ -536,7 +628,7 @@ impl Display {
 
         // Server log -- fills remaining space
         t.newline();
-        self.render_log(&st, &mut t);
+        self.render_log(&mut t);
         t.clear_rest();
         t.flush();
     }
@@ -572,7 +664,7 @@ impl Display {
         t.newline();
     }
 
-    fn render_active_slot(&self, t: &mut TermBuf, slot: &crate::server::SlotInfo) {
+    fn render_active_slot(&self, t: &mut TermBuf, slot: &SlotSnapshot) {
         // Indent 13 to align with the KV value column under "Requests : ".
         let _ = queue!(t.stdout, Print("             "), SetForegroundColor(COLOR_NUMBER));
         if slot.n_tokens == 0 {
@@ -592,11 +684,11 @@ impl Display {
             // cost per prefilled token grows with prompt position, so the
             // last 30% of progress takes roughly as long as the first 70%.
             let eta_str = slot
-                .processing_started
-                .and_then(|started| {
+                .processing_elapsed_ms
+                .and_then(|ms| {
                     let p = slot.progress as f64;
                     if p > 0.20 {
-                        let elapsed = started.elapsed().as_secs_f64();
+                        let elapsed = (ms as f64) / 1000.0;
                         let remaining = elapsed * (1.0 / (p * p) - 1.0);
                         Some(format!(" · {} left", format_eta(remaining)))
                     } else {
@@ -678,7 +770,7 @@ impl Display {
         t.newline();
     }
 
-    fn render_log(&self, st: &ServerState, t: &mut TermBuf) {
+    fn render_log(&self, t: &mut TermBuf) {
         let log_prefix = "  ── Server Log ";
         let log_header = format!(
             "{}{}",
@@ -693,6 +785,22 @@ impl Display {
         );
         t.newline();
 
+        // Log ring lives only on the Lui; a remote Display has no way to
+        // read it (and we don't want to bloat /data with 200 log lines per
+        // poll). Placeholder line keeps the panel from collapsing.
+        let Some(ref state) = self.local_state else {
+            let _ = queue!(
+                t.stdout,
+                Print("  "),
+                SetForegroundColor(Color::DarkGrey),
+                Print("Not available in remote mode"),
+                ResetColor
+            );
+            t.newline();
+            return;
+        };
+
+        let st = state.lock().unwrap();
         let show = t.remaining().saturating_sub(1).max(1);
         let lines: Vec<&String> = st.log_lines.iter().collect();
         let start = lines.len().saturating_sub(show);
@@ -710,7 +818,14 @@ impl Display {
     }
 
     pub fn print_summary(&self) {
-        let st = self.state.lock().unwrap();
+        // print_summary is only meaningful on the Lui side — it's where
+        // llama-server actually ran. A Remote Display (no local_state) just
+        // restores the cursor and bails.
+        let Some(ref state) = self.local_state else {
+            let _ = execute!(io::stdout(), Show);
+            return;
+        };
+        let st = state.lock().unwrap();
         let mut stdout = io::stdout();
         let _ = execute!(stdout, Show);
 

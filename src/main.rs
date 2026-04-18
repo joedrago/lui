@@ -1317,7 +1317,17 @@ async fn main() {
         websearch_disabled: effective.websearch_disabled,
         model_name: derive_model_name(&effective),
     };
-    websearch::spawn(&effective.host, web_port, proc.state.clone(), config_info);
+    // Shared start time: the lui HTTP server reports uptime off this clock
+    // via `/data`, and the Display uses the same `start_time` so the local
+    // renderer and any future Remote renderer agree on Lui lifetime.
+    let start_time = std::time::Instant::now();
+    websearch::spawn(
+        &effective.host,
+        web_port,
+        proc.state.clone(),
+        config_info,
+        start_time,
+    );
 
     // Store version and kick off brew update check in background
     {
@@ -1365,8 +1375,16 @@ async fn main() {
     // Set up shutdown signal
     let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
 
-    // Create display
-    let display = Display::new(proc.state.clone(), effective.clone());
+    // Create display. Polls `/data` on 127.0.0.1 — whether the server bound
+    // to 127.0.0.1 or 0.0.0.0 (under --public), loopback reaches it either
+    // way. The local `ServerState` is handed through only so the Server Log
+    // panel can keep its cheap direct access to the ring buffer.
+    let display = Display::new(
+        "127.0.0.1".to_string(),
+        web_port,
+        Some(proc.state.clone()),
+        effective.clone(),
+    );
 
     // Monitor child process exit in background
     let state_for_monitor = proc.state.clone();

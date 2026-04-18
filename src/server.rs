@@ -3,15 +3,21 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{ServerConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL};
 
 const LOG_RING_SIZE: usize = 200;
 const MAX_RECENT_REQUESTS: usize = 3;
+
+/// Wire-format version for `/data`. Bump on breaking changes; additive
+/// fields (with `#[serde(default)]` on the reader side) don't require a
+/// bump. Kept so a Remote renderer can refuse an incompatible Lui.
+pub const UI_SNAPSHOT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct SlotInfo {
@@ -120,6 +126,185 @@ impl ServerState {
             self.log_lines.pop_front();
         }
         self.log_lines.push_back(line);
+    }
+}
+
+/// Wire-format snapshot of the live state the UI needs to render its upper
+/// sections (everything above the Server Log). Built from `ServerState` on
+/// each `/data` request; the server-side log ring is deliberately not
+/// included because the Display renders logs from its local `ServerState`
+/// directly (they're large and update far faster than the 4 Hz render tick).
+///
+/// A Remote renderer pointed at a Lui's `/data` gets the full upper UI from
+/// this struct — that's the motivation for replacing `Instant` with
+/// `processing_elapsed_ms` and carrying `uptime_seconds` explicitly instead
+/// of computing it on the renderer side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiSnapshot {
+    pub version: u32,
+
+    pub ready: bool,
+    pub exited: bool,
+    pub exit_message: String,
+    pub fatal_reason: Option<String>,
+
+    pub uptime_seconds: u64,
+
+    pub model_name: String,
+    pub quantization: String,
+    pub file_size_n: String,
+    pub file_size_unit: String,
+    pub file_bpw: String,
+    pub model_params_n: String,
+    pub model_params_unit: String,
+    pub ctx_size: u32,
+    pub max_ctx_size: u32,
+
+    pub cpu_mem_mib: f64,
+    pub gpu_mem_mib: f64,
+    pub kv_cache_mib: f64,
+    pub compute_buf_mib: f64,
+    pub gpu_layers_loaded: u32,
+    pub total_layers: u32,
+
+    pub llama_version: String,
+    pub update_available: bool,
+
+    pub request_count: u64,
+    pub active_requests: u32,
+    pub full_reprocess_count: u64,
+    pub invalidated_checkpoint_count: u64,
+
+    pub last_prompt_tps: f64,
+    pub last_gen_tps: f64,
+    pub avg_prompt_tps: f64,
+    pub avg_gen_tps: f64,
+    pub prompt_tps_samples: u64,
+    pub gen_tps_samples: u64,
+
+    pub downloads: Vec<DownloadSnapshot>,
+    pub active_slots: Vec<SlotSnapshot>,
+    pub recent_completed: Vec<SlotSnapshot>,
+
+    pub websearch_total: u64,
+    pub active_searches: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlotSnapshot {
+    pub slot_id: u32,
+    pub n_tokens: u32,
+    pub prompt_tps: f64,
+    pub gen_tps: f64,
+    pub gen_tokens: u32,
+    pub total_time_ms: f64,
+    pub progress: f32,
+    /// Milliseconds since the slot started processing. `None` means it
+    /// hasn't started yet (brand-new slot with `n_tokens == 0`).
+    pub processing_elapsed_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadSnapshot {
+    pub filename: String,
+    pub pct: u32,
+}
+
+impl SlotInfo {
+    fn to_snapshot(&self) -> SlotSnapshot {
+        SlotSnapshot {
+            slot_id: self.slot_id,
+            n_tokens: self.n_tokens,
+            prompt_tps: self.prompt_tps,
+            gen_tps: self.gen_tps,
+            gen_tokens: self.gen_tokens,
+            total_time_ms: self.total_time_ms,
+            progress: self.progress,
+            processing_elapsed_ms: self
+                .processing_started
+                .map(|t| t.elapsed().as_millis() as u64),
+        }
+    }
+}
+
+impl ServerState {
+    /// Materialize a wire-format snapshot. `uptime` is the elapsed time
+    /// since the Lui process started — supplied by the caller because the
+    /// lui HTTP server (not `ServerState`) owns that clock.
+    pub fn to_snapshot(&self, uptime: Duration) -> UiSnapshot {
+        let mut slots: Vec<SlotSnapshot> =
+            self.active_slots.values().map(SlotInfo::to_snapshot).collect();
+        // HashMap iteration is unordered; sort so the renderer sees a
+        // stable slot order (avoids slots appearing to swap places between
+        // ticks when the hasher reorders them).
+        slots.sort_by_key(|s| s.slot_id);
+
+        let recent: Vec<SlotSnapshot> =
+            self.recent_completed.iter().map(SlotInfo::to_snapshot).collect();
+
+        let mut downloads: Vec<DownloadSnapshot> = self
+            .downloads
+            .iter()
+            .map(|(filename, pct)| DownloadSnapshot {
+                filename: filename.clone(),
+                pct: *pct,
+            })
+            .collect();
+        downloads.sort_by(|a, b| a.filename.cmp(&b.filename));
+
+        let mut active_searches: Vec<String> =
+            self.active_searches.values().cloned().collect();
+        active_searches.sort();
+
+        UiSnapshot {
+            version: UI_SNAPSHOT_VERSION,
+
+            ready: self.ready,
+            exited: self.exited,
+            exit_message: self.exit_message.clone(),
+            fatal_reason: self.fatal_reason.clone(),
+
+            uptime_seconds: uptime.as_secs(),
+
+            model_name: self.model_name.clone(),
+            quantization: self.quantization.clone(),
+            file_size_n: self.file_size_n.clone(),
+            file_size_unit: self.file_size_unit.clone(),
+            file_bpw: self.file_bpw.clone(),
+            model_params_n: self.model_params_n.clone(),
+            model_params_unit: self.model_params_unit.clone(),
+            ctx_size: self.ctx_size,
+            max_ctx_size: self.max_ctx_size,
+
+            cpu_mem_mib: self.cpu_mem_mib,
+            gpu_mem_mib: self.gpu_mem_mib,
+            kv_cache_mib: self.kv_cache_mib,
+            compute_buf_mib: self.compute_buf_mib,
+            gpu_layers_loaded: self.gpu_layers_loaded,
+            total_layers: self.total_layers,
+
+            llama_version: self.llama_version.clone(),
+            update_available: self.update_available,
+
+            request_count: self.request_count,
+            active_requests: self.active_requests,
+            full_reprocess_count: self.full_reprocess_count,
+            invalidated_checkpoint_count: self.invalidated_checkpoint_count,
+
+            last_prompt_tps: self.last_prompt_tps,
+            last_gen_tps: self.last_gen_tps,
+            avg_prompt_tps: self.avg_prompt_tps,
+            avg_gen_tps: self.avg_gen_tps,
+            prompt_tps_samples: self.prompt_tps_samples,
+            gen_tps_samples: self.gen_tps_samples,
+
+            downloads,
+            active_slots: slots,
+            recent_completed: recent,
+
+            websearch_total: self.websearch_total,
+            active_searches,
+        }
     }
 }
 

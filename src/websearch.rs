@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 
@@ -35,7 +35,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::server::ServerState;
+use crate::server::{ServerState, UiSnapshot};
 
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
@@ -60,6 +60,10 @@ struct AppState {
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<Vec<SearchResult>>>>>,
     port: u16,
     config_info: LuiConfigResponse,
+    /// When the Lui process started. Used by `/data` to serve a server-side
+    /// uptime that a Remote renderer can show without needing to guess when
+    /// llama-server came up.
+    start_time: Instant,
 }
 
 /// JSON returned by `GET /config`. Used by `lui --ssh-use` on a Remote to
@@ -119,6 +123,7 @@ pub fn spawn(
     port: u16,
     server_state: Arc<Mutex<ServerState>>,
     config_info: LuiConfigResponse,
+    start_time: Instant,
 ) {
     let websearch_enabled = !config_info.websearch_disabled;
     let state = AppState {
@@ -126,11 +131,13 @@ pub fn spawn(
         pending: Arc::new(Mutex::new(HashMap::new())),
         port,
         config_info,
+        start_time,
     };
 
     let mut app: Router<AppState> = Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/config", get(handle_config));
+        .route("/config", get(handle_config))
+        .route("/data", get(handle_data));
     if websearch_enabled {
         app = app
             .route("/bsearch", get(handle_bsearch))
@@ -245,6 +252,21 @@ async fn handle_results(
 
 async fn handle_config(State(state): State<AppState>) -> Json<LuiConfigResponse> {
     Json(state.config_info.clone())
+}
+
+/// `GET /data`: JSON snapshot of live UI state (everything above the
+/// Server Log). The local renderer polls this at ~4 Hz and draws from
+/// whatever comes back; a Remote renderer does the same against a Lui's
+/// HTTP port. Uptime comes from here rather than the client so the
+/// reported value reflects actual Lui lifetime, not "how long this client
+/// has been watching".
+async fn handle_data(State(state): State<AppState>) -> Json<UiSnapshot> {
+    let uptime = state.start_time.elapsed();
+    let snapshot = {
+        let st = state.server_state.lock().unwrap();
+        st.to_snapshot(uptime)
+    };
+    Json(snapshot)
 }
 
 async fn handle_bsearch(

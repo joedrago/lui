@@ -566,7 +566,13 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
         websearch_disabled: false,
         model_name: lui_cfg.model_name.clone(),
     };
-    websearch::spawn("127.0.0.1", local_web, state, config_info);
+    websearch::spawn(
+        "127.0.0.1",
+        local_web,
+        state,
+        config_info,
+        std::time::Instant::now(),
+    );
 
     print_use_banner(target, &lui_cfg, &llama_base_url, local_web);
 
