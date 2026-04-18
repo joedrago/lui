@@ -16,7 +16,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-use crate::config::{websearch_port, ServerConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL};
 use crate::server::{ServerState, SlotSnapshot, UiSnapshot, UI_SNAPSHOT_VERSION};
 
 const RENDER_INTERVAL_MS: u64 = 250;
@@ -46,13 +45,26 @@ pub struct Display {
     snapshot_host: String,
     /// Port of the lui HTTP server (`web_port`), not llama-server's port.
     snapshot_port: u16,
-    /// Present only in local mode. Lets the Server Log panel read the log
-    /// ring directly without going through HTTP — logs are large and
-    /// high-volume; polling them at 4 Hz over HTTP would be wasteful, and
-    /// under `--remote` there's no way to get them anyway, so we deliberately
-    /// leave that panel showing "Not available in remote mode" there.
+    /// The ServerState backing this renderer's *local* HTTP server. In
+    /// local mode it's the Lui's own state (log ring, websearch counts,
+    /// the lot). In `--remote` mode it's the Remote's in-process bsearch
+    /// state — log ring is always empty, but websearch counts reflect
+    /// opencode's searches through our local bsearch (which is what the
+    /// user cares about; the remote Lui's counts are meaningless when
+    /// opencode runs on this machine).
     local_state: Option<Arc<Mutex<ServerState>>>,
-    config: ServerConfig,
+    /// True when this Display is watching a different machine's Lui over
+    /// HTTP. Controls the Server Log panel: in Remote mode we can't
+    /// populate the local log ring from the remote's llama-server output,
+    /// so the panel shows a placeholder instead of an empty void.
+    remote: bool,
+    /// URL of the bookmarklet `/setup` page the user should open in their
+    /// *local* browser. Always a 127.0.0.1 URL — browser-mediated search
+    /// is a this-machine-has-a-user concern, not a Lui-side concern. `None`
+    /// when this machine isn't running a bsearch server (e.g. local mode
+    /// with `--no-websearch`). The renderer shows it in the top-right
+    /// corner when `Some`.
+    local_setup_url: Option<String>,
     /// When this Display was created. Only consulted by `print_summary`
     /// (which runs after the poll loop stops and therefore has no
     /// `/data` response in hand). The main render loop uses
@@ -119,26 +131,31 @@ impl Display {
         snapshot_host: String,
         snapshot_port: u16,
         local_state: Option<Arc<Mutex<ServerState>>>,
-        config: ServerConfig,
+        local_setup_url: Option<String>,
+        remote: bool,
     ) -> Self {
         Display {
             snapshot_host,
             snapshot_port,
             local_state,
-            config,
+            remote,
+            local_setup_url,
             start_time: Instant::now(),
         }
     }
 
     pub async fn run(&self, shutdown_tx: tokio::sync::watch::Sender<bool>) {
         let mut stdout = io::stdout();
-        // Clear screen once at startup, hide cursor, disable line wrap
+        // Clear the visible area once at startup; deliberately do NOT
+        // Clear(ClearType::Purge) so any banner printed before we started
+        // (notably `--remote`'s setup-info banner) survives in scrollback
+        // and the user can scroll up to recover the URLs / opencode
+        // status after the Display takes over the screen.
         let _ = execute!(
             stdout,
             Hide,
             DisableLineWrap,
             Clear(ClearType::All),
-            Clear(ClearType::Purge),
             MoveTo(0, 0)
         );
         let _ = terminal::enable_raw_mode();
@@ -330,7 +347,7 @@ impl Display {
             }
 
             t.newline();
-            self.render_source(&mut t);
+            self.render_source(&mut t, snap);
             t.newline();
 
             self.render_log(&mut t);
@@ -340,16 +357,17 @@ impl Display {
         }
 
         // Blank line below the header doubles as the always-visible home of
-        // the websearch setup URL, right-aligned in gray. Discoverable before
-        // the first search without needing its own row later.
-        if !self.config.websearch_disabled {
-            let url = format!("http://127.0.0.1:{}/setup", websearch_port(&self.config));
+        // the websearch setup URL, right-aligned in gray. This is always
+        // *our* local bsearch URL (set at construction), not the Lui's —
+        // the bookmarklet needs to live in the browser the user is sitting
+        // in front of.
+        if let Some(ref url) = self.local_setup_url {
             let pad = width.saturating_sub(url.chars().count());
             let _ = queue!(
                 t.stdout,
                 Print(" ".repeat(pad)),
                 SetForegroundColor(Color::DarkGrey),
-                Print(&url),
+                Print(url),
                 ResetColor
             );
         }
@@ -422,7 +440,7 @@ impl Display {
         self.print_kv(&mut t, "Model   ", &model_display, Color::White);
 
         // Source (grey sub of Model)
-        self.render_source(&mut t);
+        self.render_source(&mut t, snap);
 
         // Params (grey sub of Model)
         if !st.model_params_n.is_empty() {
@@ -459,8 +477,8 @@ impl Display {
         self.print_sub(&mut t, &ctx_display);
 
         // Sampling (grey sub of Model) — only if any sampler was overridden.
-        if let Some(sampling) = format_sampling(&self.config) {
-            self.print_sub(&mut t, &sampling);
+        if let Some(ref sampling) = snap.config.sampling {
+            self.print_sub(&mut t, sampling);
         }
 
         // llamacpp + status
@@ -499,11 +517,10 @@ impl Display {
         t.newline();
 
         // Bind (grey sub-line under llamacpp)
-        let bind_display = format!("{}:{}", self.config.host, self.config.port);
-        self.print_sub(&mut t, &bind_display);
+        self.print_sub(&mut t, &snap.config.bind_addr);
 
         // Tuning (grey sub-line under llamacpp) — effective performance knobs.
-        self.print_sub(&mut t, &format_tuning(&self.config));
+        self.print_sub(&mut t, &snap.config.tuning);
 
         // Performance section
         t.newline();
@@ -532,20 +549,31 @@ impl Display {
         // potentially-in-flight sections (WebSearch, Requests) below.
         t.newline();
 
-        // WebSearch first: parallel layout to Requests. Setup URL lives on
-        // the blank line below the header now; here we just show counts.
-        if !self.config.websearch_disabled {
+        // WebSearch counts: in local mode these come from the Lui's own
+        // state (via /data). In `--remote` mode, opencode runs on *this*
+        // machine and hits *our* local bsearch, not the remote Lui's — so
+        // we read counts from `local_state` when available. The gate is
+        // `local_setup_url.is_some()`: the URL is this machine's bsearch
+        // URL, so its presence is the definitive signal that this machine
+        // is actually serving websearch traffic.
+        if self.local_setup_url.is_some() {
+            let (total, active_count) = if let Some(ref state) = self.local_state {
+                let ls = state.lock().unwrap();
+                (ls.websearch_total, ls.active_searches.len())
+            } else {
+                (st.websearch_total, st.active_searches.len())
+            };
             let _ = queue!(
                 t.stdout,
                 Print("  "),
                 SetForegroundColor(MUTED_PURPLE),
                 Print("WebSearch: "),
                 SetForegroundColor(COLOR_NUMBER),
-                Print(format!("{:>4}", st.websearch_total)),
+                Print(format!("{:>4}", total)),
                 SetForegroundColor(Color::White),
                 Print(" total · "),
                 SetForegroundColor(COLOR_NUMBER),
-                Print(format!("{:>4}", st.active_searches.len())),
+                Print(format!("{:>4}", active_count)),
                 SetForegroundColor(Color::White),
                 Print(" active"),
                 ResetColor
@@ -581,7 +609,23 @@ impl Display {
             ResetColor
         );
         t.newline();
-        if !st.active_slots.is_empty() || !st.active_searches.is_empty() {
+
+        // Mirror the WebSearch count policy: in `--remote` mode the
+        // interesting active searches are the ones opencode triggered
+        // through our local bsearch, not the remote Lui's (which has no
+        // opencode pointed at it). Fall back to snapshot when there's no
+        // local state at all.
+        let local_active_searches: Option<Vec<String>> = self.local_state.as_ref().map(|s| {
+            let ls = s.lock().unwrap();
+            let mut v: Vec<String> = ls.active_searches.values().cloned().collect();
+            v.sort();
+            v
+        });
+        let active_searches: &[String] = local_active_searches
+            .as_deref()
+            .unwrap_or(&st.active_searches);
+
+        if !st.active_slots.is_empty() || !active_searches.is_empty() {
             t.newline();
         }
 
@@ -589,7 +633,7 @@ impl Display {
             self.render_active_slot(&mut t, slot);
         }
 
-        for query in st.active_searches.iter() {
+        for query in active_searches.iter() {
             let desc = format!("● websearch: {}", query);
             let _ = queue!(
                 t.stdout,
@@ -633,15 +677,8 @@ impl Display {
         t.flush();
     }
 
-    fn render_source(&self, t: &mut TermBuf) {
-        let source = if !self.config.hf_repo.is_empty() {
-            format!("--hf {}", self.config.hf_repo)
-        } else if !self.config.model.is_empty() {
-            format!("-m {}", self.config.model)
-        } else {
-            "none".to_string()
-        };
-        self.print_sub(t, &source);
+    fn render_source(&self, t: &mut TermBuf, snap: &UiSnapshot) {
+        self.print_sub(t, &snap.config.model_source);
     }
 
     fn print_tps(&self, t: &mut TermBuf, label: &str, last: f64, avg: f64) {
@@ -785,10 +822,11 @@ impl Display {
         );
         t.newline();
 
-        // Log ring lives only on the Lui; a remote Display has no way to
-        // read it (and we don't want to bloat /data with 200 log lines per
-        // poll). Placeholder line keeps the panel from collapsing.
-        let Some(ref state) = self.local_state else {
+        // Log ring is the llama-server's stdout/stderr, which only exists
+        // on the Lui. In `--remote` mode we have a local_state (for the
+        // Remote's own bsearch counts) but no llama-server feeding its
+        // log_lines, so show a placeholder rather than an empty void.
+        if self.remote || self.local_state.is_none() {
             let _ = queue!(
                 t.stdout,
                 Print("  "),
@@ -798,8 +836,9 @@ impl Display {
             );
             t.newline();
             return;
-        };
+        }
 
+        let state = self.local_state.as_ref().unwrap();
         let st = state.lock().unwrap();
         let show = t.remaining().saturating_sub(1).max(1);
         let lines: Vec<&String> = st.log_lines.iter().collect();
@@ -987,64 +1026,6 @@ fn format_number(n: u64) -> String {
         result.push(c);
     }
     result.chars().rev().collect()
-}
-
-fn format_sampling(cfg: &ServerConfig) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(v) = cfg.temp {
-        parts.push(format!("temp={}", v));
-    }
-    if let Some(v) = cfg.top_p {
-        parts.push(format!("top-p={}", v));
-    }
-    if let Some(v) = cfg.top_k {
-        parts.push(format!("top-k={}", v));
-    }
-    if let Some(v) = cfg.min_p {
-        parts.push(format!("min-p={}", v));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(format!("sampling: {}", parts.join(" · ")))
-    }
-}
-
-fn format_tuning(cfg: &ServerConfig) -> String {
-    let np = cfg.parallel.unwrap_or(DEFAULT_PARALLEL);
-    let mut parts = vec![format!("np={}", np)];
-    if let Some(ub) = cfg.ubatch_size {
-        parts.push(format!("ubatch={}", ub));
-    }
-
-    let ctk = cfg.cache_type_k.as_deref().unwrap_or("f16");
-    let ctv = cfg.cache_type_v.as_deref().unwrap_or("f16");
-    if ctk != "f16" || ctv != "f16" {
-        parts.push(format!("KV={}/{}", ctk, ctv));
-    }
-    let default_b = cfg
-        .ubatch_size
-        .map(|ub| ub.max(DEFAULT_BATCH_SIZE))
-        .unwrap_or(DEFAULT_BATCH_SIZE);
-    parts.push(format!("batch={}", cfg.batch_size.unwrap_or(default_b)));
-    if let Some(v) = cfg.threads_batch {
-        parts.push(format!("tb={}", v));
-    }
-    if let Some(v) = cfg.cache_ram {
-        parts.push(format!("cache-ram={}MiB", v));
-    }
-    if let Some(v) = cfg.prio_batch {
-        parts.push(format!("prio-batch={}", v));
-    }
-    match cfg.swa_full {
-        Some(true) => parts.push("swa-full".to_string()),
-        Some(false) => parts.push("swa-full=off".to_string()),
-        None => {}
-    }
-    if !cfg.extra_args.is_empty() {
-        parts.push(format!("+{} extra", cfg.extra_args.len()));
-    }
-    parts.join(" · ")
 }
 
 fn format_eta(seconds: f64) -> String {

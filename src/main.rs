@@ -17,7 +17,7 @@ use config::{
     websearch_port, LuiConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
 };
 use display::Display;
-use server::spawn_server;
+use server::{spawn_server, ConfigSummary};
 
 /// Scope tracks which section of the toml gets written by a setting flag.
 /// Sticky: once `--this` is seen, subsequent value flags update the active
@@ -1321,12 +1321,14 @@ async fn main() {
     // via `/data`, and the Display uses the same `start_time` so the local
     // renderer and any future Remote renderer agree on Lui lifetime.
     let start_time = std::time::Instant::now();
+    let config_summary = ConfigSummary::from_config(&effective);
     websearch::spawn(
         &effective.host,
         web_port,
         proc.state.clone(),
         config_info,
         start_time,
+        config_summary,
     );
 
     // Store version and kick off brew update check in background
@@ -1378,12 +1380,18 @@ async fn main() {
     // Create display. Polls `/data` on 127.0.0.1 — whether the server bound
     // to 127.0.0.1 or 0.0.0.0 (under --public), loopback reaches it either
     // way. The local `ServerState` is handed through only so the Server Log
-    // panel can keep its cheap direct access to the ring buffer.
+    // panel can keep its cheap direct access to the ring buffer. The
+    // bookmarklet URL is always local (it's a browser-on-this-machine
+    // thing); we pass `None` when websearch is disabled so the renderer
+    // omits that header row.
+    let local_setup_url = (!effective.websearch_disabled)
+        .then(|| format!("http://127.0.0.1:{}/setup", web_port));
     let display = Display::new(
         "127.0.0.1".to_string(),
         web_port,
         Some(proc.state.clone()),
-        effective.clone(),
+        local_setup_url,
+        false,
     );
 
     // Monitor child process exit in background

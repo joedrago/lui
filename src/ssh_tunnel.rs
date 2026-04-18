@@ -63,7 +63,8 @@ use crate::config::{
     build_opencode_json, derive_model_name, opencode_config_path, render_websearch_skill,
     websearch_port, websearch_skill_dir, ServerConfig,
 };
-use crate::server::ServerState;
+use crate::display::Display;
+use crate::server::{ConfigSummary, ServerState};
 use crate::websearch::{self, LuiConfigResponse, CONFIG_VERSION};
 
 #[derive(Debug, Clone)]
@@ -566,23 +567,55 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
         websearch_disabled: false,
         model_name: lui_cfg.model_name.clone(),
     };
+    // Minimal ConfigSummary for the Remote's in-process HTTP server. Nothing
+    // ever polls this Remote's /data (the renderer points at the *Lui's*
+    // /data, not ours), so fields here are placeholders — but we keep the
+    // shape coherent in case something future introspects it.
+    let dummy_summary = ConfigSummary {
+        bind_addr: format!("127.0.0.1:{}", local_web),
+        web_port: local_web,
+        websearch_disabled: false,
+        model_source: "none".to_string(),
+        sampling: None,
+        tuning: String::new(),
+    };
     websearch::spawn(
         "127.0.0.1",
         local_web,
-        state,
+        state.clone(),
         config_info,
         std::time::Instant::now(),
+        dummy_summary,
     );
 
+    // Print the setup banner before the Display starts. Display doesn't
+    // Purge scrollback, so this stays scrollable during the session —
+    // useful for recovering the bookmarklet URL or confirming what
+    // opencode was pointed at without having to exit.
     print_use_banner(target, &lui_cfg, &llama_base_url, local_web);
 
-    // Block on Ctrl-C. bsearch lives on a tokio task spawned by
-    // `websearch::spawn`; returning from here would drop the runtime and
-    // take it with us. ctrl_c's Err path means the signal handler itself
-    // failed to install — rare, but treat it as fatal so we don't silently
-    // hang unreacheable to a keypress.
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(|e| format!("failed to install Ctrl-C handler: {}", e))?;
+    // Render the Lui's UI by polling its `/data`. We pass `Some(state)`
+    // for the Remote's in-process bsearch ServerState — the log ring is
+    // empty (no llama-server feeding it) but `websearch_total` and
+    // `active_searches` reflect the user's opencode-driven searches through
+    // *our* bsearch, which is what they care about. The `remote: true`
+    // flag tells Display to render the Server Log panel as "Not available
+    // in remote mode" instead of an empty void. The bookmarklet URL is
+    // this Remote's own bsearch (8081 by convention), not the Lui's —
+    // bookmarklets live in the browser the user is sitting at.
+    let local_setup_url = Some(format!("http://127.0.0.1:{}/setup", local_web));
+    let display = Display::new(
+        target.host.clone(),
+        target.http_port,
+        Some(state.clone()),
+        local_setup_url,
+        true,
+    );
+
+    // Display.run owns the screen and exits on Ctrl-C / 'q' / the Lui
+    // reporting `exited: true`. shutdown_tx is unused here (no child
+    // process to tear down) so we just hand it a throwaway channel.
+    let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
+    display.run(shutdown_tx).await;
     Ok(())
 }

@@ -270,6 +270,83 @@ pub fn websearch_port(config: &ServerConfig) -> u16 {
     config.web_port.unwrap_or_else(|| config.port.saturating_add(1))
 }
 
+/// Render the "source" line shown under the Model KV: `--hf ORG/REPO`,
+/// `-m /path/to.gguf`, or `none`. Lives here (not in display.rs) so the
+/// Lui can pre-format it into the UiSnapshot and any renderer — local or
+/// Remote — shows an identical line.
+pub fn format_source(cfg: &ServerConfig) -> String {
+    if !cfg.hf_repo.is_empty() {
+        format!("--hf {}", cfg.hf_repo)
+    } else if !cfg.model.is_empty() {
+        format!("-m {}", cfg.model)
+    } else {
+        "none".to_string()
+    }
+}
+
+/// Sampler overrides line under the Model KV. Returns `None` when every
+/// sampler is at default, so the renderer can skip the row entirely rather
+/// than showing an empty "sampling: " label.
+pub fn format_sampling(cfg: &ServerConfig) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = cfg.temp {
+        parts.push(format!("temp={}", v));
+    }
+    if let Some(v) = cfg.top_p {
+        parts.push(format!("top-p={}", v));
+    }
+    if let Some(v) = cfg.top_k {
+        parts.push(format!("top-k={}", v));
+    }
+    if let Some(v) = cfg.min_p {
+        parts.push(format!("min-p={}", v));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("sampling: {}", parts.join(" · ")))
+    }
+}
+
+/// Effective-tuning line under the llamacpp KV. Always returns a string
+/// (at minimum `np=N`) — the tuning section is never entirely absent.
+pub fn format_tuning(cfg: &ServerConfig) -> String {
+    let np = cfg.parallel.unwrap_or(DEFAULT_PARALLEL);
+    let mut parts = vec![format!("np={}", np)];
+    if let Some(ub) = cfg.ubatch_size {
+        parts.push(format!("ubatch={}", ub));
+    }
+
+    let ctk = cfg.cache_type_k.as_deref().unwrap_or("f16");
+    let ctv = cfg.cache_type_v.as_deref().unwrap_or("f16");
+    if ctk != "f16" || ctv != "f16" {
+        parts.push(format!("KV={}/{}", ctk, ctv));
+    }
+    let default_b = cfg
+        .ubatch_size
+        .map(|ub| ub.max(DEFAULT_BATCH_SIZE))
+        .unwrap_or(DEFAULT_BATCH_SIZE);
+    parts.push(format!("batch={}", cfg.batch_size.unwrap_or(default_b)));
+    if let Some(v) = cfg.threads_batch {
+        parts.push(format!("tb={}", v));
+    }
+    if let Some(v) = cfg.cache_ram {
+        parts.push(format!("cache-ram={}MiB", v));
+    }
+    if let Some(v) = cfg.prio_batch {
+        parts.push(format!("prio-batch={}", v));
+    }
+    match cfg.swa_full {
+        Some(true) => parts.push("swa-full".to_string()),
+        Some(false) => parts.push("swa-full=off".to_string()),
+        None => {}
+    }
+    if !cfg.extra_args.is_empty() {
+        parts.push(format!("+{} extra", cfg.extra_args.len()));
+    }
+    parts.join(" · ")
+}
+
 impl Default for LuiConfig {
     fn default() -> Self {
         LuiConfig {

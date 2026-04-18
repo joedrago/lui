@@ -9,7 +9,10 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ServerConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL};
+use crate::config::{
+    format_sampling, format_source, format_tuning, websearch_port, ServerConfig,
+    DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
+};
 
 const LOG_RING_SIZE: usize = 200;
 const MAX_RECENT_REQUESTS: usize = 3;
@@ -188,6 +191,12 @@ pub struct UiSnapshot {
 
     pub websearch_total: u64,
     pub active_searches: Vec<String>,
+
+    /// Pre-formatted config pieces the renderer needs (bind, sampling,
+    /// tuning, model source). Static for the lifetime of a Lui, but we
+    /// include it in every snapshot so the renderer has a single source of
+    /// truth per frame.
+    pub config: ConfigSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +219,50 @@ pub struct DownloadSnapshot {
     pub pct: u32,
 }
 
+/// Pre-formatted pieces of `ServerConfig` that the renderer needs. We
+/// format on the Lui side (once at spawn time) so a Remote renderer gets
+/// exactly the same lines a local renderer would — no duplicate format
+/// functions on both ends, and no need to ship the full ServerConfig
+/// struct over the wire (half its fields are irrelevant to rendering and
+/// the other half leak deployment-specific paths).
+///
+/// `bind_addr`, `model_source`, `sampling`, `tuning` are pre-rendered
+/// strings; we made them strings rather than typed fields on purpose —
+/// keeps the wire contract stable as new llama-server flags get added,
+/// and the renderer doesn't have to learn about them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigSummary {
+    /// Exactly the text shown on the "Bind" sub-line, e.g. "0.0.0.0:8080".
+    pub bind_addr: String,
+    /// Port of the lui HTTP server (the one serving this snapshot). The
+    /// renderer uses this to know where `/setup` lives on the *Lui* — a
+    /// local renderer treats it as the bookmarklet URL; a Remote renderer
+    /// ignores it in favor of its own local bsearch URL.
+    pub web_port: u16,
+    pub websearch_disabled: bool,
+    /// "--hf org/repo" or "-m /path" or "none".
+    pub model_source: String,
+    /// Sampler overrides, e.g. "sampling: temp=0.7 · top-p=0.9". `None`
+    /// when every sampler is at its llama-server default.
+    pub sampling: Option<String>,
+    /// Tuning knobs line, e.g. "np=4 · ubatch=512 · batch=2048". Always
+    /// at least `np=N`, never empty.
+    pub tuning: String,
+}
+
+impl ConfigSummary {
+    pub fn from_config(cfg: &ServerConfig) -> Self {
+        ConfigSummary {
+            bind_addr: format!("{}:{}", cfg.host, cfg.port),
+            web_port: websearch_port(cfg),
+            websearch_disabled: cfg.websearch_disabled,
+            model_source: format_source(cfg),
+            sampling: format_sampling(cfg),
+            tuning: format_tuning(cfg),
+        }
+    }
+}
+
 impl SlotInfo {
     fn to_snapshot(&self) -> SlotSnapshot {
         SlotSnapshot {
@@ -230,8 +283,9 @@ impl SlotInfo {
 impl ServerState {
     /// Materialize a wire-format snapshot. `uptime` is the elapsed time
     /// since the Lui process started — supplied by the caller because the
-    /// lui HTTP server (not `ServerState`) owns that clock.
-    pub fn to_snapshot(&self, uptime: Duration) -> UiSnapshot {
+    /// lui HTTP server (not `ServerState`) owns that clock. `config` is
+    /// the pre-formatted `ConfigSummary`, built once at spawn time.
+    pub fn to_snapshot(&self, uptime: Duration, config: &ConfigSummary) -> UiSnapshot {
         let mut slots: Vec<SlotSnapshot> =
             self.active_slots.values().map(SlotInfo::to_snapshot).collect();
         // HashMap iteration is unordered; sort so the renderer sees a
@@ -304,6 +358,8 @@ impl ServerState {
 
             websearch_total: self.websearch_total,
             active_searches,
+
+            config: config.clone(),
         }
     }
 }

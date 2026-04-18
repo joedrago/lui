@@ -35,7 +35,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::server::{ServerState, UiSnapshot};
+use crate::server::{ConfigSummary, ServerState, UiSnapshot};
 
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
@@ -64,6 +64,11 @@ struct AppState {
     /// uptime that a Remote renderer can show without needing to guess when
     /// llama-server came up.
     start_time: Instant,
+    /// Pre-formatted config strings for `/data`. Built once at spawn time
+    /// because these don't change during a Lui's lifetime; cloning the
+    /// struct into each snapshot is a handful of `String::clone`s, which
+    /// is trivial even at 4 Hz.
+    config_summary: ConfigSummary,
 }
 
 /// JSON returned by `GET /config`. Used by `lui --ssh-use` on a Remote to
@@ -124,6 +129,7 @@ pub fn spawn(
     server_state: Arc<Mutex<ServerState>>,
     config_info: LuiConfigResponse,
     start_time: Instant,
+    config_summary: ConfigSummary,
 ) {
     let websearch_enabled = !config_info.websearch_disabled;
     let state = AppState {
@@ -132,6 +138,7 @@ pub fn spawn(
         port,
         config_info,
         start_time,
+        config_summary,
     };
 
     let mut app: Router<AppState> = Router::new()
@@ -264,7 +271,7 @@ async fn handle_data(State(state): State<AppState>) -> Json<UiSnapshot> {
     let uptime = state.start_time.elapsed();
     let snapshot = {
         let st = state.server_state.lock().unwrap();
-        st.to_snapshot(uptime)
+        st.to_snapshot(uptime, &state.config_summary)
     };
     Json(snapshot)
 }
