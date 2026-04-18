@@ -515,13 +515,15 @@ fn print_use_banner(
         Print("\n"),
         SetForegroundColor(muted),
         Print(format!(
-            "    model:            {}\n    llama (direct):   {}\n    bsearch (local):  http://127.0.0.1:{}/bsearch\n",
-            lui_cfg.model_name, llama_base_url, local_web
+            "    model:            {}\n    llama (direct):   {}\n    bsearch (local):  http://127.0.0.1:{}/bsearch\n    bookmarklet:      http://127.0.0.1:{}/setup\n",
+            lui_cfg.model_name, llama_base_url, local_web, local_web
         )),
         ResetColor,
         Print("\n"),
         SetForegroundColor(muted),
         Print("  opencode config written. Run `opencode` in another terminal.\n"),
+        Print("  Open the bookmarklet URL once to install/update the search bookmark;\n"),
+        Print("  /bsearch stays broken until that bookmarklet fires in a browser.\n"),
         Print("  Ctrl-C here to shut down the local bsearch server.\n\n"),
         ResetColor,
     );
@@ -536,11 +538,12 @@ fn print_use_banner(
 pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
     let lui_cfg = fetch_lui_config(target)?;
 
-    // Pick a fresh high port for the local bsearch server so it doesn't
-    // collide with anything already bound on 8081 here. `pick_remote_port`
-    // seeds from wall-clock ns, which is good enough for two separate
-    // invocations to pick different values most of the time.
-    let local_web = pick_remote_port();
+    // Use the conventional 8081 port here, not a randomized high port. A
+    // Remote doesn't run llama-server (or anything else on 8081), so
+    // collision risk is minimal, and a stable port means the user only has
+    // to drag the /setup bookmarklet into their bookmarks bar once — not
+    // once per `lui --remote` invocation.
+    let local_web = DEFAULT_REMOTE_HTTP_PORT;
 
     // opencode points straight at the Lui's exposed llama-server over the
     // network. We use the host the user typed (not a reverse-resolved name)
