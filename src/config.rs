@@ -75,6 +75,10 @@ pub struct ModelOverrides {
     pub cache_ram: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prio_batch: Option<i32>,
+    // Target free-memory margin (MiB) for llama-server's --fit. Stored as
+    // a string so the per-device comma form ("2048,256,256") round-trips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit_target: Option<String>,
     // Merged into the global chat_template_kwargs at resolve time (not
     // last-wins replace). See the note on ServerConfig::chat_template_kwargs.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -105,6 +109,7 @@ impl ModelOverrides {
             && self.swa_full.is_none()
             && self.cache_ram.is_none()
             && self.prio_batch.is_none()
+            && self.fit_target.is_none()
             && self.chat_template_kwargs.is_empty()
             && self.chat_template_kwargs_drop.is_empty()
             && self.extra_args.is_empty()
@@ -154,6 +159,11 @@ pub struct ServerConfig {
     pub cache_ram: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prio_batch: Option<i32>,
+    // Free-memory margin (MiB) to reserve per GPU device for llama-server's
+    // `--fit`. Stored as a string so the comma-separated per-device form
+    // ("2048,256,256") round-trips untouched to llama-server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit_target: Option<String>,
 
     // Chat-template kwargs are merge-semantics, not last-wins: llama-server's
     // --chat-template-kwargs takes a single JSON object, so passing the flag
@@ -240,6 +250,7 @@ impl Default for ServerConfig {
             swa_full: None,
             cache_ram: None,
             prio_batch: None,
+            fit_target: None,
             chat_template_kwargs: std::collections::BTreeMap::new(),
             chat_template_kwargs_drop: Vec::new(),
             extra_args: Vec::new(),
@@ -335,6 +346,9 @@ pub fn format_tuning(cfg: &ServerConfig) -> String {
     }
     if let Some(v) = cfg.prio_batch {
         parts.push(format!("prio-batch={}", v));
+    }
+    if let Some(ref v) = cfg.fit_target {
+        parts.push(format!("fit-target={}", v));
     }
     match cfg.swa_full {
         Some(true) => parts.push("swa-full".to_string()),
@@ -440,6 +454,9 @@ pub fn resolve(config: &LuiConfig) -> ServerConfig {
     }
     if ov.prio_batch.is_some() {
         effective.prio_batch = ov.prio_batch;
+    }
+    if ov.fit_target.is_some() {
+        effective.fit_target = ov.fit_target.clone();
     }
     // Append, not replace: globals tend to be machine-tuning (thread pins,
     // mlock) and per-model entries model-tuning; both should reach llama-server.

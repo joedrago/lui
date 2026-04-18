@@ -55,6 +55,12 @@ pub struct ServerState {
     pub model_params_unit: String,
     pub gpu_layers_loaded: u32,
     pub total_layers: u32,
+    // Layers where llama.cpp counts the layer as "offloaded" but has spilled
+    // its MoE experts back to host RAM (attn-only on GPU). Summed across all
+    // GPU devices from the final `llama_params_fit_impl: ... (N overflowing)`
+    // summary. Zero means no MoE expert spill — either fully GPU or
+    // plain partial offload.
+    pub overflow_layers: u32,
     pub cpu_mem_mib: f64,
     pub gpu_mem_mib: f64,
     pub kv_cache_mib: f64,
@@ -169,6 +175,8 @@ pub struct UiSnapshot {
     pub compute_buf_mib: f64,
     pub gpu_layers_loaded: u32,
     pub total_layers: u32,
+    #[serde(default)]
+    pub overflow_layers: u32,
 
     pub llama_version: String,
     pub update_available: bool,
@@ -336,6 +344,7 @@ impl ServerState {
             compute_buf_mib: self.compute_buf_mib,
             gpu_layers_loaded: self.gpu_layers_loaded,
             total_layers: self.total_layers,
+            overflow_layers: self.overflow_layers,
 
             llama_version: self.llama_version.clone(),
             update_available: self.update_available,
@@ -520,6 +529,10 @@ pub fn build_args(config: &ServerConfig) -> Vec<String> {
     if let Some(v) = config.prio_batch {
         args.push("--prio-batch".to_string());
         args.push(v.to_string());
+    }
+    if let Some(ref v) = config.fit_target {
+        args.push("--fit-target".to_string());
+        args.push(v.clone());
     }
 
     args.extend(config.extra_args.iter().cloned());
@@ -777,8 +790,27 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
     // Each probe emits a breakdown line that may show self>total — that's
     // the signal fit uses to reject the candidate, NOT an allocation failure.
     // Suppress the oversubscription check during this window.
+    //
+    // The same block is where we harvest "N layers (M overflowing)" — the
+    // summary llama.cpp prints right before `successfully fit`. "Overflowing"
+    // means the layer's MoE experts were spilled to host RAM even though the
+    // layer is nominally offloaded, so the plain `offloaded X/Y layers to
+    // GPU` count alone is not truth-telling on MoE models.
     else if line.contains("llama_params_fit_impl:") {
         state.fit_probing = true;
+        // Start of a new fit run — reset so the next successful fit sees a
+        // fresh total across its per-device summary lines.
+        if line.contains("memory for test allocation") {
+            state.overflow_layers = 0;
+        }
+        // Per-device summary line: "  - CUDA0 (...): 41 layers (28 overflowing), ..."
+        static OVERFLOW_RE: OnceLock<Regex> = OnceLock::new();
+        let re = OVERFLOW_RE
+            .get_or_init(|| Regex::new(r"-\s+\S.*?:\s+\d+\s+layers\s+\((\d+)\s+overflowing\)").unwrap());
+        if let Some(caps) = re.captures(line) {
+            let n: u32 = caps[1].parse().unwrap_or(0);
+            state.overflow_layers = state.overflow_layers.saturating_add(n);
+        }
     } else if line.contains("llama_params_fit:")
         && (line.contains("successfully fit") || line.contains("cannot fit"))
     {
@@ -1008,4 +1040,80 @@ fn extract_mib(line: &str) -> Option<f64> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"(\d+\.?\d*)\s+MiB").unwrap());
     re.captures(line).and_then(|c| c[1].parse::<f64>().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feed(state: &mut ServerState, lines: &[&str]) {
+        for l in lines {
+            parse_line(l, state);
+        }
+    }
+
+    #[test]
+    fn parses_moe_overflow_and_cpu_spill() {
+        // Lines drawn from a real 4080 SUPER load of a MoE model where
+        // llama.cpp claims 41/41 offloaded but pushes 28 layers' experts to
+        // host RAM. We should come out of this with overflow_layers=28 and a
+        // CPU model buffer of ~20 GiB — enough that the display can stop
+        // calling it "fully GPU".
+        let mut s = ServerState::default();
+        feed(
+            &mut s,
+            &[
+                "llama_params_fit_impl: memory for test allocation by device:",
+                "llama_params_fit_impl: id=0, n_layer=41, n_part=28, overflow_type=1, mem= 13934 MiB",
+                "llama_params_fit_impl: set ngl_per_device[0].(n_layer, n_part, overflow_type)=(41, 28, ATTN), id_dense_start=0",
+                "llama_params_fit_impl:   - CUDA0 (NVIDIA GeForce RTX 4080 SUPER): 41 layers (28 overflowing),  13934 MiB used,   1032 MiB free",
+                "llama_params_fit: successfully fit params to free device memory",
+                "load_tensors: offloaded 41/41 layers to GPU",
+                "load_tensors:   CPU_Mapped model buffer size = 20699.72 MiB",
+                "load_tensors:        CUDA0 model buffer size =  7948.14 MiB",
+            ],
+        );
+        assert_eq!(s.gpu_layers_loaded, 41);
+        assert_eq!(s.total_layers, 41);
+        assert_eq!(s.overflow_layers, 28);
+        assert!((s.cpu_mem_mib - 20699.72).abs() < 0.01);
+        assert!((s.gpu_mem_mib - 7948.14).abs() < 0.01);
+        assert!(!s.fit_probing);
+    }
+
+    #[test]
+    fn overflow_counter_resets_between_fit_runs() {
+        // A prior probe cycle may have set overflow_layers; the next fit run
+        // should start from zero so its per-device sum is accurate.
+        let mut s = ServerState::default();
+        s.overflow_layers = 99;
+        feed(
+            &mut s,
+            &[
+                "llama_params_fit_impl: memory for test allocation by device:",
+                "llama_params_fit_impl:   - CUDA0 (RTX 4080 SUPER): 20 layers (5 overflowing),  1000 MiB used,   100 MiB free",
+                "llama_params_fit:   - CUDA1 (RTX 4080 SUPER): 20 layers (3 overflowing),  1000 MiB used,   100 MiB free",
+            ],
+        );
+        // Only the CUDA0 summary is inside an `llama_params_fit_impl:` line;
+        // CUDA1 here is deliberately on a non-impl line to guard against
+        // accidental matches outside the fit_impl block.
+        assert_eq!(s.overflow_layers, 5);
+    }
+
+    #[test]
+    fn fully_gpu_load_leaves_overflow_zero() {
+        let mut s = ServerState::default();
+        feed(
+            &mut s,
+            &[
+                "load_tensors: offloaded 32/32 layers to GPU",
+                "load_tensors:        CUDA0 model buffer size =  4000.00 MiB",
+            ],
+        );
+        assert_eq!(s.gpu_layers_loaded, 32);
+        assert_eq!(s.total_layers, 32);
+        assert_eq!(s.overflow_layers, 0);
+        assert_eq!(s.cpu_mem_mib, 0.0);
+    }
 }

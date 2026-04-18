@@ -92,6 +92,9 @@ SETTINGS (scoped; pass `default` as the value to clear a per-scope override):
         --no-swa-full              Force --swa-full off (disables auto-detect)
         --cache-ram <MIB>          Host-memory prompt cache (llama-server --cache-ram)
         --prio-batch <0-3>         Batch thread priority
+        --fit-target, -fitt <MiB>  Free-VRAM headroom reserved by llama-server --fit
+                                   (default 1024). Accepts a single value or comma-
+                                   separated per-device list (e.g. 2048,512,512).
 
 MACHINE SETTINGS (always global; rejected with --this):
         --port <N>                 Server port (default 8080)
@@ -279,6 +282,10 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
             Long("prio-batch") => {
                 let v = take_scalar::<i32>(&mut parser, "--prio-batch");
                 set_prio(config, scope, &active_key, v);
+            }
+            Long("fit-target") | Long("fitt") => {
+                let v = take_string_or_default(&mut parser, "--fit-target");
+                set_fit_target(config, scope, &active_key, v);
             }
 
             // Machine-only settings: reject --this so the user doesn't
@@ -581,6 +588,12 @@ fn set_prio(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<i
     match scope {
         Scope::Global => cfg.server.prio_batch = v,
         Scope::This => cfg.models.entry(require_active_model(key, "--prio-batch")).or_default().prio_batch = v,
+    }
+}
+fn set_fit_target(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<String>) {
+    match scope {
+        Scope::Global => cfg.server.fit_target = v,
+        Scope::This => cfg.models.entry(require_active_model(key, "--fit-target")).or_default().fit_target = v,
     }
 }
 

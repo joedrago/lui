@@ -414,19 +414,52 @@ impl Display {
             let breakdown = format!("{} MiB", parts.join(" + "));
             self.print_sub(&mut t, &breakdown);
 
-            // GPU offload as second grey line under Memory
+            // GPU offload as second grey line under Memory.
+            //
+            // llama.cpp's "offloaded X/Y layers to GPU" count lies on modern
+            // MoE models: when experts spill back to host RAM via the MoE fit
+            // path, every layer is still reported as "offloaded" even though
+            // its weights mostly live in CPU memory. Trust the buffer split
+            // and the "(N overflowing)" count over the raw offload number.
             if st.total_layers > 0 {
-                let status = if st.gpu_layers_loaded == st.total_layers {
-                    "fully GPU"
-                } else if st.gpu_layers_loaded == 0 {
-                    "CPU only"
+                // A full-GPU load has negligible CPU model buffer (mapped
+                // metadata only). 256 MiB is well above typical embedding /
+                // output buffers but well under a single MoE expert layer,
+                // so it cleanly separates real spill from small host mmaps.
+                let cpu_weights_significant = st.cpu_mem_mib > 256.0;
+                let gpu_line = if st.gpu_layers_loaded == 0 {
+                    format!(
+                        "{}/{} layers offloaded (CPU only)",
+                        st.gpu_layers_loaded, st.total_layers
+                    )
+                } else if st.overflow_layers > 0 {
+                    let full = st.gpu_layers_loaded.saturating_sub(st.overflow_layers);
+                    format!(
+                        "{}/{} layers offloaded ({} fully GPU, {} with experts on CPU)",
+                        st.gpu_layers_loaded,
+                        st.total_layers,
+                        full,
+                        st.overflow_layers
+                    )
+                } else if st.gpu_layers_loaded == st.total_layers && !cpu_weights_significant {
+                    format!(
+                        "{}/{} layers offloaded (fully GPU)",
+                        st.gpu_layers_loaded, st.total_layers
+                    )
+                } else if st.gpu_layers_loaded == st.total_layers {
+                    // All layers claimed offloaded but a substantial chunk of
+                    // weights is mapped to host RAM — expert spill without the
+                    // summary line, or an older llama.cpp that doesn't emit it.
+                    format!(
+                        "{}/{} layers offloaded (partial, weights on CPU)",
+                        st.gpu_layers_loaded, st.total_layers
+                    )
                 } else {
-                    "partial"
+                    format!(
+                        "{}/{} layers offloaded (partial)",
+                        st.gpu_layers_loaded, st.total_layers
+                    )
                 };
-                let gpu_line = format!(
-                    "{}/{} layers offloaded ({})",
-                    st.gpu_layers_loaded, st.total_layers, status
-                );
                 self.print_sub(&mut t, &gpu_line);
             }
         }
