@@ -38,14 +38,14 @@ struct RunOpts {
     cmd: bool,
     // One-shot peer-configuration modes. Neither persists to lui.toml.
     //
-    //   ssh_share: run on a Lui. Configures a ReverseRemote's opencode over
+    //   ssh_share: run on a server. Configures a client's opencode over
     //       SSH to reach this machine's llama-server via a reverse tunnel.
     //       Prints `ssh -R ...` for this machine to run. SSH is load-
-    //       bearing: the ReverseRemote can't always reach back otherwise.
+    //       bearing: the client can't always reach back otherwise.
     //
-    //   use_lui:   run on a Remote. Fetches /config from an already-running
-    //       --public Lui over plain HTTP, writes *local* opencode.json +
-    //       skill pointing opencode directly at that Lui's llama-server URL,
+    //   use_lui:   run on a client. Fetches /config from an already-running
+    //       --public server over plain HTTP, writes *local* opencode.json +
+    //       skill pointing opencode directly at that server's llama-server URL,
     //       spawns a local bsearch server so the browser opens here, and
     //       blocks on Ctrl-C. No SSH.
     ssh_share: Option<ssh_tunnel::SshTarget>,
@@ -103,17 +103,17 @@ MACHINE SETTINGS (always global; rejected with --this):
         --no-avo                   Abort on VRAM oversubscription (default)
 
 REMOTE (one-shot; not persisted):
-        --ssh <USER@HOST>          Run on a Lui. Configures that remote's
-                                   opencode to reach this machine's llama-server
-                                   over a reverse tunnel, prints the matching
-                                   `ssh -R ...` command, and exits.
-        --remote <HOST[:PORT]>     Run on a Remote. Fetches /config from a
-                                   --public Lui over plain HTTP, writes local
-                                   opencode.json pointed directly at that Lui's
-                                   llama-server, and stands up a local bsearch
-                                   server so the browser opens on this machine.
-                                   Blocks until Ctrl-C. PORT is the Lui's HTTP
-                                   port; defaults to 8081.
+        --ssh <USER@HOST>          Run on a server. Configures that
+                                   remote's opencode to reach this machine's
+                                   llama-server over a reverse tunnel, prints
+                                   the matching `ssh -R ...` command, and exits.
+        --remote <HOST[:PORT]>     Run on a client. Fetches /config from a
+                                   --public server over plain HTTP, writes
+                                   local opencode.json pointed directly at that
+                                   server's llama-server, and stands up a local
+                                   bsearch server so the browser opens on this
+                                   machine. Blocks until Ctrl-C. PORT is the
+                                   server's HTTP port; defaults to 8081.
 
 OTHER:
     -l, --list                     List cached models and show current config
@@ -1230,7 +1230,7 @@ async fn main() {
         }
     }
 
-    // --ssh: one-shot ReverseRemote configuration. Doesn't spawn
+    // --ssh: one-shot client configuration. Doesn't spawn
     // llama-server, doesn't touch local opencode. Placed after SWA auto-
     // detect so the remote config reflects the same effective server config
     // we would have launched with. We deliberately ran save_config above:
@@ -1244,10 +1244,10 @@ async fn main() {
         return;
     }
 
-    // --use: this machine is a Remote; point ourselves at an already-
-    // running --public Lui by fetching its /config over HTTP, writing our
+    // --use: this machine is a client; point ourselves at an already-
+    // running --public server by fetching its /config over HTTP, writing our
     // own ~/.config/opencode/opencode.json + skill pointed directly at that
-    // Lui, and standing up a local bsearch server so the browser opens on
+    // server, and standing up a local bsearch server so the browser opens on
     // this machine. Blocks until Ctrl-C. Doesn't spawn llama-server and
     // doesn't touch lui.toml beyond whatever was already saved above.
     if let Some(target) = &opts.use_lui {
@@ -1305,7 +1305,7 @@ async fn main() {
     };
 
     // Spawn the local lui HTTP server. Always mounts /health and /config so
-    // a Remote's `lui --ssh-use` can discover us regardless of whether
+    // a client's `lui --ssh` can discover us regardless of whether
     // browser-mediated web search is on; the /bsearch side of the server
     // only mounts when websearch is enabled. Binds to config.host so
     // --public also opens up /config to the LAN.
@@ -1319,7 +1319,7 @@ async fn main() {
     };
     // Shared start time: the lui HTTP server reports uptime off this clock
     // via `/data`, and the Display uses the same `start_time` so the local
-    // renderer and any future Remote renderer agree on Lui lifetime.
+    // renderer and any future client renderer agree on server lifetime.
     let start_time = std::time::Instant::now();
     let config_summary = ConfigSummary::from_config(&effective);
     websearch::spawn(

@@ -19,7 +19,7 @@ const MAX_RECENT_REQUESTS: usize = 3;
 
 /// Wire-format version for `/data`. Bump on breaking changes; additive
 /// fields (with `#[serde(default)]` on the reader side) don't require a
-/// bump. Kept so a Remote renderer can refuse an incompatible Lui.
+/// bump. Kept so a client renderer can refuse an incompatible server.
 pub const UI_SNAPSHOT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
@@ -138,7 +138,7 @@ impl ServerState {
 /// included because the Display renders logs from its local `ServerState`
 /// directly (they're large and update far faster than the 4 Hz render tick).
 ///
-/// A Remote renderer pointed at a Lui's `/data` gets the full upper UI from
+/// A client renderer pointed at a server's `/data` gets the full upper UI from
 /// this struct — that's the motivation for replacing `Instant` with
 /// `processing_elapsed_ms` and carrying `uptime_seconds` explicitly instead
 /// of computing it on the renderer side.
@@ -193,7 +193,7 @@ pub struct UiSnapshot {
     pub active_searches: Vec<String>,
 
     /// Pre-formatted config pieces the renderer needs (bind, sampling,
-    /// tuning, model source). Static for the lifetime of a Lui, but we
+    /// tuning, model source). Static for the lifetime of a server, but we
     /// include it in every snapshot so the renderer has a single source of
     /// truth per frame.
     pub config: ConfigSummary,
@@ -220,7 +220,7 @@ pub struct DownloadSnapshot {
 }
 
 /// Pre-formatted pieces of `ServerConfig` that the renderer needs. We
-/// format on the Lui side (once at spawn time) so a Remote renderer gets
+/// format on the server side (once at spawn time) so a client renderer gets
 /// exactly the same lines a local renderer would — no duplicate format
 /// functions on both ends, and no need to ship the full ServerConfig
 /// struct over the wire (half its fields are irrelevant to rendering and
@@ -235,8 +235,8 @@ pub struct ConfigSummary {
     /// Exactly the text shown on the "Bind" sub-line, e.g. "0.0.0.0:8080".
     pub bind_addr: String,
     /// Port of the lui HTTP server (the one serving this snapshot). The
-    /// renderer uses this to know where `/setup` lives on the *Lui* — a
-    /// local renderer treats it as the bookmarklet URL; a Remote renderer
+    /// renderer uses this to know where `/setup` lives on the *server* — a
+    /// local renderer treats it as the bookmarklet URL; a client renderer
     /// ignores it in favor of its own local bsearch URL.
     pub web_port: u16,
     pub websearch_disabled: bool,
@@ -282,7 +282,7 @@ impl SlotInfo {
 
 impl ServerState {
     /// Materialize a wire-format snapshot. `uptime` is the elapsed time
-    /// since the Lui process started — supplied by the caller because the
+    /// since the server process started — supplied by the caller because the
     /// lui HTTP server (not `ServerState`) owns that clock. `config` is
     /// the pre-formatted `ConfigSummary`, built once at spawn time.
     pub fn to_snapshot(&self, uptime: Duration, config: &ConfigSummary) -> UiSnapshot {

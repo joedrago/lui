@@ -272,8 +272,8 @@ pub fn websearch_port(config: &ServerConfig) -> u16 {
 
 /// Render the "source" line shown under the Model KV: `--hf ORG/REPO`,
 /// `-m /path/to.gguf`, or `none`. Lives here (not in display.rs) so the
-/// Lui can pre-format it into the UiSnapshot and any renderer — local or
-/// Remote — shows an identical line.
+/// server can pre-format it into the UiSnapshot and any renderer — local or
+/// client — shows an identical line.
 pub fn format_source(cfg: &ServerConfig) -> String {
     if !cfg.hf_repo.is_empty() {
         format!("--hf {}", cfg.hf_repo)
@@ -730,14 +730,14 @@ fn update_websearch_permission(
 /// existing config (so unrelated keys the user has hand-set are preserved).
 /// Pure function — no filesystem touches. The local path writes the result
 /// to `~/.config/opencode/opencode.json`; the `--ssh` path pipes it over
-/// SSH to a ReverseRemote; the `--remote` path writes it locally on the
-/// Remote.
+/// SSH to a client; the `--remote` path writes it locally on the
+/// client.
 ///
 /// `model_name` is the short provider-model id (see `derive_model_name`).
 /// `websearch_disabled` matches `ServerConfig::websearch_disabled`.
 /// `llama_base_url` is what opencode's "lui" provider will point at — for
 /// local use that's `http://localhost:<port>/v1`; for tunneled use it's a
-/// URL pointing at whichever local port will be forwarded to the Lui's
+/// URL pointing at whichever local port will be forwarded to the server's
 /// llama-server. `web_port` is the port opencode's bash permission pattern
 /// will allow curl calls to (same-side port for each role).
 pub fn build_opencode_json(

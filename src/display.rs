@@ -40,27 +40,27 @@ const COLOR_NUMBER: Color = Color::Rgb {
 };
 
 pub struct Display {
-    /// Host to poll `/data` on. `"127.0.0.1"` locally; a Lui's hostname
-    /// when this Display is driving a Remote view.
+    /// Host to poll `/data` on. `"127.0.0.1"` locally; a server's hostname
+    /// when this Display is driving a client view.
     snapshot_host: String,
     /// Port of the lui HTTP server (`web_port`), not llama-server's port.
     snapshot_port: u16,
     /// The ServerState backing this renderer's *local* HTTP server. In
-    /// local mode it's the Lui's own state (log ring, websearch counts,
-    /// the lot). In `--remote` mode it's the Remote's in-process bsearch
+    /// local mode it's the server's own state (log ring, websearch counts,
+    /// the lot). In `--remote` mode it's the client's in-process bsearch
     /// state — log ring is always empty, but websearch counts reflect
     /// opencode's searches through our local bsearch (which is what the
-    /// user cares about; the remote Lui's counts are meaningless when
+    /// user cares about; the remote server's counts are meaningless when
     /// opencode runs on this machine).
     local_state: Option<Arc<Mutex<ServerState>>>,
-    /// True when this Display is watching a different machine's Lui over
-    /// HTTP. Controls the Server Log panel: in Remote mode we can't
+    /// True when this Display is watching a different machine's server over
+    /// HTTP. Controls the Server Log panel: in client mode we can't
     /// populate the local log ring from the remote's llama-server output,
     /// so the panel shows a placeholder instead of an empty void.
     remote: bool,
     /// URL of the bookmarklet `/setup` page the user should open in their
     /// *local* browser. Always a 127.0.0.1 URL — browser-mediated search
-    /// is a this-machine-has-a-user concern, not a Lui-side concern. `None`
+    /// is a this-machine-has-a-user concern, not a server-side concern. `None`
     /// when this machine isn't running a bsearch server (e.g. local mode
     /// with `--no-websearch`). The renderer shows it in the top-right
     /// corner when `Some`.
@@ -68,8 +68,8 @@ pub struct Display {
     /// When this Display was created. Only consulted by `print_summary`
     /// (which runs after the poll loop stops and therefore has no
     /// `/data` response in hand). The main render loop uses
-    /// `UiSnapshot::uptime_seconds` instead, so a Remote renderer agrees
-    /// with the Lui on actual lifetime.
+    /// `UiSnapshot::uptime_seconds` instead, so a client renderer agrees
+    /// with the server on actual lifetime.
     start_time: Instant,
 }
 
@@ -358,7 +358,7 @@ impl Display {
 
         // Blank line below the header doubles as the always-visible home of
         // the websearch setup URL, right-aligned in gray. This is always
-        // *our* local bsearch URL (set at construction), not the Lui's —
+        // *our* local bsearch URL (set at construction), not the server's —
         // the bookmarklet needs to live in the browser the user is sitting
         // in front of.
         if let Some(ref url) = self.local_setup_url {
@@ -549,9 +549,9 @@ impl Display {
         // potentially-in-flight sections (WebSearch, Requests) below.
         t.newline();
 
-        // WebSearch counts: in local mode these come from the Lui's own
+        // WebSearch counts: in local mode these come from the server's own
         // state (via /data). In `--remote` mode, opencode runs on *this*
-        // machine and hits *our* local bsearch, not the remote Lui's — so
+        // machine and hits *our* local bsearch, not the remote server's — so
         // we read counts from `local_state` when available. The gate is
         // `local_setup_url.is_some()`: the URL is this machine's bsearch
         // URL, so its presence is the definitive signal that this machine
@@ -612,7 +612,7 @@ impl Display {
 
         // Mirror the WebSearch count policy: in `--remote` mode the
         // interesting active searches are the ones opencode triggered
-        // through our local bsearch, not the remote Lui's (which has no
+        // through our local bsearch, not the remote server's (which has no
         // opencode pointed at it). Fall back to snapshot when there's no
         // local state at all.
         let local_active_searches: Option<Vec<String>> = self.local_state.as_ref().map(|s| {
@@ -823,8 +823,8 @@ impl Display {
         t.newline();
 
         // Log ring is the llama-server's stdout/stderr, which only exists
-        // on the Lui. In `--remote` mode we have a local_state (for the
-        // Remote's own bsearch counts) but no llama-server feeding its
+     // on the server. In `--remote` mode we have a local_state (for the
+      // client's own bsearch counts) but no llama-server feeding its
         // log_lines, so show a placeholder rather than an empty void.
         if self.remote || self.local_state.is_none() {
             let _ = queue!(
@@ -857,8 +857,8 @@ impl Display {
     }
 
     pub fn print_summary(&self) {
-        // print_summary is only meaningful on the Lui side — it's where
-        // llama-server actually ran. A Remote Display (no local_state) just
+    // print_summary is only meaningful on the server side — it's where
+      // llama-server actually ran. A client Display (no local_state) just
         // restores the cursor and bails.
         let Some(ref state) = self.local_state else {
             let _ = execute!(io::stdout(), Show);

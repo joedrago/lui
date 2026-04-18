@@ -1,55 +1,47 @@
 // Copyright 2026 Joe Drago. All rights reserved.
 // SPDX-License-Identifier: BSD-2-Clause
 
-//! One-shot peer opencode configuration for Lui/Remote pairs.
+//! One-shot peer opencode configuration for server/client pairs.
 //!
 //! # Terminology
 //!
-//! These three words appear throughout this module and the rest of the
-//! codebase. They're not OpenSSH terms — they're our own names for the
-//! three roles a machine can play in lui's multi-machine layouts:
+//! These words appear throughout this module and the rest of the
+//! codebase. They describe the two roles machines play in lui's
+//! multi-machine layouts:
 //!
-//! - **Lui**: a machine running `lui` (and thus `llama-server`). It hosts
-//!   the model. In every flow, exactly one machine is the Lui.
-//! - **Remote**: a user's workstation that wants to drive a Lui's model via
-//!   opencode, but doesn't run llama-server itself. A Remote *initiates*
-//!   the connection to a Lui (via `lui --remote HOST`).
-//! - **ReverseRemote**: same idea as a Remote, but the Lui side initiates
-//!   configuration. The Lui user runs `lui --ssh user@host` to push an
-//!   opencode config into that host and get back an `ssh -R …` command
-//!   that forwards this Lui's llama-server through the tunnel. Used when
-//!   the ReverseRemote can't reach the Lui directly (NAT, no public IP).
-//!
-//! "Remote" on its own always means the forward-initiated kind; the word
-//! "ReverseRemote" is only used when the distinction matters.
+//! - **server**: a machine running `lui` (and thus `llama-server`). It hosts
+//!   the model. In every flow, exactly one machine is the server.
+//! - **client**: a user's workstation that wants to drive a server's model via
+//!   opencode, but doesn't run llama-server itself. A client *initiates*
+//!   the connection to a server (via `lui --remote HOST`).
 //!
 //! # The two flows
 //!
 //! They're asymmetric on purpose — the two directions have different
 //! constraints:
 //!
-//! `--ssh user@host` runs on a Lui and prepares a *ReverseRemote* to
-//! use this Lui's llama-server over a reverse tunnel. It SSHes into the
-//! ReverseRemote, picks a fresh pair of high ports there (to dodge 8080/8081
+//! `--ssh user@host` runs on the server and prepares a *client* to
+//! use this server's llama-server over a reverse tunnel. It SSHes into the
+//! client, picks a fresh pair of high ports there (to dodge 8080/8081
 //! collisions), writes its `~/.config/opencode/opencode.json` and (unless
 //! websearch is disabled) its `lui-web-search` SKILL.md baked with those
-//! remote ports, and prints the `ssh -R … user@host` command the Lui user
-//! runs to establish the tunnel. SSH is load-bearing here: the ReverseRemote
-//! usually *can't* reach back to the Lui any other way (NAT, no public
+//! client ports, and prints the `ssh -R … user@host` command the server user
+//! runs to establish the tunnel. SSH is load-bearing here: the client
+//! usually *can't* reach back to the server any other way (NAT, no public
 //! address), so a reverse tunnel is the whole point.
 //!
-//! `--remote host[:port]` runs on a *Remote* and points this machine at
-//! an already-running `--public` Lui. No SSH involved: if `/config` (port
-//! defaults to 8081) is reachable from here, so is llama-server (the Lui
+//! `--remote host[:port]` runs on a *client* and points this machine at
+//! an already-running `--public` server. No SSH involved: if `/config` (port
+//! defaults to 8081) is reachable from here, so is llama-server (the server
 //! exposes both on the same interface). We fetch `/config` over plain HTTP,
-//! write this Remote's own `~/.config/opencode/opencode.json` with `baseURL`
-//! pointing *directly* at `http://<host>:<lui_llama>/v1`, and write a
+//! write this client's own `~/.config/opencode/opencode.json` with `baseURL`
+//! pointing *directly* at `http://<host>:<server_llama>/v1`, and write a
 //! `lui-web-search` SKILL.md pointed at a bsearch server we spin up
 //! in-process here. Then we block on Ctrl-C so that in-process bsearch
 //! stays alive for as long as the user is running opencode. The bsearch
-//! server lives on the Remote on purpose: browser-mediated search needs a
+//! server lives on the client on purpose: browser-mediated search needs a
 //! real human at a real browser, which is wherever the user actually is —
-//! not on the Lui.
+//! not on the server.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -95,16 +87,16 @@ pub fn parse_share_target(s: &str) -> Result<SshTarget, String> {
     })
 }
 
-/// Target of `--remote`: the Lui's hostname plus the HTTP port where
+/// Target of `--remote`: the server's hostname plus the HTTP port where
 /// its `/config` endpoint is listening. Same port also hosts `/bsearch`
-/// et al., but we don't need that here — the Remote runs its own bsearch.
+/// et al., but we don't need that here — the client runs its own bsearch.
 #[derive(Debug, Clone)]
 pub struct UseTarget {
     pub host: String,
     pub http_port: u16,
 }
 
-/// Default HTTP port lui serves on a Lui that hasn't customized `--web-port`:
+/// Default HTTP port lui serves on a server that hasn't customized `--web-port`:
 /// mirrors the `llama_port + 1` convention with the default 8080 llama port.
 pub const DEFAULT_REMOTE_HTTP_PORT: u16 = 8081;
 
@@ -115,7 +107,7 @@ impl UseTarget {
 }
 
 /// Parse `HOST` or `HOST:PORT` for `--remote`. Bare-host form uses
-/// `DEFAULT_REMOTE_HTTP_PORT` (8081), which is what a default-config Lui
+/// `DEFAULT_REMOTE_HTTP_PORT` (8081), which is what a default-config server
 /// serves `/config` on. IPv6 literals aren't supported here (bracketed form
 /// would be ambiguous with our split logic); users who need IPv6 can set up
 /// a hostname alias in `/etc/hosts`.
@@ -309,7 +301,7 @@ fn print_share_success(
         Print("\n"),
         SetForegroundColor(lavender),
         SetAttribute(Attribute::Bold),
-        Print("  Remote opencode configured on "),
+        Print("  opencode configured on "),
         SetForegroundColor(Color::Cyan),
         Print(target.spec()),
         SetForegroundColor(lavender),
@@ -330,8 +322,8 @@ fn print_share_success(
     );
 }
 
-/// `--ssh`: configure the given ReverseRemote's opencode to point back
-/// at this Lui over a reverse tunnel. Any error here is fatal — the caller
+/// `--ssh`: configure the given client's opencode to point back
+/// at this server over a reverse tunnel. Any error here is fatal — the caller
 /// prints it and exits.
 pub fn setup_share(target: &SshTarget, effective: &ServerConfig) -> Result<(), String> {
     check_opencode(target)?;
@@ -360,7 +352,7 @@ pub fn setup_share(target: &SshTarget, effective: &ServerConfig) -> Result<(), S
 }
 
 // ----------------------------------------------------------------------------
-// --remote flow (this machine is a Remote pointing at a running Lui)
+// --remote flow (this machine is a client pointing at a running server)
 // ----------------------------------------------------------------------------
 
 /// Minimal blocking HTTP/1.1 GET. We use `Connection: close` so the server
@@ -369,7 +361,7 @@ pub fn setup_share(target: &SshTarget, effective: &ServerConfig) -> Result<(), S
 /// be small (a tiny JSON blob from `/config`).
 ///
 /// Returns (status_code, body). 5-second timeouts on connect/read/write; a
-/// misconfigured `--public` on the Lui is a much more common failure than
+/// misconfigured `--public` on the server is a much more common failure than
 /// a slow network, so we'd rather fail fast with a clear hint.
 fn http_get(host: &str, port: u16, path: &str) -> Result<(u16, String), String> {
     let sockaddrs: Vec<SocketAddr> = (host, port)
@@ -422,12 +414,12 @@ fn http_get(host: &str, port: u16, path: &str) -> Result<(u16, String), String> 
 
 /// Hit `/config` and decode it. Error messages drop a hint about `--public`
 /// on connection-refused / timeout, since that's the overwhelmingly common
-/// cause: a Lui bound to 127.0.0.1 is invisible on the network.
+/// cause: a server bound to 127.0.0.1 is invisible on the network.
 fn fetch_lui_config(target: &UseTarget) -> Result<LuiConfigResponse, String> {
     let (code, body) = http_get(&target.host, target.http_port, "/config").map_err(|e| {
         format!(
-            "could not reach {} — {}\n\nIs the Lui running with `--public`? \
-             Without it, the HTTP server binds to 127.0.0.1 only and a Remote can't see it.",
+            "could not reach {} — {}\n\nIs the server running with `--public`? \
+             Without it, the HTTP server binds to 127.0.0.1 only and a client can't see it.",
             target.http_url("/config"),
             e
         )
@@ -443,7 +435,7 @@ fn fetch_lui_config(target: &UseTarget) -> Result<LuiConfigResponse, String> {
         .map_err(|e| format!("{} returned unparseable JSON: {}", target.http_url("/config"), e))?;
     if resp.version != CONFIG_VERSION {
         return Err(format!(
-            "Lui reported /config version {}, this lui understands {}. Upgrade the older side.",
+            "server reported /config version {}, this lui understands {}. Upgrade the older side.",
             resp.version, CONFIG_VERSION
         ));
     }
@@ -452,9 +444,9 @@ fn fetch_lui_config(target: &UseTarget) -> Result<LuiConfigResponse, String> {
 
 /// Write `opencode.json` into the local `~/.config/opencode/` directory,
 /// layered on any existing file so hand-added keys survive. `llama_base_url`
-/// points directly at the Lui's exposed llama-server over HTTP — no tunnel
+/// points directly at the server's exposed llama-server over HTTP — no tunnel
 /// involved — while `local_web` is the port of the bsearch server we're
-/// running in-process on this Remote.
+/// running in-process on this client.
 fn write_local_opencode_json(
     model_name: &str,
     llama_base_url: &str,
@@ -506,7 +498,7 @@ fn print_use_banner(
         Print("\n"),
         SetForegroundColor(lavender),
         SetAttribute(Attribute::Bold),
-        Print("  Using Lui at "),
+        Print("  Using server at "),
         SetForegroundColor(Color::Cyan),
         Print(format!("{}:{}", target.host, target.http_port)),
         SetForegroundColor(lavender),
@@ -530,23 +522,23 @@ fn print_use_banner(
     );
 }
 
-/// `--remote`: entry point on a Remote. Fetches the Lui's `/config`
+/// `--remote`: entry point on a client. Fetches the server's `/config`
 /// over plain HTTP, writes local opencode.json + skill, spawns an in-process
 /// bsearch HTTP server, and blocks on Ctrl-C so bsearch stays alive for the
-/// life of the opencode session. No SSH anywhere — `--public` on the Lui is
+/// life of the opencode session. No SSH anywhere — `--public` on the server is
 /// the only prerequisite, and if `/config` is reachable so is llama-server
 /// on the same interface.
 pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
     let lui_cfg = fetch_lui_config(target)?;
 
     // Use the conventional 8081 port here, not a randomized high port. A
-    // Remote doesn't run llama-server (or anything else on 8081), so
+    // client doesn't run llama-server (or anything else on 8081), so
     // collision risk is minimal, and a stable port means the user only has
     // to drag the /setup bookmarklet into their bookmarks bar once — not
     // once per `lui --remote` invocation.
     let local_web = DEFAULT_REMOTE_HTTP_PORT;
 
-    // opencode points straight at the Lui's exposed llama-server over the
+    // opencode points straight at the server's exposed llama-server over the
     // network. We use the host the user typed (not a reverse-resolved name)
     // so the URL matches what they'd see in `lui --public`'s banner.
     let llama_base_url = format!("http://{}:{}/v1", target.host, lui_cfg.llama_port);
@@ -557,7 +549,7 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
     // In-process bsearch server. We synthesize a minimal ServerState just
     // to satisfy the API; only `websearch_total` / `active_searches` get
     // touched by bsearch handlers, so defaults are fine. The `/config`
-    // payload we hand it reflects this Remote's view — mostly there so a
+    // payload we hand it reflects this client's view — mostly there so a
     // future tool introspecting *this* instance sees something coherent.
     let state = Arc::new(Mutex::new(ServerState::default()));
     let config_info = LuiConfigResponse {
@@ -567,8 +559,8 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
         websearch_disabled: false,
         model_name: lui_cfg.model_name.clone(),
     };
-    // Minimal ConfigSummary for the Remote's in-process HTTP server. Nothing
-    // ever polls this Remote's /data (the renderer points at the *Lui's*
+ // Minimal ConfigSummary for the client's in-process HTTP server. Nothing
+  // ever polls this client's /data (the renderer points at the *server's*
     // /data, not ours), so fields here are placeholders — but we keep the
     // shape coherent in case something future introspects it.
     let dummy_summary = ConfigSummary {
@@ -594,14 +586,14 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
     // opencode was pointed at without having to exit.
     print_use_banner(target, &lui_cfg, &llama_base_url, local_web);
 
-    // Render the Lui's UI by polling its `/data`. We pass `Some(state)`
-    // for the Remote's in-process bsearch ServerState — the log ring is
+ // Render the server's UI by polling its `/data`. We pass `Some(state)`
+  // for the client's in-process bsearch ServerState — the log ring is
     // empty (no llama-server feeding it) but `websearch_total` and
     // `active_searches` reflect the user's opencode-driven searches through
     // *our* bsearch, which is what they care about. The `remote: true`
     // flag tells Display to render the Server Log panel as "Not available
     // in remote mode" instead of an empty void. The bookmarklet URL is
-    // this Remote's own bsearch (8081 by convention), not the Lui's —
+    // this client's own bsearch (8081 by convention), not the server's —
     // bookmarklets live in the browser the user is sitting at.
     let local_setup_url = Some(format!("http://127.0.0.1:{}/setup", local_web));
     let display = Display::new(
@@ -612,7 +604,7 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
         true,
     );
 
-    // Display.run owns the screen and exits on Ctrl-C / 'q' / the Lui
+    // Display.run owns the screen and exits on Ctrl-C / 'q' / the server
     // reporting `exited: true`. shutdown_tx is unused here (no child
     // process to tear down) so we just hand it a throwaway channel.
     let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);

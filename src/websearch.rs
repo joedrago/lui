@@ -60,29 +60,29 @@ struct AppState {
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<Vec<SearchResult>>>>>,
     port: u16,
     config_info: LuiConfigResponse,
-    /// When the Lui process started. Used by `/data` to serve a server-side
-    /// uptime that a Remote renderer can show without needing to guess when
+    /// When the server process started. Used by `/data` to serve a server-side
+    /// uptime that a client renderer can show without needing to guess when
     /// llama-server came up.
     start_time: Instant,
     /// Pre-formatted config strings for `/data`. Built once at spawn time
-    /// because these don't change during a Lui's lifetime; cloning the
+    /// because these don't change during a server's lifetime; cloning the
     /// struct into each snapshot is a handful of `String::clone`s, which
     /// is trivial even at 4 Hz.
     config_summary: ConfigSummary,
 }
 
-/// JSON returned by `GET /config`. Used by `lui --ssh-use` on a Remote to
+/// JSON returned by `GET /config`. Used by `lui --ssh` on a client to
 /// learn everything it needs to configure its local opencode and print the
 /// `ssh -L …` tunnel command.
 ///
-/// Versioned so we can evolve the payload without breaking older Remotes.
+/// Versioned so we can evolve the payload without breaking older clients.
 /// Rules of the road:
 ///   * the root is always a JSON object (never a bare array or scalar) so
 ///     new top-level keys stay additive;
 ///   * bumps to `version` signal breaking changes (rename/remove/semantic
 ///     shift) and `--ssh-use` will refuse a version it doesn't understand;
 ///   * new optional fields can be added without bumping `version` — older
-///     clients ignore unknown keys, and `#[serde(default)]` on the Remote
+///     clients ignore unknown keys, and `#[serde(default)]` on the client
 ///     side keeps deserialization working when a field is absent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuiConfigResponse {
@@ -118,7 +118,7 @@ fn next_bsearch_id() -> String {
 /// Spawn the lui HTTP server.
 ///
 /// Always mounts `/health` and `/config`; these are used by other lui
-/// instances (specifically `--ssh-use`) to discover this Lui's shape
+/// instances (specifically `--ssh`) to discover this server's shape
 /// regardless of whether browser-mediated search is enabled. The search
 /// routes (`/bsearch`, `/results`, `/setup`) only mount when
 /// `config_info.websearch_disabled` is false, so `--no-websearch`
@@ -155,8 +155,8 @@ pub fn spawn(
 
     // Parse the bind host (e.g. "127.0.0.1" or "0.0.0.0"); fall back to
     // loopback on a bogus value so we never accidentally bind to all
-    // interfaces. `--public` is what opts a Lui into being reachable by a
-    // Remote's `--ssh-use`.
+    // interfaces. `--public` is what opts a server into being reachable by a
+    // client's `--ssh`.
     let ip: std::net::IpAddr = bind_host
         .parse()
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
@@ -263,9 +263,9 @@ async fn handle_config(State(state): State<AppState>) -> Json<LuiConfigResponse>
 
 /// `GET /data`: JSON snapshot of live UI state (everything above the
 /// Server Log). The local renderer polls this at ~4 Hz and draws from
-/// whatever comes back; a Remote renderer does the same against a Lui's
+/// whatever comes back; a client renderer does the same against a server's
 /// HTTP port. Uptime comes from here rather than the client so the
-/// reported value reflects actual Lui lifetime, not "how long this client
+/// reported value reflects actual server lifetime, not "how long this client
 /// has been watching".
 async fn handle_data(State(state): State<AppState>) -> Json<UiSnapshot> {
     let uptime = state.start_time.elapsed();
