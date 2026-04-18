@@ -511,14 +511,24 @@ pub fn build_args(config: &ServerConfig) -> Vec<String> {
         args.push("-tb".to_string());
         args.push(v.to_string());
     }
-    if let Some(ref v) = config.cache_type_k {
-        args.push("-ctk".to_string());
-        args.push(v.clone());
-    }
-    if let Some(ref v) = config.cache_type_v {
-        args.push("-ctv".to_string());
-        args.push(v.clone());
-    }
+    // Emit the lui-level default when the user hasn't set an override, so
+    // changing `DEFAULT_CACHE_TYPE_{K,V}` later propagates automatically
+    // without rewriting everyone's lui.toml. Pass `--ctk f16 --ctv f16` to
+    // go back to llama-server's own default.
+    args.push("-ctk".to_string());
+    args.push(
+        config
+            .cache_type_k
+            .clone()
+            .unwrap_or_else(|| crate::config::DEFAULT_CACHE_TYPE_K.to_string()),
+    );
+    args.push("-ctv".to_string());
+    args.push(
+        config
+            .cache_type_v
+            .clone()
+            .unwrap_or_else(|| crate::config::DEFAULT_CACHE_TYPE_V.to_string()),
+    );
     if config.swa_full == Some(true) {
         args.push("--swa-full".to_string());
     }
