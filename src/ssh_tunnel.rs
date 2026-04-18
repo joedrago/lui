@@ -1,27 +1,55 @@
 // Copyright 2026 Joe Drago. All rights reserved.
 // SPDX-License-Identifier: BSD-2-Clause
 
-//! One-shot peer opencode configuration over SSH.
+//! One-shot peer opencode configuration for Lui/Remote pairs.
 //!
-//! Two flows live here, one for each side of a Lui/Remote pair:
+//! # Terminology
 //!
-//! `--ssh-share user@host` runs on a Lui and prepares a *ReverseRemote* to
+//! These three words appear throughout this module and the rest of the
+//! codebase. They're not OpenSSH terms — they're our own names for the
+//! three roles a machine can play in lui's multi-machine layouts:
+//!
+//! - **Lui**: a machine running `lui` (and thus `llama-server`). It hosts
+//!   the model. In every flow, exactly one machine is the Lui.
+//! - **Remote**: a user's workstation that wants to drive a Lui's model via
+//!   opencode, but doesn't run llama-server itself. A Remote *initiates*
+//!   the connection to a Lui (via `lui --remote HOST`).
+//! - **ReverseRemote**: same idea as a Remote, but the Lui side initiates
+//!   configuration. The Lui user runs `lui --ssh user@host` to push an
+//!   opencode config into that host and get back an `ssh -R …` command
+//!   that forwards this Lui's llama-server through the tunnel. Used when
+//!   the ReverseRemote can't reach the Lui directly (NAT, no public IP).
+//!
+//! "Remote" on its own always means the forward-initiated kind; the word
+//! "ReverseRemote" is only used when the distinction matters.
+//!
+//! # The two flows
+//!
+//! They're asymmetric on purpose — the two directions have different
+//! constraints:
+//!
+//! `--ssh user@host` runs on a Lui and prepares a *ReverseRemote* to
 //! use this Lui's llama-server over a reverse tunnel. It SSHes into the
 //! ReverseRemote, picks a fresh pair of high ports there (to dodge 8080/8081
 //! collisions), writes its `~/.config/opencode/opencode.json` and (unless
 //! websearch is disabled) its `lui-web-search` SKILL.md baked with those
 //! remote ports, and prints the `ssh -R … user@host` command the Lui user
-//! runs to establish the tunnel.
+//! runs to establish the tunnel. SSH is load-bearing here: the ReverseRemote
+//! usually *can't* reach back to the Lui any other way (NAT, no public
+//! address), so a reverse tunnel is the whole point.
 //!
-//! `--ssh-use user@host:port` runs on a *Remote* and points this machine at
-//! an already-running Lui. It fetches the Lui's public `/config` over HTTP,
-//! picks fresh local ports (again to dodge collisions), writes the Remote's
-//! own `~/.config/opencode/opencode.json` and a local `lui-web-search`
-//! SKILL.md pointed at a bsearch server we spin up in-process, then exec's
-//! an `ssh -L <local_llama>:localhost:<lui_llama> user@host` child so the
-//! tunnel stays up for as long as `lui --ssh-use` is running. The bsearch
+//! `--remote host[:port]` runs on a *Remote* and points this machine at
+//! an already-running `--public` Lui. No SSH involved: if `/config` (port
+//! defaults to 8081) is reachable from here, so is llama-server (the Lui
+//! exposes both on the same interface). We fetch `/config` over plain HTTP,
+//! write this Remote's own `~/.config/opencode/opencode.json` with `baseURL`
+//! pointing *directly* at `http://<host>:<lui_llama>/v1`, and write a
+//! `lui-web-search` SKILL.md pointed at a bsearch server we spin up
+//! in-process here. Then we block on Ctrl-C so that in-process bsearch
+//! stays alive for as long as the user is running opencode. The bsearch
 //! server lives on the Remote on purpose: browser-mediated search needs a
-//! real human at a real browser, which is wherever the user actually is.
+//! real human at a real browser, which is wherever the user actually is —
+//! not on the Lui.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -50,15 +78,15 @@ impl SshTarget {
     }
 }
 
-/// Parse `user@host` for `--ssh-share`. A bare `host` (with no `@`) is
+/// Parse `user@host` for `--ssh`. A bare `host` (with no `@`) is
 /// rejected — we want the printed `ssh -R …` command to match exactly what
 /// the user typed, and silently filling in `$USER` would surprise them.
 pub fn parse_share_target(s: &str) -> Result<SshTarget, String> {
     let (user, host) = s
         .split_once('@')
-        .ok_or_else(|| format!("--ssh-share expects USER@HOST, got {:?}", s))?;
+        .ok_or_else(|| format!("--ssh expects USER@HOST, got {:?}", s))?;
     if user.is_empty() || host.is_empty() {
-        return Err(format!("--ssh-share expects USER@HOST, got {:?}", s));
+        return Err(format!("--ssh expects USER@HOST, got {:?}", s));
     }
     Ok(SshTarget {
         user: user.to_string(),
@@ -66,46 +94,47 @@ pub fn parse_share_target(s: &str) -> Result<SshTarget, String> {
     })
 }
 
-/// Target of `--ssh-use`: the SSH destination for the `-L` tunnel plus the
-/// HTTP port on that host where the Lui's `/config` endpoint is listening.
-/// The two pieces share a hostname in practice, so we ask the user to pass
-/// one `user@host:port` spec rather than two separate flags.
+/// Target of `--remote`: the Lui's hostname plus the HTTP port where
+/// its `/config` endpoint is listening. Same port also hosts `/bsearch`
+/// et al., but we don't need that here — the Remote runs its own bsearch.
 #[derive(Debug, Clone)]
 pub struct UseTarget {
-    pub ssh: SshTarget,
+    pub host: String,
     pub http_port: u16,
 }
 
+/// Default HTTP port lui serves on a Lui that hasn't customized `--web-port`:
+/// mirrors the `llama_port + 1` convention with the default 8080 llama port.
+pub const DEFAULT_REMOTE_HTTP_PORT: u16 = 8081;
+
 impl UseTarget {
     pub fn http_url(&self, path: &str) -> String {
-        format!("http://{}:{}{}", self.ssh.host, self.http_port, path)
+        format!("http://{}:{}{}", self.host, self.http_port, path)
     }
 }
 
-/// Parse `user@host:port` for `--ssh-use`. `host` must not itself contain a
-/// `:` (we don't support bracketed IPv6 literals here — users with IPv6-only
-/// hosts can use a hostname alias). Any parse failure is reported with the
-/// literal bad input so the user sees exactly what we couldn't understand.
+/// Parse `HOST` or `HOST:PORT` for `--remote`. Bare-host form uses
+/// `DEFAULT_REMOTE_HTTP_PORT` (8081), which is what a default-config Lui
+/// serves `/config` on. IPv6 literals aren't supported here (bracketed form
+/// would be ambiguous with our split logic); users who need IPv6 can set up
+/// a hostname alias in `/etc/hosts`.
 pub fn parse_use_target(s: &str) -> Result<UseTarget, String> {
-    let (user, rest) = s
-        .split_once('@')
-        .ok_or_else(|| format!("--ssh-use expects USER@HOST:PORT, got {:?}", s))?;
-    let (host, port) = rest
-        .rsplit_once(':')
-        .ok_or_else(|| format!("--ssh-use expects USER@HOST:PORT, got {:?}", s))?;
-    if user.is_empty() || host.is_empty() || port.is_empty() {
-        return Err(format!("--ssh-use expects USER@HOST:PORT, got {:?}", s));
+    if s.is_empty() {
+        return Err("--remote expects HOST or HOST:PORT".into());
     }
-    let http_port: u16 = port
-        .parse()
-        .map_err(|_| format!("--ssh-use port {:?} is not a valid u16", port))?;
-    Ok(UseTarget {
-        ssh: SshTarget {
-            user: user.to_string(),
-            host: host.to_string(),
-        },
-        http_port,
-    })
+    let (host, http_port) = match s.rsplit_once(':') {
+        Some((h, p)) => {
+            if h.is_empty() || p.is_empty() {
+                return Err(format!("--remote expects HOST or HOST:PORT, got {:?}", s));
+            }
+            let port: u16 = p
+                .parse()
+                .map_err(|_| format!("--remote port {:?} is not a valid u16", p))?;
+            (h.to_string(), port)
+        }
+        None => (s.to_string(), DEFAULT_REMOTE_HTTP_PORT),
+    };
+    Ok(UseTarget { host, http_port })
 }
 
 /// Pick the base port for the remote side of the tunnel. We use a pseudo-
@@ -300,7 +329,7 @@ fn print_share_success(
     );
 }
 
-/// `--ssh-share`: configure the given ReverseRemote's opencode to point back
+/// `--ssh`: configure the given ReverseRemote's opencode to point back
 /// at this Lui over a reverse tunnel. Any error here is fatal — the caller
 /// prints it and exits.
 pub fn setup_share(target: &SshTarget, effective: &ServerConfig) -> Result<(), String> {
@@ -330,7 +359,7 @@ pub fn setup_share(target: &SshTarget, effective: &ServerConfig) -> Result<(), S
 }
 
 // ----------------------------------------------------------------------------
-// --ssh-use flow (this machine is a Remote pointing at a running Lui)
+// --remote flow (this machine is a Remote pointing at a running Lui)
 // ----------------------------------------------------------------------------
 
 /// Minimal blocking HTTP/1.1 GET. We use `Connection: close` so the server
@@ -394,7 +423,7 @@ fn http_get(host: &str, port: u16, path: &str) -> Result<(u16, String), String> 
 /// on connection-refused / timeout, since that's the overwhelmingly common
 /// cause: a Lui bound to 127.0.0.1 is invisible on the network.
 fn fetch_lui_config(target: &UseTarget) -> Result<LuiConfigResponse, String> {
-    let (code, body) = http_get(&target.ssh.host, target.http_port, "/config").map_err(|e| {
+    let (code, body) = http_get(&target.host, target.http_port, "/config").map_err(|e| {
         format!(
             "could not reach {} — {}\n\nIs the Lui running with `--public`? \
              Without it, the HTTP server binds to 127.0.0.1 only and a Remote can't see it.",
@@ -421,19 +450,21 @@ fn fetch_lui_config(target: &UseTarget) -> Result<LuiConfigResponse, String> {
 }
 
 /// Write `opencode.json` into the local `~/.config/opencode/` directory,
-/// layered on any existing file so hand-added keys survive.
+/// layered on any existing file so hand-added keys survive. `llama_base_url`
+/// points directly at the Lui's exposed llama-server over HTTP — no tunnel
+/// involved — while `local_web` is the port of the bsearch server we're
+/// running in-process on this Remote.
 fn write_local_opencode_json(
     model_name: &str,
-    local_llama: u16,
+    llama_base_url: &str,
     local_web: u16,
 ) -> Result<(), String> {
     let path = opencode_config_path();
     let existing = std::fs::read_to_string(&path).ok();
-    let base_url = format!("http://localhost:{}/v1", local_llama);
     let json = build_opencode_json(
         model_name,
         /* websearch_disabled */ false,
-        &base_url,
+        llama_base_url,
         local_web,
         existing.as_deref(),
     );
@@ -459,7 +490,12 @@ fn write_local_websearch_skill(local_web: u16) -> Result<(), String> {
         .map_err(|e| format!("write {}: {}", path.display(), e))
 }
 
-fn print_use_banner(target: &UseTarget, lui_cfg: &LuiConfigResponse, local_llama: u16, local_web: u16) {
+fn print_use_banner(
+    target: &UseTarget,
+    lui_cfg: &LuiConfigResponse,
+    llama_base_url: &str,
+    local_web: u16,
+) {
     let mut stdout = std::io::stdout();
     let lavender = Color::Rgb { r: 180, g: 150, b: 255 };
     let muted = Color::Rgb { r: 120, g: 100, b: 180 };
@@ -469,87 +505,75 @@ fn print_use_banner(target: &UseTarget, lui_cfg: &LuiConfigResponse, local_llama
         Print("\n"),
         SetForegroundColor(lavender),
         SetAttribute(Attribute::Bold),
-        Print("  Connected to Lui "),
+        Print("  Using Lui at "),
         SetForegroundColor(Color::Cyan),
-        Print(target.ssh.spec()),
+        Print(format!("{}:{}", target.host, target.http_port)),
         SetForegroundColor(lavender),
         Print("\n"),
         SetAttribute(Attribute::Reset),
         ResetColor,
         Print("\n"),
         SetForegroundColor(muted),
-        Print(&format!(
-            "    model:           {}\n    llama (remote):  {}\n    llama (local):   {} (via ssh -L)\n    bsearch (local): {} (served here)\n",
-            lui_cfg.model_name, lui_cfg.llama_port, local_llama, local_web
+        Print(format!(
+            "    model:            {}\n    llama (direct):   {}\n    bsearch (local):  http://127.0.0.1:{}/bsearch\n",
+            lui_cfg.model_name, llama_base_url, local_web
         )),
         ResetColor,
         Print("\n"),
         SetForegroundColor(muted),
         Print("  opencode config written. Run `opencode` in another terminal.\n"),
-        Print("  Ctrl-C here to tear down the tunnel and shut down bsearch.\n\n"),
+        Print("  Ctrl-C here to shut down the local bsearch server.\n\n"),
         ResetColor,
     );
 }
 
-/// `--ssh-use`: entry point. Fetches the Lui's /config, writes local
-/// opencode.json + skill, spawns an in-process bsearch HTTP server, and
-/// execs `ssh -L …` as a child to keep the llama-server tunnel open. Blocks
-/// until the ssh child exits (or the user Ctrl-C's it).
-pub fn setup_use(target: &UseTarget) -> Result<(), String> {
+/// `--remote`: entry point on a Remote. Fetches the Lui's `/config`
+/// over plain HTTP, writes local opencode.json + skill, spawns an in-process
+/// bsearch HTTP server, and blocks on Ctrl-C so bsearch stays alive for the
+/// life of the opencode session. No SSH anywhere — `--public` on the Lui is
+/// the only prerequisite, and if `/config` is reachable so is llama-server
+/// on the same interface.
+pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
     let lui_cfg = fetch_lui_config(target)?;
 
-    // Fresh high ports so we don't collide with anything already bound on
-    // the Remote's 8080/8081. `pick_remote_port` seeds from wall-clock ns,
-    // which is good enough for two separate lui invocations to pick
-    // different pairs most of the time.
-    let local_llama = pick_remote_port();
-    let local_web = local_llama + 1;
+    // Pick a fresh high port for the local bsearch server so it doesn't
+    // collide with anything already bound on 8081 here. `pick_remote_port`
+    // seeds from wall-clock ns, which is good enough for two separate
+    // invocations to pick different values most of the time.
+    let local_web = pick_remote_port();
 
-    write_local_opencode_json(&lui_cfg.model_name, local_llama, local_web)?;
+    // opencode points straight at the Lui's exposed llama-server over the
+    // network. We use the host the user typed (not a reverse-resolved name)
+    // so the URL matches what they'd see in `lui --public`'s banner.
+    let llama_base_url = format!("http://{}:{}/v1", target.host, lui_cfg.llama_port);
+
+    write_local_opencode_json(&lui_cfg.model_name, &llama_base_url, local_web)?;
     write_local_websearch_skill(local_web)?;
 
     // In-process bsearch server. We synthesize a minimal ServerState just
     // to satisfy the API; only `websearch_total` / `active_searches` get
-    // touched by bsearch handlers, so defaults are fine. We also hand it a
-    // `/config` payload that reflects the Remote's local ports — useful if
-    // anything ever introspects this instance the same way.
+    // touched by bsearch handlers, so defaults are fine. The `/config`
+    // payload we hand it reflects this Remote's view — mostly there so a
+    // future tool introspecting *this* instance sees something coherent.
     let state = Arc::new(Mutex::new(ServerState::default()));
     let config_info = LuiConfigResponse {
         version: CONFIG_VERSION,
-        llama_port: local_llama,
+        llama_port: lui_cfg.llama_port,
         web_port: local_web,
         websearch_disabled: false,
         model_name: lui_cfg.model_name.clone(),
     };
     websearch::spawn("127.0.0.1", local_web, state, config_info);
 
-    print_use_banner(target, &lui_cfg, local_llama, local_web);
+    print_use_banner(target, &lui_cfg, &llama_base_url, local_web);
 
-    // Spawn ssh as a foreground child. -N means "no remote command";
-    // ExitOnForwardFailure=yes aborts immediately if the local port is in
-    // use, so we fail loudly instead of silently tunneling nothing;
-    // ServerAliveInterval keeps the tunnel honest across idle periods.
-    let forward = format!("{}:localhost:{}", local_llama, lui_cfg.llama_port);
-    let status = Command::new("ssh")
-        .arg("-N")
-        .arg("-o")
-        .arg("ExitOnForwardFailure=yes")
-        .arg("-o")
-        .arg("ServerAliveInterval=30")
-        .arg("-L")
-        .arg(&forward)
-        .arg(target.ssh.spec())
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|e| format!("failed to spawn ssh: {}", e))?;
-
-    // Don't treat a user Ctrl-C as an error. ssh exits with 255 on
-    // a tunnel failure and typically 130 on SIGINT; both are fine for our
-    // purposes since the user is done either way.
-    if !status.success() {
-        eprintln!("ssh tunnel exited ({}).", status);
-    }
+    // Block on Ctrl-C. bsearch lives on a tokio task spawned by
+    // `websearch::spawn`; returning from here would drop the runtime and
+    // take it with us. ctrl_c's Err path means the signal handler itself
+    // failed to install — rare, but treat it as fatal so we don't silently
+    // hang unreacheable to a keypress.
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|e| format!("failed to install Ctrl-C handler: {}", e))?;
     Ok(())
 }

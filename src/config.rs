@@ -652,8 +652,9 @@ fn update_websearch_permission(
 /// Build the opencode JSON value for this model, layered on top of any
 /// existing config (so unrelated keys the user has hand-set are preserved).
 /// Pure function — no filesystem touches. The local path writes the result
-/// to `~/.config/opencode/opencode.json`; the `--ssh-share` path pipes it
-/// over SSH; the `--ssh-use` path writes it locally on the Remote.
+/// to `~/.config/opencode/opencode.json`; the `--ssh` path pipes it over
+/// SSH to a ReverseRemote; the `--remote` path writes it locally on the
+/// Remote.
 ///
 /// `model_name` is the short provider-model id (see `derive_model_name`).
 /// `websearch_disabled` matches `ServerConfig::websearch_disabled`.

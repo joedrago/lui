@@ -36,20 +36,20 @@ struct RunOpts {
     // without spawning. Useful for "what would this actually run?" debugging
     // after a chain of --global / --this edits plus SWA auto-detection.
     cmd: bool,
-    // One-shot SSH modes. Both configure opencode on one side of the link,
-    // print the ssh command the user runs on the other side, and exit.
-    // Neither is persisted.
+    // One-shot peer-configuration modes. Neither persists to lui.toml.
     //
-    //   ssh_share: run on a Lui. Configures a ReverseRemote's opencode to
-    //       reach back into this machine's llama-server over a reverse
-    //       tunnel. Prints `ssh -R ...` for this machine to run.
+    //   ssh_share: run on a Lui. Configures a ReverseRemote's opencode over
+    //       SSH to reach this machine's llama-server via a reverse tunnel.
+    //       Prints `ssh -R ...` for this machine to run. SSH is load-
+    //       bearing: the ReverseRemote can't always reach back otherwise.
     //
-    //   ssh_use:   run on a Remote. Fetches /config from an already-running
-    //       Lui over HTTP, writes *local* opencode.json + skill pointed at
-    //       fresh local ports, and prints `ssh -L ...` for this machine to
-    //       run toward that Lui.
+    //   use_lui:   run on a Remote. Fetches /config from an already-running
+    //       --public Lui over plain HTTP, writes *local* opencode.json +
+    //       skill pointing opencode directly at that Lui's llama-server URL,
+    //       spawns a local bsearch server so the browser opens here, and
+    //       blocks on Ctrl-C. No SSH.
     ssh_share: Option<ssh_tunnel::SshTarget>,
-    ssh_use: Option<ssh_tunnel::UseTarget>,
+    use_lui: Option<ssh_tunnel::UseTarget>,
 }
 
 // Descriptions all start at column 36 so the right-hand column is aligned
@@ -103,18 +103,17 @@ MACHINE SETTINGS (always global; rejected with --this):
         --no-avo                   Abort on VRAM oversubscription (default)
 
 REMOTE (one-shot; not persisted):
-        --ssh-share <USER@HOST>    Run on a Lui. Configures that remote's
+        --ssh <USER@HOST>          Run on a Lui. Configures that remote's
                                    opencode to reach this machine's llama-server
                                    over a reverse tunnel, prints the matching
                                    `ssh -R ...` command, and exits.
-        --ssh-use <USER@HOST:PORT> Run on a Remote. Fetches /config from a
-                                   running Lui (must be --public), writes local
-                                   opencode.json + skill pointed at fresh local
-                                   ports, spawns a local bsearch server, and
-                                   opens an `ssh -L ...` tunnel to the Lui's
-                                   llama-server. Stays running; Ctrl-C to tear
-                                   down. PORT is the Lui's HTTP port (default
-                                   llama_port + 1).
+        --remote <HOST[:PORT]>     Run on a Remote. Fetches /config from a
+                                   --public Lui over plain HTTP, writes local
+                                   opencode.json pointed directly at that Lui's
+                                   llama-server, and stands up a local bsearch
+                                   server so the browser opens on this machine.
+                                   Blocks until Ctrl-C. PORT is the Lui's HTTP
+                                   port; defaults to 8081.
 
 OTHER:
     -l, --list                     List cached models and show current config
@@ -167,7 +166,7 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
     let mut debug: Option<String> = None;
     let mut cmd = false;
     let mut ssh_share: Option<ssh_tunnel::SshTarget> = None;
-    let mut ssh_use: Option<ssh_tunnel::UseTarget> = None;
+    let mut use_lui: Option<ssh_tunnel::UseTarget> = None;
 
     // Active model key: the one that per-model scoped settings write into.
     // Seeded from the loaded config so `lui --this --temp 0.3` works with
@@ -319,16 +318,16 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
             Long("debug") => {
                 debug = Some(take_string(&mut parser, "--debug"));
             }
-            Long("ssh-share") => {
-                require_global(scope, "--ssh-share");
-                let v = take_string(&mut parser, "--ssh-share");
+            Long("ssh") => {
+                require_global(scope, "--ssh");
+                let v = take_string(&mut parser, "--ssh");
                 ssh_share =
                     Some(ssh_tunnel::parse_share_target(&v).unwrap_or_else(|e| die(&e)));
             }
-            Long("ssh-use") => {
-                require_global(scope, "--ssh-use");
-                let v = take_string(&mut parser, "--ssh-use");
-                ssh_use = Some(ssh_tunnel::parse_use_target(&v).unwrap_or_else(|e| die(&e)));
+            Long("remote") => {
+                require_global(scope, "--remote");
+                let v = take_string(&mut parser, "--remote");
+                use_lui = Some(ssh_tunnel::parse_use_target(&v).unwrap_or_else(|e| die(&e)));
             }
 
             // Bare positional before `--`: must be an alias in either pool.
@@ -387,8 +386,8 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
         config.models.entry(k).or_default().extra_args = v;
     }
 
-    if ssh_share.is_some() && ssh_use.is_some() {
-        die("--ssh-share and --ssh-use are mutually exclusive");
+    if ssh_share.is_some() && use_lui.is_some() {
+        die("--ssh and --remote are mutually exclusive");
     }
 
     RunOpts {
@@ -396,7 +395,7 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
         debug,
         cmd,
         ssh_share,
-        ssh_use,
+        use_lui,
     }
 }
 
@@ -1231,12 +1230,12 @@ async fn main() {
         }
     }
 
-    // --ssh-share: one-shot ReverseRemote configuration. Doesn't spawn
+    // --ssh: one-shot ReverseRemote configuration. Doesn't spawn
     // llama-server, doesn't touch local opencode. Placed after SWA auto-
     // detect so the remote config reflects the same effective server config
     // we would have launched with. We deliberately ran save_config above:
-    // it's fine for a `lui --hf X --ssh-share ...` invocation to also record
-    // that --hf intent in lui.toml, since that isn't --ssh-share-specific.
+    // it's fine for a `lui --hf X --ssh ...` invocation to also record
+    // that --hf intent in lui.toml, since that isn't --ssh-specific.
     if let Some(target) = &opts.ssh_share {
         if let Err(e) = ssh_tunnel::setup_share(target, &effective) {
             eprintln!("lui: {}", e);
@@ -1245,13 +1244,14 @@ async fn main() {
         return;
     }
 
-    // --ssh-use: this machine is a Remote; point ourselves at an already-
-    // running Lui by fetching its /config over HTTP, writing our own
-    // ~/.config/opencode/opencode.json + skill, and printing the ssh -L
-    // command we'll run back to the Lui. Doesn't spawn llama-server and
+    // --use: this machine is a Remote; point ourselves at an already-
+    // running --public Lui by fetching its /config over HTTP, writing our
+    // own ~/.config/opencode/opencode.json + skill pointed directly at that
+    // Lui, and standing up a local bsearch server so the browser opens on
+    // this machine. Blocks until Ctrl-C. Doesn't spawn llama-server and
     // doesn't touch lui.toml beyond whatever was already saved above.
-    if let Some(target) = &opts.ssh_use {
-        if let Err(e) = ssh_tunnel::setup_use(target) {
+    if let Some(target) = &opts.use_lui {
+        if let Err(e) = ssh_tunnel::setup_use(target).await {
             eprintln!("lui: {}", e);
             std::process::exit(1);
         }
