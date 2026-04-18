@@ -62,9 +62,23 @@ pub struct ServerState {
     // plain partial offload.
     pub overflow_layers: u32,
     pub cpu_mem_mib: f64,
+    // Metal's MoE expert spill lives in a `CPU_REPACK` buffer (separate from
+    // `CPU_Mapped`, which is typically just the token embedding). Non-zero
+    // here is a reliable signal that layers actually overflowed to host RAM,
+    // independent of the `(N overflowing)` summary line.
+    pub cpu_repack_mib: f64,
+    pub cpu_compute_mib: f64,
     pub gpu_mem_mib: f64,
     pub kv_cache_mib: f64,
     pub compute_buf_mib: f64,
+    // Tensors llama.cpp forced to plain CPU because the preferred backend
+    // couldn't accept them (e.g. q8_0 embedding with a CPU_REPACK backend).
+    // Parsed from the `done_getting_tensors: ... (and N others) ... using CPU
+    // instead` line; count is N + 1, primary is the first-named tensor. Lets
+    // the display distinguish "fully GPU with embedding on CPU" from a real
+    // weight spill.
+    pub cpu_forced_count: u32,
+    pub cpu_forced_primary: String,
     pub ctx_size: u32,
     pub max_ctx_size: u32,
 
@@ -170,6 +184,10 @@ pub struct UiSnapshot {
     pub max_ctx_size: u32,
 
     pub cpu_mem_mib: f64,
+    #[serde(default)]
+    pub cpu_repack_mib: f64,
+    #[serde(default)]
+    pub cpu_compute_mib: f64,
     pub gpu_mem_mib: f64,
     pub kv_cache_mib: f64,
     pub compute_buf_mib: f64,
@@ -177,6 +195,10 @@ pub struct UiSnapshot {
     pub total_layers: u32,
     #[serde(default)]
     pub overflow_layers: u32,
+    #[serde(default)]
+    pub cpu_forced_count: u32,
+    #[serde(default)]
+    pub cpu_forced_primary: String,
 
     pub llama_version: String,
     pub update_available: bool,
@@ -339,12 +361,16 @@ impl ServerState {
             max_ctx_size: self.max_ctx_size,
 
             cpu_mem_mib: self.cpu_mem_mib,
+            cpu_repack_mib: self.cpu_repack_mib,
+            cpu_compute_mib: self.cpu_compute_mib,
             gpu_mem_mib: self.gpu_mem_mib,
             kv_cache_mib: self.kv_cache_mib,
             compute_buf_mib: self.compute_buf_mib,
             gpu_layers_loaded: self.gpu_layers_loaded,
             total_layers: self.total_layers,
             overflow_layers: self.overflow_layers,
+            cpu_forced_count: self.cpu_forced_count,
+            cpu_forced_primary: self.cpu_forced_primary.clone(),
 
             llama_version: self.llama_version.clone(),
             update_available: self.update_available,
@@ -771,8 +797,23 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
             state.total_layers = caps[2].parse().unwrap_or(0);
         }
     }
-    // CPU_Mapped model buffer size
+    // CPU_Mapped model buffer size (embedding/output tensors forced to plain
+    // CPU; on CUDA overflow this also carries the spilled expert weights).
     else if line.contains("CPU_Mapped model buffer size") {
+        if let Some(mib) = extract_mib(line) {
+            state.cpu_mem_mib += mib;
+        }
+    }
+    // CPU_REPACK model buffer size (Metal's path for MoE experts that spilled
+    // to host RAM — CUDA uses CPU_Mapped for the same thing).
+    else if line.contains("CPU_REPACK model buffer size") {
+        if let Some(mib) = extract_mib(line) {
+            state.cpu_repack_mib += mib;
+        }
+    }
+    // Plain "CPU model buffer size" (probe allocations print 0 here; kept so
+    // it doesn't leak into the GPU branch below).
+    else if line.contains("CPU model buffer size") {
         if let Some(mib) = extract_mib(line) {
             state.cpu_mem_mib += mib;
         }
@@ -789,10 +830,34 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
             state.kv_cache_mib = mib;
         }
     }
+    // CPU compute buffer (small on GPU-backed runs; non-trivial once there's
+    // real spill). Multiple emissions per load — last one (alloc_compute_meta)
+    // wins, matching how the GPU compute line is handled.
+    else if line.contains("CPU compute buffer size") {
+        if let Some(mib) = extract_mib(line) {
+            state.cpu_compute_mib = mib;
+        }
+    }
     // Compute buffer size (any GPU backend)
     else if line.contains("compute buffer size") && !line.contains("CPU") {
         if let Some(mib) = extract_mib(line) {
             state.compute_buf_mib = mib;
+        }
+    }
+    // `done_getting_tensors: tensor 'X' (q8_0) (and N others) cannot be used
+    // with preferred buffer type Y, using CPU instead`. Names the tensors that
+    // fell back to plain CPU; count = N + 1. When the primary is `token_embd`
+    // with N == 0, the CPU side is just the embedding and the load is
+    // effectively full-GPU — distinct from a real weight spill.
+    else if line.contains("done_getting_tensors:") && line.contains("using CPU instead") {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        let re = RE.get_or_init(|| {
+            Regex::new(r"tensor\s+'([^']+)'.*?\(and\s+(\d+)\s+others\)").unwrap()
+        });
+        if let Some(caps) = re.captures(line) {
+            let others: u32 = caps[2].parse().unwrap_or(0);
+            state.cpu_forced_count = others.saturating_add(1);
+            state.cpu_forced_primary = caps[1].to_string();
         }
     }
     // llama-server's `-fit` logic probes memory at candidate context sizes,
@@ -816,7 +881,7 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
         // Per-device summary line: "  - CUDA0 (...): 41 layers (28 overflowing), ..."
         static OVERFLOW_RE: OnceLock<Regex> = OnceLock::new();
         let re = OVERFLOW_RE
-            .get_or_init(|| Regex::new(r"-\s+\S.*?:\s+\d+\s+layers\s+\((\d+)\s+overflowing\)").unwrap());
+            .get_or_init(|| Regex::new(r"-\s+\S.*?:\s+\d+\s+layers\s+\(\s*(\d+)\s+overflowing\)").unwrap());
         if let Some(caps) = re.captures(line) {
             let n: u32 = caps[1].parse().unwrap_or(0);
             state.overflow_layers = state.overflow_layers.saturating_add(n);
@@ -1125,5 +1190,67 @@ mod tests {
         assert_eq!(s.total_layers, 32);
         assert_eq!(s.overflow_layers, 0);
         assert_eq!(s.cpu_mem_mib, 0.0);
+    }
+
+    #[test]
+    fn parses_metal_overflow_with_padded_digit() {
+        // The overflow summary right-pads single-digit counts, which the old
+        // regex silently missed. A Metal fit with 3 overflowing layers should
+        // still be captured.
+        let mut s = ServerState::default();
+        feed(
+            &mut s,
+            &[
+                "llama_params_fit_impl: memory for test allocation by device:",
+                "llama_params_fit_impl:   - MTL0 (Apple M4 Max): 41 layers ( 3 overflowing),  20468 MiB used,   8222 MiB free",
+                "llama_params_fit: successfully fit params to free device memory",
+            ],
+        );
+        assert_eq!(s.overflow_layers, 3);
+    }
+
+    #[test]
+    fn parses_cpu_repack_and_cpu_compute() {
+        // Metal spills MoE experts to CPU_REPACK, not CPU_Mapped. The final
+        // load also emits a CPU compute buffer alongside the GPU one; both
+        // need to land in their own fields so the display can show the split.
+        let mut s = ServerState::default();
+        feed(
+            &mut s,
+            &[
+                "load_tensors:   CPU_Mapped model buffer size =   515.31 MiB",
+                "load_tensors:   CPU_REPACK model buffer size =   709.06 MiB",
+                "load_tensors:  MTL0_Mapped model buffer size = 21098.65 MiB",
+                "sched_reserve:        CPU compute buffer size =    64.50 MiB",
+                "alloc_compute_meta:       MTL0 compute buffer size =   248.10 MiB",
+                "alloc_compute_meta:        CPU compute buffer size =    24.93 MiB",
+            ],
+        );
+        assert!((s.cpu_mem_mib - 515.31).abs() < 0.01);
+        assert!((s.cpu_repack_mib - 709.06).abs() < 0.01);
+        assert!((s.gpu_mem_mib - 21098.65).abs() < 0.01);
+        // Last emission wins (alloc_compute_meta after sched_reserve).
+        assert!((s.cpu_compute_mib - 24.93).abs() < 0.01);
+        assert!((s.compute_buf_mib - 248.10).abs() < 0.01);
+    }
+
+    #[test]
+    fn parses_done_getting_tensors_forced_to_cpu() {
+        let mut s = ServerState::default();
+        // Full-offload Mac case: just the embedding forced to CPU.
+        parse_line(
+            "done_getting_tensors: tensor 'token_embd.weight' (q8_0) (and 0 others) cannot be used with preferred buffer type CPU_REPACK, using CPU instead",
+            &mut s,
+        );
+        assert_eq!(s.cpu_forced_count, 1);
+        assert_eq!(s.cpu_forced_primary, "token_embd.weight");
+
+        // CUDA MoE overflow: primary is still the embedding but 86 other
+        // tensors (the spilled experts) ride along.
+        parse_line(
+            "done_getting_tensors: tensor 'token_embd.weight' (q8_0) (and 86 others) cannot be used with preferred buffer type CUDA_Host, using CPU instead",
+            &mut s,
+        );
+        assert_eq!(s.cpu_forced_count, 87);
     }
 }

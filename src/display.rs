@@ -376,6 +376,7 @@ impl Display {
         // Memory
         if st.gpu_mem_mib > 0.0 || st.kv_cache_mib > 0.0 {
             let gpu_total = st.gpu_mem_mib + st.kv_cache_mib + st.compute_buf_mib;
+            let cpu_total = st.cpu_mem_mib + st.cpu_repack_mib + st.cpu_compute_mib;
             let _ = queue!(
                 t.stdout,
                 Print("  "),
@@ -386,13 +387,13 @@ impl Display {
                 SetForegroundColor(Color::White),
                 Print(" GiB VRAM"),
             );
-            if st.cpu_mem_mib > 0.0 {
+            if cpu_total > 0.0 {
                 let _ = queue!(
                     t.stdout,
                     SetForegroundColor(Color::White),
                     Print(" · "),
                     SetForegroundColor(COLOR_NUMBER),
-                    Print(format!("{:.0}", st.cpu_mem_mib)),
+                    Print(format!("{:.0}", cpu_total)),
                     SetForegroundColor(Color::White),
                     Print(" MiB RAM"),
                 );
@@ -400,18 +401,38 @@ impl Display {
             let _ = queue!(t.stdout, ResetColor);
             t.newline();
 
-            // Breakdown on next line in grey
-            let mut parts = Vec::new();
+            // Breakdown on next line in grey. When any CPU-side buffers exist,
+            // split the line into GPU and CPU halves so the user can see where
+            // every MiB went; otherwise the single-side form is less cluttered.
+            let mut gpu_parts = Vec::new();
             if st.gpu_mem_mib > 0.0 {
-                parts.push(format!("{:.0} model", st.gpu_mem_mib));
+                gpu_parts.push(format!("{:.0} model", st.gpu_mem_mib));
             }
             if st.kv_cache_mib > 0.0 {
-                parts.push(format!("{:.0} KV", st.kv_cache_mib));
+                gpu_parts.push(format!("{:.0} KV", st.kv_cache_mib));
             }
             if st.compute_buf_mib > 0.0 {
-                parts.push(format!("{:.0} compute", st.compute_buf_mib));
+                gpu_parts.push(format!("{:.0} compute", st.compute_buf_mib));
             }
-            let breakdown = format!("{} MiB", parts.join(" + "));
+            let mut cpu_parts = Vec::new();
+            if st.cpu_mem_mib > 0.0 {
+                cpu_parts.push(format!("{:.0} model", st.cpu_mem_mib));
+            }
+            if st.cpu_repack_mib > 0.0 {
+                cpu_parts.push(format!("{:.0} expert", st.cpu_repack_mib));
+            }
+            if st.cpu_compute_mib > 0.0 {
+                cpu_parts.push(format!("{:.0} compute", st.cpu_compute_mib));
+            }
+            let breakdown = if cpu_parts.is_empty() {
+                format!("{} MiB", gpu_parts.join(" + "))
+            } else {
+                format!(
+                    "GPU: {} MiB · CPU: {} MiB",
+                    gpu_parts.join(" + "),
+                    cpu_parts.join(" + ")
+                )
+            };
             self.print_sub(&mut t, &breakdown);
 
             // GPU offload as second grey line under Memory.
@@ -419,14 +440,21 @@ impl Display {
             // llama.cpp's "offloaded X/Y layers to GPU" count lies on modern
             // MoE models: when experts spill back to host RAM via the MoE fit
             // path, every layer is still reported as "offloaded" even though
-            // its weights mostly live in CPU memory. Trust the buffer split
-            // and the "(N overflowing)" count over the raw offload number.
+            // its weights mostly live in CPU memory. Trust the `(N overflowing)`
+            // summary, the CPU_REPACK buffer (Metal's spill), and the
+            // done_getting_tensors fallback list over the raw offload number.
             if st.total_layers > 0 {
-                // A full-GPU load has negligible CPU model buffer (mapped
-                // metadata only). 256 MiB is well above typical embedding /
-                // output buffers but well under a single MoE expert layer,
-                // so it cleanly separates real spill from small host mmaps.
-                let cpu_weights_significant = st.cpu_mem_mib > 256.0;
+                // Metal MoE spill always lands in CPU_REPACK; non-zero means
+                // real layer-level overflow even if the summary line was
+                // missing or its digit pattern didn't match the parser.
+                let metal_spill = st.cpu_repack_mib > 0.0;
+                // `token_embd.weight` (and rarely `output.weight`) falls back
+                // to plain CPU on Metal with a q8_0 embedding because the
+                // CPU_REPACK backend won't accept it. That alone doesn't make
+                // the load "partial" — it's a normal full-GPU offload.
+                let embed_only = st.cpu_forced_count <= 1
+                    && (st.cpu_forced_primary.starts_with("token_embd")
+                        || st.cpu_forced_primary.starts_with("output"));
                 let gpu_line = if st.gpu_layers_loaded == 0 {
                     format!(
                         "{}/{} layers offloaded (CPU only)",
@@ -441,17 +469,27 @@ impl Display {
                         full,
                         st.overflow_layers
                     )
-                } else if st.gpu_layers_loaded == st.total_layers && !cpu_weights_significant {
+                } else if st.gpu_layers_loaded == st.total_layers && metal_spill {
+                    // Safety net: CPU_REPACK > 0 but `(N overflowing)` didn't
+                    // populate. Report the spill even if we can't attribute
+                    // it to a specific layer count.
                     format!(
-                        "{}/{} layers offloaded (fully GPU)",
+                        "{}/{} layers offloaded (partial, experts on CPU)",
                         st.gpu_layers_loaded, st.total_layers
                     )
-                } else if st.gpu_layers_loaded == st.total_layers {
-                    // All layers claimed offloaded but a substantial chunk of
-                    // weights is mapped to host RAM — expert spill without the
-                    // summary line, or an older llama.cpp that doesn't emit it.
+                } else if st.gpu_layers_loaded == st.total_layers && embed_only {
                     format!(
-                        "{}/{} layers offloaded (partial, weights on CPU)",
+                        "{}/{} layers offloaded (fully GPU, embedding on CPU)",
+                        st.gpu_layers_loaded, st.total_layers
+                    )
+                } else if st.gpu_layers_loaded == st.total_layers && st.cpu_forced_count > 0 {
+                    format!(
+                        "{}/{} layers offloaded (fully GPU, {} tensors on CPU)",
+                        st.gpu_layers_loaded, st.total_layers, st.cpu_forced_count
+                    )
+                } else if st.gpu_layers_loaded == st.total_layers {
+                    format!(
+                        "{}/{} layers offloaded (fully GPU)",
                         st.gpu_layers_loaded, st.total_layers
                     )
                 } else {
