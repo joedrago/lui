@@ -5,6 +5,7 @@ mod config;
 mod display;
 mod gguf;
 mod server;
+mod ssh_tunnel;
 mod websearch;
 
 use std::ffi::OsString;
@@ -35,6 +36,10 @@ struct RunOpts {
     // without spawning. Useful for "what would this actually run?" debugging
     // after a chain of --global / --this edits plus SWA auto-detection.
     cmd: bool,
+    // One-shot SSH mode: configure a remote's opencode to point at this
+    // machine's llama-server via tunneled ports, print the `ssh -R ...`
+    // command, and exit. Never persisted.
+    ssh: Option<ssh_tunnel::SshTarget>,
 }
 
 // Descriptions all start at column 36 so the right-hand column is aligned
@@ -87,6 +92,11 @@ MACHINE SETTINGS (always global; rejected with --this):
         --avo                      Allow VRAM oversubscription (skip lui's abort on GPU over-budget)
         --no-avo                   Abort on VRAM oversubscription (default)
 
+REMOTE (one-shot; not persisted):
+        --ssh <USER@HOST>          Configure the remote's opencode to use this
+                                   machine's llama-server over an SSH tunnel,
+                                   print the `ssh -R ...` command, and exit
+
 OTHER:
     -l, --list                     List cached models and show current config
         --cmd                      Print the resolved llama-server command and exit
@@ -137,6 +147,7 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
     let mut list = false;
     let mut debug: Option<String> = None;
     let mut cmd = false;
+    let mut ssh: Option<ssh_tunnel::SshTarget> = None;
 
     // Active model key: the one that per-model scoped settings write into.
     // Seeded from the loaded config so `lui --this --temp 0.3` works with
@@ -288,6 +299,11 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
             Long("debug") => {
                 debug = Some(take_string(&mut parser, "--debug"));
             }
+            Long("ssh") => {
+                require_global(scope, "--ssh");
+                let v = take_string(&mut parser, "--ssh");
+                ssh = Some(ssh_tunnel::parse_target(&v).unwrap_or_else(|e| die(&e)));
+            }
 
             // Bare positional before `--`: must be an alias in either pool.
             // We check both; an unknown name is a hard error so typos don't
@@ -345,7 +361,7 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
         config.models.entry(k).or_default().extra_args = v;
     }
 
-    RunOpts { list, debug, cmd }
+    RunOpts { list, debug, cmd, ssh }
 }
 
 /// Minimal POSIX-style shell quoting for `--cmd` output, so the printed
@@ -1177,6 +1193,20 @@ async fn main() {
                 }
             }
         }
+    }
+
+    // --ssh: one-shot remote configuration. Doesn't spawn llama-server,
+    // doesn't touch local opencode. Placed after SWA auto-detect so the
+    // remote config reflects the same effective server config we would have
+    // launched with. We deliberately ran save_config above: it's fine for a
+    // `lui --hf X --ssh ...` invocation to also record that --hf intent in
+    // lui.toml, since that isn't `--ssh`-specific state.
+    if let Some(target) = &opts.ssh {
+        if let Err(e) = ssh_tunnel::setup_remote(target, &effective) {
+            eprintln!("lui: {}", e);
+            std::process::exit(1);
+        }
+        return;
     }
 
     // --cmd: print the fully-resolved llama-server invocation and exit.

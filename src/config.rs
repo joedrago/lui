@@ -606,11 +606,15 @@ fn websearch_bash_pattern(port: u16) -> String {
 /// endpoint, so opencode doesn't prompt for every search. We only touch keys
 /// shaped like our pattern (any port) — anything else the user put there is
 /// left untouched. When websearch is disabled, we remove stale entries.
-fn update_websearch_permission(root: &mut serde_json::Map<String, serde_json::Value>, config: &ServerConfig) {
-    let current_pattern = websearch_bash_pattern(websearch_port(config));
+fn update_websearch_permission(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    web_port: u16,
+    disabled: bool,
+) {
+    let current_pattern = websearch_bash_pattern(web_port);
 
     if !root.contains_key("permission") {
-        if config.websearch_disabled {
+        if disabled {
             return;
         }
         root.insert("permission".to_string(), serde_json::json!({}));
@@ -621,7 +625,7 @@ fn update_websearch_permission(root: &mut serde_json::Map<String, serde_json::Va
     };
 
     if !permission.contains_key("bash") {
-        if config.websearch_disabled {
+        if disabled {
             return;
         }
         permission.insert("bash".to_string(), serde_json::json!({}));
@@ -638,30 +642,40 @@ fn update_websearch_permission(root: &mut serde_json::Map<String, serde_json::Va
             || k == &current_pattern
     });
 
-    if config.websearch_disabled {
+    if disabled {
         bash.remove(&current_pattern);
     } else {
         bash.insert(current_pattern, serde_json::json!("allow"));
     }
 }
 
-pub fn update_opencode_config(config: &ServerConfig) {
-    let path = opencode_config_path();
+/// Build the opencode JSON value for this model, layered on top of any
+/// existing config (so unrelated keys the user has hand-set are preserved).
+/// Pure function — no filesystem touches. The local path writes the result
+/// to `~/.config/opencode/opencode.json`; the `--ssh` path pipes it over SSH.
+///
+/// `llama_base_url` is what opencode's "lui" provider will point at — for
+/// local use that's `http://localhost:<port>/v1`; for `--ssh` it's a URL
+/// pointing at whichever port on the remote side we'll tunnel back to the
+/// local llama-server. `web_port` is the port opencode's bash permission
+/// pattern will allow curl calls to (remote-side port when over SSH).
+pub fn build_opencode_json(
+    config: &ServerConfig,
+    llama_base_url: &str,
+    web_port: u16,
+    existing: Option<&str>,
+) -> serde_json::Value {
     let model_name = derive_model_name(config);
 
-    // Read existing config or start with empty object
-    let mut json: serde_json::Value = if path.exists() {
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or(serde_json::json!({})),
-            Err(_) => serde_json::json!({}),
-        }
-    } else {
-        serde_json::json!({})
-    };
+    let mut json: serde_json::Value = existing
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
 
+    if !json.is_object() {
+        json = serde_json::json!({});
+    }
     let obj = json.as_object_mut().unwrap();
 
-    // Set top-level model
     obj.insert(
         "model".to_string(),
         serde_json::json!(format!("lui/{}", model_name)),
@@ -684,21 +698,17 @@ pub fn update_opencode_config(config: &ServerConfig) {
         compaction.insert("prune".to_string(), serde_json::json!(false));
     }
 
-    // Ensure provider section exists
     if !obj.contains_key("provider") {
         obj.insert("provider".to_string(), serde_json::json!({}));
     }
-
     let providers = obj.get_mut("provider").unwrap().as_object_mut().unwrap();
-
-    // Create/update the "lui" provider
     providers.insert(
         "lui".to_string(),
         serde_json::json!({
             "name": "lui",
             "npm": "@ai-sdk/openai-compatible",
             "options": {
-                "baseURL": format!("http://localhost:{}/v1", config.port),
+                "baseURL": llama_base_url,
                 "toolParser": [
                     { "type": "raw-function-call" },
                     { "type": "json" }
@@ -713,13 +723,23 @@ pub fn update_opencode_config(config: &ServerConfig) {
         }),
     );
 
-    // Pre-allow the web-search curl pattern so opencode doesn't prompt the
-    // user for every search call. Pattern is narrow — only curl to lui's
-    // local search port is allowed, nothing else. We manage *only* entries
-    // matching our port so the user can freely add their own bash rules.
-    update_websearch_permission(obj, config);
+    update_websearch_permission(obj, web_port, config.websearch_disabled);
 
-    // Write back
+    json
+}
+
+pub fn update_opencode_config(config: &ServerConfig) {
+    let path = opencode_config_path();
+
+    let existing = if path.exists() {
+        std::fs::read_to_string(&path).ok()
+    } else {
+        None
+    };
+
+    let base_url = format!("http://localhost:{}/v1", config.port);
+    let json = build_opencode_json(config, &base_url, websearch_port(config), existing.as_deref());
+
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -741,31 +761,12 @@ fn websearch_skill_dir() -> PathBuf {
         .join("lui-web-search")
 }
 
-/// Write (or rewrite) the `lui-web-search` skill so opencode knows how to
-/// invoke lui's local /search endpoint. The port is baked in at write time
-/// so the skill stays correct across restarts/port changes. Removes the
-/// skill instead when websearch is disabled, so turning it off cleanly
-/// withdraws the capability rather than leaving a stale SKILL.md pointing
-/// at a dead port.
-pub fn update_websearch_skill(config: &ServerConfig) {
-    let dir = websearch_skill_dir();
-    let skill_path = dir.join("SKILL.md");
-
-    if config.websearch_disabled {
-        // Remove SKILL.md first, then the now-empty directory. We intentionally
-        // only remove the dir if it's empty, so we don't wipe out anything a
-        // user may have stashed alongside.
-        if skill_path.exists() {
-            let _ = std::fs::remove_file(&skill_path);
-        }
-        if dir.exists() {
-            let _ = std::fs::remove_dir(&dir);
-        }
-        return;
-    }
-
-    let port = websearch_port(config);
-    let body = format!(
+/// Render the SKILL.md body that teaches opencode how to call lui's
+/// `/bsearch` endpoint. The port is baked in so the file is self-contained —
+/// called by both the local `update_websearch_skill` (using the local
+/// web-search port) and the `--ssh` path (using the remote-side tunnel port).
+pub fn render_websearch_skill(port: u16) -> String {
+    format!(
         r#"---
 name: lui-web-search
 description: Search the web via lui's browser-mediated search endpoint. Use whenever the user asks to search the web, look up current information, or find documentation online. Returns JSON results with title, url, and snippet.
@@ -854,7 +855,33 @@ Be deliberate about when to search:
 - Pick the best query first instead of iterating with small variations.
 - Don't search for things you already know.
 "#
-    );
+    )
+}
+
+/// Write (or rewrite) the `lui-web-search` skill so opencode knows how to
+/// invoke lui's local /search endpoint. The port is baked in at write time
+/// so the skill stays correct across restarts/port changes. Removes the
+/// skill instead when websearch is disabled, so turning it off cleanly
+/// withdraws the capability rather than leaving a stale SKILL.md pointing
+/// at a dead port.
+pub fn update_websearch_skill(config: &ServerConfig) {
+    let dir = websearch_skill_dir();
+    let skill_path = dir.join("SKILL.md");
+
+    if config.websearch_disabled {
+        // Remove SKILL.md first, then the now-empty directory. We intentionally
+        // only remove the dir if it's empty, so we don't wipe out anything a
+        // user may have stashed alongside.
+        if skill_path.exists() {
+            let _ = std::fs::remove_file(&skill_path);
+        }
+        if dir.exists() {
+            let _ = std::fs::remove_dir(&dir);
+        }
+        return;
+    }
+
+    let body = render_websearch_skill(websearch_port(config));
 
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!(
