@@ -59,7 +59,34 @@ struct AppState {
     // a key in/out, never across an await.
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<Vec<SearchResult>>>>>,
     port: u16,
+    config_info: LuiConfigResponse,
 }
+
+/// JSON returned by `GET /config`. Used by `lui --ssh-use` on a Remote to
+/// learn everything it needs to configure its local opencode and print the
+/// `ssh -L …` tunnel command.
+///
+/// Versioned so we can evolve the payload without breaking older Remotes.
+/// Rules of the road:
+///   * the root is always a JSON object (never a bare array or scalar) so
+///     new top-level keys stay additive;
+///   * bumps to `version` signal breaking changes (rename/remove/semantic
+///     shift) and `--ssh-use` will refuse a version it doesn't understand;
+///   * new optional fields can be added without bumping `version` — older
+///     clients ignore unknown keys, and `#[serde(default)]` on the Remote
+///     side keeps deserialization working when a field is absent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuiConfigResponse {
+    pub version: u32,
+    pub llama_port: u16,
+    pub web_port: u16,
+    pub websearch_disabled: bool,
+    pub model_name: String,
+}
+
+/// Current schema version of the `/config` payload. Bump only for breaking
+/// changes — additive fields don't require a bump.
+pub const CONFIG_VERSION: u32 = 1;
 
 // How long /bsearch waits for the user to click the bookmarklet before
 // giving up. Long enough to find the right tab and click; short enough
@@ -79,21 +106,47 @@ fn next_bsearch_id() -> String {
     format!("{:x}-{:x}", secs, n)
 }
 
-pub fn spawn(port: u16, server_state: Arc<Mutex<ServerState>>) {
+/// Spawn the lui HTTP server.
+///
+/// Always mounts `/health` and `/config`; these are used by other lui
+/// instances (specifically `--ssh-use`) to discover this Lui's shape
+/// regardless of whether browser-mediated search is enabled. The search
+/// routes (`/bsearch`, `/results`, `/setup`) only mount when
+/// `config_info.websearch_disabled` is false, so `--no-websearch`
+/// genuinely withdraws that capability.
+pub fn spawn(
+    bind_host: &str,
+    port: u16,
+    server_state: Arc<Mutex<ServerState>>,
+    config_info: LuiConfigResponse,
+) {
+    let websearch_enabled = !config_info.websearch_disabled;
     let state = AppState {
         server_state,
         pending: Arc::new(Mutex::new(HashMap::new())),
         port,
+        config_info,
     };
 
-    let app = Router::new()
-        .route("/bsearch", get(handle_bsearch))
-        .route("/results", post(handle_results).options(handle_results_preflight))
-        .route("/setup", get(handle_setup))
+    let mut app: Router<AppState> = Router::new()
         .route("/health", get(|| async { "ok" }))
-        .with_state(state);
+        .route("/config", get(handle_config));
+    if websearch_enabled {
+        app = app
+            .route("/bsearch", get(handle_bsearch))
+            .route("/results", post(handle_results).options(handle_results_preflight))
+            .route("/setup", get(handle_setup));
+    }
+    let app = app.with_state(state);
 
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    // Parse the bind host (e.g. "127.0.0.1" or "0.0.0.0"); fall back to
+    // loopback on a bogus value so we never accidentally bind to all
+    // interfaces. `--public` is what opts a Lui into being reachable by a
+    // Remote's `--ssh-use`.
+    let ip: std::net::IpAddr = bind_host
+        .parse()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let addr = std::net::SocketAddr::new(ip, port);
 
     tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -188,6 +241,10 @@ async fn handle_results(
             "no pending search with that id (timed out or already received)",
         ),
     }
+}
+
+async fn handle_config(State(state): State<AppState>) -> Json<LuiConfigResponse> {
+    Json(state.config_info.clone())
 }
 
 async fn handle_bsearch(

@@ -589,7 +589,7 @@ pub fn derive_model_name(config: &ServerConfig) -> String {
     }
 }
 
-fn opencode_config_path() -> PathBuf {
+pub fn opencode_config_path() -> PathBuf {
     // opencode uses ~/.config/opencode/opencode.json (XDG-style), not ~/Library/Application Support/
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".config").join("opencode").join("opencode.json")
@@ -652,21 +652,23 @@ fn update_websearch_permission(
 /// Build the opencode JSON value for this model, layered on top of any
 /// existing config (so unrelated keys the user has hand-set are preserved).
 /// Pure function — no filesystem touches. The local path writes the result
-/// to `~/.config/opencode/opencode.json`; the `--ssh` path pipes it over SSH.
+/// to `~/.config/opencode/opencode.json`; the `--ssh-share` path pipes it
+/// over SSH; the `--ssh-use` path writes it locally on the Remote.
 ///
+/// `model_name` is the short provider-model id (see `derive_model_name`).
+/// `websearch_disabled` matches `ServerConfig::websearch_disabled`.
 /// `llama_base_url` is what opencode's "lui" provider will point at — for
-/// local use that's `http://localhost:<port>/v1`; for `--ssh` it's a URL
-/// pointing at whichever port on the remote side we'll tunnel back to the
-/// local llama-server. `web_port` is the port opencode's bash permission
-/// pattern will allow curl calls to (remote-side port when over SSH).
+/// local use that's `http://localhost:<port>/v1`; for tunneled use it's a
+/// URL pointing at whichever local port will be forwarded to the Lui's
+/// llama-server. `web_port` is the port opencode's bash permission pattern
+/// will allow curl calls to (same-side port for each role).
 pub fn build_opencode_json(
-    config: &ServerConfig,
+    model_name: &str,
+    websearch_disabled: bool,
     llama_base_url: &str,
     web_port: u16,
     existing: Option<&str>,
 ) -> serde_json::Value {
-    let model_name = derive_model_name(config);
-
     let mut json: serde_json::Value = existing
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
@@ -715,15 +717,17 @@ pub fn build_opencode_json(
                 ]
             },
             "models": {
-                &model_name: {
-                    "name": &model_name,
+                // Key is the variable `model_name`; serde_json's json! macro
+                // treats a bare identifier here as a string-expr key.
+                model_name: {
+                    "name": model_name,
                     "supportsToolCalls": true
                 }
             }
         }),
     );
 
-    update_websearch_permission(obj, web_port, config.websearch_disabled);
+    update_websearch_permission(obj, web_port, websearch_disabled);
 
     json
 }
@@ -738,7 +742,14 @@ pub fn update_opencode_config(config: &ServerConfig) {
     };
 
     let base_url = format!("http://localhost:{}/v1", config.port);
-    let json = build_opencode_json(config, &base_url, websearch_port(config), existing.as_deref());
+    let model_name = derive_model_name(config);
+    let json = build_opencode_json(
+        &model_name,
+        config.websearch_disabled,
+        &base_url,
+        websearch_port(config),
+        existing.as_deref(),
+    );
 
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -750,7 +761,7 @@ pub fn update_opencode_config(config: &ServerConfig) {
     }
 }
 
-fn websearch_skill_dir() -> PathBuf {
+pub fn websearch_skill_dir() -> PathBuf {
     // Skills live under ~/.config/opencode/skills/<name>/SKILL.md — see
     // https://opencode.ai/docs/skills/. The directory name must match the
     // `name:` field in frontmatter.
