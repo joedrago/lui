@@ -100,6 +100,12 @@ pub struct ServerState {
     // down. When true, the VRAM-oversubscribed detection below is skipped.
     pub allow_vram_oversubscription: bool,
 
+    // True while llama-server's `-fit` logic is probing memory at candidate
+    // context sizes. Those probes emit llama_memory_breakdown_print lines
+    // showing self>total for the over-budget candidates — which is expected,
+    // not a failure. Ignore the oversubscription check while probing.
+    pub fit_probing: bool,
+
     // Web search tracking (local /bsearch endpoint; see src/websearch.rs).
     // `active_searches` holds one entry per in-flight search, keyed by the
     // request id; the display iterates values() to render them as sub-lines
@@ -525,6 +531,18 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
             state.compute_buf_mib = mib;
         }
     }
+    // llama-server's `-fit` logic probes memory at candidate context sizes,
+    // starting at the model's full trained ctx and binary-searching down.
+    // Each probe emits a breakdown line that may show self>total — that's
+    // the signal fit uses to reject the candidate, NOT an allocation failure.
+    // Suppress the oversubscription check during this window.
+    else if line.contains("llama_params_fit_impl:") {
+        state.fit_probing = true;
+    } else if line.contains("llama_params_fit:")
+        && (line.contains("successfully fit") || line.contains("cannot fit"))
+    {
+        state.fit_probing = false;
+    }
     // GPU memory breakdown. Format (whitespace varies):
     //   "llama_memory_breakdown_print: |   - MTL0 (Apple M4 Max) |
     //    28753 = 28690 + (28872 = 20583 + 5182 + 3106) + 17592186015607 |"
@@ -540,7 +558,11 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
         if let Some(caps) = re.captures(line) {
             let total: u64 = caps[1].parse().unwrap_or(0);
             let selfsz: u64 = caps[2].parse().unwrap_or(0);
-            if total > 0 && selfsz > total && !state.allow_vram_oversubscription {
+            if total > 0
+                && selfsz > total
+                && !state.allow_vram_oversubscription
+                && !state.fit_probing
+            {
                 let over = selfsz - total;
                 let msg = format!(
                     "GPU VRAM oversubscribed: model + KV + compute = {} MiB but device has only {} MiB ({} MiB over).\n  Try one or more of:\n    --ctk q8_0 --ctv q8_0   (halves KV cache)\n    --ubatch-size 512       (smaller compute buffer)\n    -c <smaller>            (reduce context window)\n\n  This check can be a false positive when the driver is willing to page\n  GPU memory to host RAM instead of failing the allocation:\n    - NVIDIA on Windows with \"CUDA Sysmem Fallback Policy\" enabled\n      (NVIDIA Control Panel > Manage 3D Settings; on by default)\n    - macOS Metal, which treats its working-set limit as a soft cap\n\n  If that applies to you, load will succeed but long-context inference\n  will pay a PCIe/paging cost. Pass --avo (or set allow_vram_oversub-\n  scription = true in [server]) to skip this check and accept that\n  trade-off.",
