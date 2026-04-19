@@ -91,11 +91,12 @@ pub struct LuiConfigResponse {
     pub web_port: u16,
     pub websearch_disabled: bool,
     pub model_name: String,
+    pub ctx_size: u32,
 }
 
 /// Current schema version of the `/config` payload. Bump only for breaking
 /// changes — additive fields don't require a bump.
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 
 // How long /bsearch waits for the user to click the bookmarklet before
 // giving up. Long enough to find the right tab and click; short enough

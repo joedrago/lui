@@ -772,6 +772,7 @@ pub fn build_opencode_json(
     websearch_disabled: bool,
     llama_base_url: &str,
     web_port: u16,
+    ctx_size: u32,
     existing: Option<&str>,
 ) -> serde_json::Value {
     let mut json: serde_json::Value = existing
@@ -826,7 +827,12 @@ pub fn build_opencode_json(
                 // treats a bare identifier here as a string-expr key.
                 model_name: {
                     "name": model_name,
-                    "supportsToolCalls": true
+                    "supportsToolCalls": true,
+                    "limit": {
+                        "context": ctx_size,
+                        "input": ctx_size,
+                        "output": 8192
+                    }
                 }
             }
         }),
@@ -853,6 +859,7 @@ pub fn update_opencode_config(config: &ServerConfig) {
         config.websearch_disabled,
         &base_url,
         websearch_port(config),
+        config.ctx_size,
         existing.as_deref(),
     );
 

@@ -339,6 +339,7 @@ pub fn setup_share(target: &SshTarget, effective: &ServerConfig) -> Result<(), S
         effective.websearch_disabled,
         &base_url,
         remote_web,
+        effective.ctx_size,
         existing.as_deref(),
     );
     let contents = serde_json::to_string_pretty(&json)
@@ -451,6 +452,7 @@ fn write_local_opencode_json(
     model_name: &str,
     llama_base_url: &str,
     local_web: u16,
+    ctx_size: u32,
 ) -> Result<(), String> {
     let path = opencode_config_path();
     let existing = std::fs::read_to_string(&path).ok();
@@ -459,6 +461,7 @@ fn write_local_opencode_json(
         /* websearch_disabled */ false,
         llama_base_url,
         local_web,
+        ctx_size,
         existing.as_deref(),
     );
     let contents = serde_json::to_string_pretty(&json)
@@ -543,7 +546,7 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
     // so the URL matches what they'd see in `lui --public`'s banner.
     let llama_base_url = format!("http://{}:{}/v1", target.host, lui_cfg.llama_port);
 
-    write_local_opencode_json(&lui_cfg.model_name, &llama_base_url, local_web)?;
+    write_local_opencode_json(&lui_cfg.model_name, &llama_base_url, local_web, lui_cfg.ctx_size)?;
     write_local_websearch_skill(local_web)?;
 
     // In-process bsearch server. We synthesize a minimal ServerState just
@@ -558,6 +561,7 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
         web_port: local_web,
         websearch_disabled: false,
         model_name: lui_cfg.model_name.clone(),
+        ctx_size: lui_cfg.ctx_size,
     };
  // Minimal ConfigSummary for the client's in-process HTTP server. Nothing
   // ever polls this client's /data (the renderer points at the *server's*

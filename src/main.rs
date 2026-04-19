@@ -1329,6 +1329,7 @@ async fn main() {
         web_port,
         websearch_disabled: effective.websearch_disabled,
         model_name: derive_model_name(&effective),
+        ctx_size: effective.ctx_size,
     };
     // Shared start time: the lui HTTP server reports uptime off this clock
     // via `/data`, and the Display uses the same `start_time` so the local
