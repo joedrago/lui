@@ -359,15 +359,21 @@ impl ServerState {
         // Age out stale warnings before the renderer sees them. Keeps a
         // late-expiring warning from hanging on until the next canary push.
         self.prune_warnings();
-        let mut slots: Vec<SlotSnapshot> =
-            self.active_slots.values().map(SlotInfo::to_snapshot).collect();
+        let mut slots: Vec<SlotSnapshot> = self
+            .active_slots
+            .values()
+            .map(SlotInfo::to_snapshot)
+            .collect();
         // HashMap iteration is unordered; sort so the renderer sees a
         // stable slot order (avoids slots appearing to swap places between
         // ticks when the hasher reorders them).
         slots.sort_by_key(|s| s.slot_id);
 
-        let recent: Vec<SlotSnapshot> =
-            self.recent_completed.iter().map(SlotInfo::to_snapshot).collect();
+        let recent: Vec<SlotSnapshot> = self
+            .recent_completed
+            .iter()
+            .map(SlotInfo::to_snapshot)
+            .collect();
 
         let mut downloads: Vec<DownloadSnapshot> = self
             .downloads
@@ -379,8 +385,7 @@ impl ServerState {
             .collect();
         downloads.sort_by(|a, b| a.filename.cmp(&b.filename));
 
-        let mut active_searches: Vec<String> =
-            self.active_searches.values().cloned().collect();
+        let mut active_searches: Vec<String> = self.active_searches.values().cloned().collect();
         active_searches.sort();
 
         UiSnapshot {
@@ -621,7 +626,10 @@ pub fn build_args(config: &ServerConfig) -> Vec<String> {
     args
 }
 
-pub fn spawn_server(config: &ServerConfig, debug_log: Option<&str>) -> Result<ServerProcess, String> {
+pub fn spawn_server(
+    config: &ServerConfig,
+    debug_log: Option<&str>,
+) -> Result<ServerProcess, String> {
     let args = build_args(config);
 
     let pty_system = native_pty_system();
@@ -653,9 +661,8 @@ pub fn spawn_server(config: &ServerConfig, debug_log: Option<&str>) -> Result<Se
         ..ServerState::default()
     }));
 
-    let debug_file = debug_log.map(|path| {
-        std::fs::File::create(path).expect("Failed to create debug log file")
-    });
+    let debug_file =
+        debug_log.map(|path| std::fs::File::create(path).expect("Failed to create debug log file"));
 
     // Spawn blocking reader task (pty reader is sync)
     let state_clone = state.clone();
@@ -757,9 +764,8 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
     // so we use captures_iter with a non-greedy match to extract all entries.
     if line.contains("Downloading ") {
         static RE_DL: OnceLock<Regex> = OnceLock::new();
-        let re = RE_DL.get_or_init(|| {
-            Regex::new(r"Downloading (\S+\.\S+)\s.*?(\d{1,3})%").unwrap()
-        });
+        let re =
+            RE_DL.get_or_init(|| Regex::new(r"Downloading (\S+\.\S+)\s.*?(\d{1,3})%").unwrap());
         let mut found = false;
         for caps in re.captures_iter(line) {
             let name = caps[1].to_string();
@@ -892,9 +898,8 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
     // effectively full-GPU — distinct from a real weight spill.
     else if line.contains("done_getting_tensors:") && line.contains("using CPU instead") {
         static RE: OnceLock<Regex> = OnceLock::new();
-        let re = RE.get_or_init(|| {
-            Regex::new(r"tensor\s+'([^']+)'.*?\(and\s+(\d+)\s+others\)").unwrap()
-        });
+        let re = RE
+            .get_or_init(|| Regex::new(r"tensor\s+'([^']+)'.*?\(and\s+(\d+)\s+others\)").unwrap());
         if let Some(caps) = re.captures(line) {
             let others: u32 = caps[2].parse().unwrap_or(0);
             state.cpu_forced_count = others.saturating_add(1);
@@ -944,9 +949,7 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
     // explanation instead of letting the user discover it 60k tokens in.
     else if line.contains("llama_memory_breakdown_print:") && !line.contains("CPU") {
         static RE: OnceLock<Regex> = OnceLock::new();
-        let re = RE.get_or_init(|| {
-            Regex::new(r"(\d+)\s*=\s*\d+\s*\+\s*\(\s*(\d+)\s*=").unwrap()
-        });
+        let re = RE.get_or_init(|| Regex::new(r"(\d+)\s*=\s*\d+\s*\+\s*\(\s*(\d+)\s*=").unwrap());
         if let Some(caps) = re.captures(line) {
             let total: u64 = caps[1].parse().unwrap_or(0);
             let selfsz: u64 = caps[2].parse().unwrap_or(0);
@@ -1048,7 +1051,8 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
     }
     // Prefill progress: "slot update_slots: id  0 | task 0 | prompt processing progress,
     //   n_tokens = 4096, batch.n_tokens = 2048, progress = 0.024940"
-    else if line.starts_with("slot update_slots:") && line.contains("prompt processing progress") {
+    else if line.starts_with("slot update_slots:") && line.contains("prompt processing progress")
+    {
         if let Some((slot_id, _)) = extract_slot_task(line) {
             static RE: OnceLock<Regex> = OnceLock::new();
             let re = RE.get_or_init(|| Regex::new(r"progress\s*=\s*([0-9.]+)").unwrap());
@@ -1430,7 +1434,10 @@ mod tests {
         assert_eq!(s.request_count, 4);
         assert_eq!(s.warnings.len(), 2, "warnings: {:?}", s.warnings);
         assert!(s.warnings.iter().any(|(_, w)| w.contains("prompt_eval")));
-        assert!(s.warnings.iter().any(|(_, w)| w.contains("generation-eval")));
+        assert!(s
+            .warnings
+            .iter()
+            .any(|(_, w)| w.contains("generation-eval")));
     }
 
     #[test]
@@ -1476,14 +1483,8 @@ mod tests {
         // Historical "      total time =" padding and a tab-prefixed variant
         // should both land in the same branch after trim_start.
         let mut s = ServerState::default();
-        parse_line(
-            "      total time =   25690.22 ms / 14289 tokens",
-            &mut s,
-        );
-        parse_line(
-            "\ttotal time =   25690.22 ms / 14289 tokens",
-            &mut s,
-        );
+        parse_line("      total time =   25690.22 ms / 14289 tokens", &mut s);
+        parse_line("\ttotal time =   25690.22 ms / 14289 tokens", &mut s);
         // Not much to assert without a live slot to update, but the test
         // proves the branches don't panic on either padding style.
     }

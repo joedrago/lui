@@ -149,7 +149,10 @@ pub fn spawn(
     if websearch_enabled {
         app = app
             .route("/bsearch", get(handle_bsearch))
-            .route("/results", post(handle_results).options(handle_results_preflight))
+            .route(
+                "/results",
+                post(handle_results).options(handle_results_preflight),
+            )
             .route("/setup", get(handle_setup));
     }
     let app = app.with_state(state);
@@ -176,7 +179,6 @@ pub fn spawn(
         }
     });
 }
-
 
 // ---------------------------------------------------------------------------
 // Browser-mediated search: lui opens the user's browser to Google, the user
@@ -303,7 +305,12 @@ async fn handle_bsearch(
     );
     if let Err(e) = open_in_browser(&google_url) {
         state.pending.lock().unwrap().remove(&id);
-        state.server_state.lock().unwrap().active_searches.remove(&id);
+        state
+            .server_state
+            .lock()
+            .unwrap()
+            .active_searches
+            .remove(&id);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to open browser: {}", e),
@@ -312,7 +319,12 @@ async fn handle_bsearch(
 
     let outcome = tokio::time::timeout(BSEARCH_TIMEOUT, rx).await;
 
-    state.server_state.lock().unwrap().active_searches.remove(&id);
+    state
+        .server_state
+        .lock()
+        .unwrap()
+        .active_searches
+        .remove(&id);
 
     match outcome {
         Ok(Ok(results)) => Ok(Json(results)),
@@ -423,11 +435,7 @@ fn setup_page_html(port: u16) -> String {
     // Minify the JS by stripping leading whitespace per line; bookmarklets
     // don't need the indentation and shorter URLs are friendlier in the
     // bookmark bar.
-    let minified: String = js
-        .lines()
-        .map(|l| l.trim())
-        .collect::<Vec<_>>()
-        .join("");
+    let minified: String = js.lines().map(|l| l.trim()).collect::<Vec<_>>().join("");
     let href = format!("javascript:{}", urlencoding::encode(&minified));
     // Manually escape `"` for embedding the href in an HTML attribute. The
     // urlencoded JS contains no `"` itself.
@@ -472,4 +480,3 @@ fn setup_page_html(port: u16) -> String {
 "##
     )
 }
-

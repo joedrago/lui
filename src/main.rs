@@ -4,6 +4,7 @@
 mod config;
 mod display;
 mod gguf;
+mod opencode_config;
 mod server;
 mod ssh_tunnel;
 mod websearch;
@@ -104,6 +105,10 @@ MACHINE SETTINGS (always global; rejected with --this):
         --web-port <N>             Port for the local web-search endpoint (default: llama port + 1)
         --avo                      Allow VRAM oversubscription (skip lui's abort on GPU over-budget)
         --no-avo                   Abort on VRAM oversubscription (default)
+        --opencode-disable-prune   Tell opencode not to prune tool outputs
+                                   (preserves llama-server prompt cache on
+                                    large contexts; off by default so cloud
+                                    providers retain opencode's normal pruning)
 
 REMOTE (one-shot; not persisted):
         --ssh <USER@HOST>          Run on a server. Configures that
@@ -224,30 +229,54 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
                 //   hf_repo active → [aliases.hf]
                 //   model active   → [aliases.model]
                 if !config.server.hf_repo.is_empty() {
-                    config.aliases.hf.insert(name, config.server.hf_repo.clone());
+                    config
+                        .aliases
+                        .hf
+                        .insert(name, config.server.hf_repo.clone());
                 } else if !config.server.model.is_empty() {
-                    config.aliases.model.insert(name, config.server.model.clone());
+                    config
+                        .aliases
+                        .model
+                        .insert(name, config.server.model.clone());
                 } else {
                     die("--alias requires an active model; pass --hf <repo> or -m <path> first");
                 }
             }
 
-            Short('c') | Long("ctx-size") => {
-                match take_scalar::<u32>(&mut parser, "--ctx-size") {
-                    Some(v) => apply_u32(config, scope, &active_key, "ctx-size", Some(v)),
-                    None => apply_u32(config, scope, &active_key, "ctx-size", None),
-                }
-            }
+            Short('c') | Long("ctx-size") => match take_scalar::<u32>(&mut parser, "--ctx-size") {
+                Some(v) => apply_u32(config, scope, &active_key, "ctx-size", Some(v)),
+                None => apply_u32(config, scope, &active_key, "ctx-size", None),
+            },
             Long("ngl") | Long("gpu-layers") => {
                 match take_scalar::<i32>(&mut parser, "--gpu-layers") {
                     Some(v) => apply_i32(config, scope, &active_key, "gpu-layers", Some(v)),
                     None => apply_i32(config, scope, &active_key, "gpu-layers", None),
                 }
             }
-            Long("temp") => set_temp(config, scope, &active_key, take_scalar::<f32>(&mut parser, "--temp")),
-            Long("top-p") => set_top_p(config, scope, &active_key, take_scalar::<f32>(&mut parser, "--top-p")),
-            Long("top-k") => set_top_k(config, scope, &active_key, take_scalar::<i32>(&mut parser, "--top-k")),
-            Long("min-p") => set_min_p(config, scope, &active_key, take_scalar::<f32>(&mut parser, "--min-p")),
+            Long("temp") => set_temp(
+                config,
+                scope,
+                &active_key,
+                take_scalar::<f32>(&mut parser, "--temp"),
+            ),
+            Long("top-p") => set_top_p(
+                config,
+                scope,
+                &active_key,
+                take_scalar::<f32>(&mut parser, "--top-p"),
+            ),
+            Long("top-k") => set_top_k(
+                config,
+                scope,
+                &active_key,
+                take_scalar::<i32>(&mut parser, "--top-k"),
+            ),
+            Long("min-p") => set_min_p(
+                config,
+                scope,
+                &active_key,
+                take_scalar::<f32>(&mut parser, "--min-p"),
+            ),
 
             Long("ubatch-size") | Long("ub") => {
                 let v = take_scalar::<u32>(&mut parser, "--ubatch-size");
@@ -319,6 +348,10 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
                 require_global(scope, "--no-avo");
                 config.server.allow_vram_oversubscription = false;
             }
+            Long("opencode-disable-prune") => {
+                require_global(scope, "--opencode-disable-prune");
+                config.server.opencode_disable_prune = true;
+            }
 
             Short('l') | Long("list") => list = true,
             Long("cmd") => cmd = true,
@@ -328,8 +361,7 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
             Long("ssh") => {
                 require_global(scope, "--ssh");
                 let v = take_string(&mut parser, "--ssh");
-                ssh_share =
-                    Some(ssh_tunnel::parse_share_target(&v).unwrap_or_else(|e| die(&e)));
+                ssh_share = Some(ssh_tunnel::parse_share_target(&v).unwrap_or_else(|e| die(&e)));
             }
             Long("remote") => {
                 require_global(scope, "--remote");
@@ -413,8 +445,9 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
 /// (notably the JSON kwargs blob, which contains braces and quotes).
 fn shell_quote(s: &str) -> String {
     let safe = !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | ',' | '+'));
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | ',' | '+')
+        });
     if safe {
         return s.to_string();
     }
@@ -438,16 +471,22 @@ fn die(msg: &str) -> ! {
 
 fn require_global(scope: Scope, flag: &str) {
     if scope == Scope::This {
-        die(&format!("{} is a machine-wide setting and can't be scoped to --this", flag));
+        die(&format!(
+            "{} is a machine-wide setting and can't be scoped to --this",
+            flag
+        ));
     }
 }
 
 fn os_into_string(v: OsString, what: &str) -> String {
-    v.into_string().unwrap_or_else(|_| die(&format!("non-UTF8 {}", what)))
+    v.into_string()
+        .unwrap_or_else(|_| die(&format!("non-UTF8 {}", what)))
 }
 
 fn take_string(parser: &mut lexopt::Parser, flag: &str) -> String {
-    let v = parser.value().unwrap_or_else(|_| die(&format!("{} requires a value", flag)));
+    let v = parser
+        .value()
+        .unwrap_or_else(|_| die(&format!("{} requires a value", flag)));
     os_into_string(v, flag)
 }
 
@@ -472,7 +511,11 @@ where
 /// String-valued settings: "default" clears, anything else is the value.
 fn take_string_or_default(parser: &mut lexopt::Parser, flag: &str) -> Option<String> {
     let raw = take_string(parser, flag);
-    if raw == "default" { None } else { Some(raw) }
+    if raw == "default" {
+        None
+    } else {
+        Some(raw)
+    }
 }
 
 // --- Scope-aware setters. Each one handles a single field for both scopes.
@@ -483,7 +526,10 @@ fn take_string_or_default(parser: &mut lexopt::Parser, flag: &str) -> Option<Str
 
 fn require_active_model(key: &Option<String>, flag: &str) -> String {
     key.clone().unwrap_or_else(|| {
-        die(&format!("--this {} requires an active model; pass --hf or -m first", flag))
+        die(&format!(
+            "--this {} requires an active model; pass --hf or -m first",
+            flag
+        ))
     })
 }
 
@@ -515,88 +561,157 @@ fn apply_i32(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, flag: &str
 fn set_temp(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<f32>) {
     match scope {
         Scope::Global => cfg.server.temp = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--temp")).or_default().temp = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--temp"))
+                .or_default()
+                .temp = v
+        }
     }
 }
 fn set_top_p(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<f32>) {
     match scope {
         Scope::Global => cfg.server.top_p = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--top-p")).or_default().top_p = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--top-p"))
+                .or_default()
+                .top_p = v
+        }
     }
 }
 fn set_top_k(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<i32>) {
     match scope {
         Scope::Global => cfg.server.top_k = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--top-k")).or_default().top_k = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--top-k"))
+                .or_default()
+                .top_k = v
+        }
     }
 }
 fn set_min_p(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<f32>) {
     match scope {
         Scope::Global => cfg.server.min_p = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--min-p")).or_default().min_p = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--min-p"))
+                .or_default()
+                .min_p = v
+        }
     }
 }
 fn set_ubatch(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<u32>) {
     match scope {
         Scope::Global => cfg.server.ubatch_size = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--ubatch-size")).or_default().ubatch_size = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--ubatch-size"))
+                .or_default()
+                .ubatch_size = v
+        }
     }
 }
 fn set_batch(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<u32>) {
     match scope {
         Scope::Global => cfg.server.batch_size = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--batch-size")).or_default().batch_size = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--batch-size"))
+                .or_default()
+                .batch_size = v
+        }
     }
 }
 fn set_parallel(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<i32>) {
     match scope {
         Scope::Global => cfg.server.parallel = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--parallel")).or_default().parallel = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--parallel"))
+                .or_default()
+                .parallel = v
+        }
     }
 }
 fn set_tb(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<i32>) {
     match scope {
         Scope::Global => cfg.server.threads_batch = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--threads-batch")).or_default().threads_batch = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--threads-batch"))
+                .or_default()
+                .threads_batch = v
+        }
     }
 }
 fn set_ctk(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<String>) {
     match scope {
         Scope::Global => cfg.server.cache_type_k = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--cache-type-k")).or_default().cache_type_k = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--cache-type-k"))
+                .or_default()
+                .cache_type_k = v
+        }
     }
 }
 fn set_ctv(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<String>) {
     match scope {
         Scope::Global => cfg.server.cache_type_v = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--cache-type-v")).or_default().cache_type_v = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--cache-type-v"))
+                .or_default()
+                .cache_type_v = v
+        }
     }
 }
 fn set_swa(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<bool>) {
     match scope {
         Scope::Global => cfg.server.swa_full = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--swa-full")).or_default().swa_full = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--swa-full"))
+                .or_default()
+                .swa_full = v
+        }
     }
 }
 fn set_cache_ram(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<u32>) {
     match scope {
         Scope::Global => cfg.server.cache_ram = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--cache-ram")).or_default().cache_ram = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--cache-ram"))
+                .or_default()
+                .cache_ram = v
+        }
     }
 }
 fn set_prio(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<i32>) {
     match scope {
         Scope::Global => cfg.server.prio_batch = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--prio-batch")).or_default().prio_batch = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--prio-batch"))
+                .or_default()
+                .prio_batch = v
+        }
     }
 }
 fn set_fit_target(cfg: &mut LuiConfig, scope: Scope, key: &Option<String>, v: Option<String>) {
     match scope {
         Scope::Global => cfg.server.fit_target = v,
-        Scope::This => cfg.models.entry(require_active_model(key, "--fit-target")).or_default().fit_target = v,
+        Scope::This => {
+            cfg.models
+                .entry(require_active_model(key, "--fit-target"))
+                .or_default()
+                .fit_target = v
+        }
     }
 }
-
 
 struct CachedModel {
     repo: String,
@@ -917,13 +1032,25 @@ fn print_current_config() {
     print_setting("Bind", &s.host, host_flag, s.host == "127.0.0.1");
 
     // Sampling (only shown when set; dim "model default" otherwise)
-    let temp_str = s.temp.map(|v| v.to_string()).unwrap_or_else(|| "model default".to_string());
+    let temp_str = s
+        .temp
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "model default".to_string());
     print_setting("Temperature", &temp_str, "--temp <f>", s.temp.is_none());
-    let top_p_str = s.top_p.map(|v| v.to_string()).unwrap_or_else(|| "model default".to_string());
+    let top_p_str = s
+        .top_p
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "model default".to_string());
     print_setting("Top-p", &top_p_str, "--top-p <f>", s.top_p.is_none());
-    let top_k_str = s.top_k.map(|v| v.to_string()).unwrap_or_else(|| "model default".to_string());
+    let top_k_str = s
+        .top_k
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "model default".to_string());
     print_setting("Top-k", &top_k_str, "--top-k <n>", s.top_k.is_none());
-    let min_p_str = s.min_p.map(|v| v.to_string()).unwrap_or_else(|| "model default".to_string());
+    let min_p_str = s
+        .min_p
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "model default".to_string());
     print_setting("Min-p", &min_p_str, "--min-p <f>", s.min_p.is_none());
 
     // Performance knobs. lui supplies its own default for parallel; everything
@@ -946,23 +1073,67 @@ fn print_current_config() {
         s.parallel.is_none(),
     );
     let b = s.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
-    print_setting("Batch", &b.to_string(), "--batch-size <n>", s.batch_size.is_none());
-    let tb_str = s.threads_batch.map(|v| v.to_string()).unwrap_or_else(|| "auto".to_string());
-    print_setting("Threads-batch", &tb_str, "--threads-batch <n>", s.threads_batch.is_none());
+    print_setting(
+        "Batch",
+        &b.to_string(),
+        "--batch-size <n>",
+        s.batch_size.is_none(),
+    );
+    let tb_str = s
+        .threads_batch
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "auto".to_string());
+    print_setting(
+        "Threads-batch",
+        &tb_str,
+        "--threads-batch <n>",
+        s.threads_batch.is_none(),
+    );
     let ctk = s.cache_type_k.clone().unwrap_or_else(|| "f16".to_string());
-    print_setting("KV type (K)", &ctk, "--cache-type-k <t>", s.cache_type_k.is_none());
+    print_setting(
+        "KV type (K)",
+        &ctk,
+        "--cache-type-k <t>",
+        s.cache_type_k.is_none(),
+    );
     let ctv = s.cache_type_v.clone().unwrap_or_else(|| "f16".to_string());
-    print_setting("KV type (V)", &ctv, "--cache-type-v <t>", s.cache_type_v.is_none());
+    print_setting(
+        "KV type (V)",
+        &ctv,
+        "--cache-type-v <t>",
+        s.cache_type_v.is_none(),
+    );
     let (swa_str, swa_is_default) = match s.swa_full {
         Some(true) => ("on (forced)", false),
         Some(false) => ("off (forced)", false),
         None => ("auto (SWA/hybrid detection at launch)", true),
     };
-    print_setting("SWA full", swa_str, "--swa-full / --no-swa-full", swa_is_default);
-    let cram_str = s.cache_ram.map(|v| format!("{} MiB", v)).unwrap_or_else(|| "server default".to_string());
-    print_setting("Cache RAM", &cram_str, "--cache-ram <MiB>", s.cache_ram.is_none());
-    let pb_str = s.prio_batch.map(|v| v.to_string()).unwrap_or_else(|| "normal".to_string());
-    print_setting("Prio batch", &pb_str, "--prio-batch <0-3>", s.prio_batch.is_none());
+    print_setting(
+        "SWA full",
+        swa_str,
+        "--swa-full / --no-swa-full",
+        swa_is_default,
+    );
+    let cram_str = s
+        .cache_ram
+        .map(|v| format!("{} MiB", v))
+        .unwrap_or_else(|| "server default".to_string());
+    print_setting(
+        "Cache RAM",
+        &cram_str,
+        "--cache-ram <MiB>",
+        s.cache_ram.is_none(),
+    );
+    let pb_str = s
+        .prio_batch
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "normal".to_string());
+    print_setting(
+        "Prio batch",
+        &pb_str,
+        "--prio-batch <0-3>",
+        s.prio_batch.is_none(),
+    );
 
     let _ = crossterm::execute!(stdout, Print("\n"));
 
@@ -984,7 +1155,11 @@ fn print_current_config() {
             let _ = crossterm::execute!(
                 stdout,
                 Print("  "),
-                SetForegroundColor(if is_active { Color::Cyan } else { Color::DarkGrey }),
+                SetForegroundColor(if is_active {
+                    Color::Cyan
+                } else {
+                    Color::DarkGrey
+                }),
                 SetAttribute(Attribute::Bold),
                 Print(if is_active {
                     format!("{} (active)", name)
@@ -1010,21 +1185,51 @@ fn print_current_config() {
                     Print("\n"),
                 );
             };
-            if let Some(v) = ov.ctx_size { print_kv("Context", v.to_string()); }
-            if let Some(v) = ov.gpu_layers { print_kv("GPU layers", v.to_string()); }
-            if let Some(v) = ov.temp { print_kv("Temperature", v.to_string()); }
-            if let Some(v) = ov.top_p { print_kv("Top-p", v.to_string()); }
-            if let Some(v) = ov.top_k { print_kv("Top-k", v.to_string()); }
-            if let Some(v) = ov.min_p { print_kv("Min-p", v.to_string()); }
-            if let Some(v) = ov.ubatch_size { print_kv("Ubatch", v.to_string()); }
-            if let Some(v) = ov.batch_size { print_kv("Batch", v.to_string()); }
-            if let Some(v) = ov.parallel { print_kv("Parallel slots", v.to_string()); }
-            if let Some(v) = ov.threads_batch { print_kv("Threads-batch", v.to_string()); }
-            if let Some(v) = &ov.cache_type_k { print_kv("KV type (K)", v.clone()); }
-            if let Some(v) = &ov.cache_type_v { print_kv("KV type (V)", v.clone()); }
-            if let Some(v) = ov.swa_full { print_kv("SWA full", if v { "on".into() } else { "off".into() }); }
-            if let Some(v) = ov.cache_ram { print_kv("Cache RAM", format!("{} MiB", v)); }
-            if let Some(v) = ov.prio_batch { print_kv("Prio batch", v.to_string()); }
+            if let Some(v) = ov.ctx_size {
+                print_kv("Context", v.to_string());
+            }
+            if let Some(v) = ov.gpu_layers {
+                print_kv("GPU layers", v.to_string());
+            }
+            if let Some(v) = ov.temp {
+                print_kv("Temperature", v.to_string());
+            }
+            if let Some(v) = ov.top_p {
+                print_kv("Top-p", v.to_string());
+            }
+            if let Some(v) = ov.top_k {
+                print_kv("Top-k", v.to_string());
+            }
+            if let Some(v) = ov.min_p {
+                print_kv("Min-p", v.to_string());
+            }
+            if let Some(v) = ov.ubatch_size {
+                print_kv("Ubatch", v.to_string());
+            }
+            if let Some(v) = ov.batch_size {
+                print_kv("Batch", v.to_string());
+            }
+            if let Some(v) = ov.parallel {
+                print_kv("Parallel slots", v.to_string());
+            }
+            if let Some(v) = ov.threads_batch {
+                print_kv("Threads-batch", v.to_string());
+            }
+            if let Some(v) = &ov.cache_type_k {
+                print_kv("KV type (K)", v.clone());
+            }
+            if let Some(v) = &ov.cache_type_v {
+                print_kv("KV type (V)", v.clone());
+            }
+            if let Some(v) = ov.swa_full {
+                print_kv("SWA full", if v { "on".into() } else { "off".into() });
+            }
+            if let Some(v) = ov.cache_ram {
+                print_kv("Cache RAM", format!("{} MiB", v));
+            }
+            if let Some(v) = ov.prio_batch {
+                print_kv("Prio batch", v.to_string());
+            }
             if !ov.extra_args.is_empty() {
                 print_kv("Extra args (append)", ov.extra_args.join(" "));
             }
@@ -1398,8 +1603,8 @@ async fn main() {
     // bookmarklet URL is always local (it's a browser-on-this-machine
     // thing); we pass `None` when websearch is disabled so the renderer
     // omits that header row.
-    let local_setup_url = (!effective.websearch_disabled)
-        .then(|| format!("http://127.0.0.1:{}/setup", web_port));
+    let local_setup_url =
+        (!effective.websearch_disabled).then(|| format!("http://127.0.0.1:{}/setup", web_port));
     let display = Display::new(
         "127.0.0.1".to_string(),
         web_port,

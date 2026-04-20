@@ -208,7 +208,10 @@ impl Display {
 
         let mut stream = timeout(t, TcpStream::connect(&addr)).await.ok()?.ok()?;
         let req = "GET /data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept: application/json\r\n\r\n";
-        timeout(t, stream.write_all(req.as_bytes())).await.ok()?.ok()?;
+        timeout(t, stream.write_all(req.as_bytes()))
+            .await
+            .ok()?
+            .ok()?;
 
         let mut buf = Vec::new();
         timeout(t, stream.read_to_end(&mut buf)).await.ok()?.ok()?;
@@ -293,7 +296,8 @@ impl Display {
         let left = "  ── ";
         let mid_text = "lui";
         let right_text = " ── llama.cpp ui ";
-        let prefix_cols = left.chars().count() + mid_text.chars().count() + right_text.chars().count();
+        let prefix_cols =
+            left.chars().count() + mid_text.chars().count() + right_text.chars().count();
         let right_fill = width.saturating_sub(prefix_cols);
         let _ = queue!(
             t.stdout,
@@ -469,10 +473,7 @@ impl Display {
                     let full = st.gpu_layers_loaded.saturating_sub(st.overflow_layers);
                     format!(
                         "{}/{} layers offloaded ({} fully GPU, {} with experts on CPU)",
-                        st.gpu_layers_loaded,
-                        st.total_layers,
-                        full,
-                        st.overflow_layers
+                        st.gpu_layers_loaded, st.total_layers, full, st.overflow_layers
                     )
                 } else if st.gpu_layers_loaded == st.total_layers && metal_spill {
                     // Safety net: CPU_REPACK > 0 but `(N overflowing)` didn't
@@ -814,7 +815,11 @@ impl Display {
 
     fn render_active_slot(&self, t: &mut TermBuf, slot: &SlotSnapshot) {
         // Indent 13 to align with the KV value column under "Requests : ".
-        let _ = queue!(t.stdout, Print("             "), SetForegroundColor(COLOR_NUMBER));
+        let _ = queue!(
+            t.stdout,
+            Print("             "),
+            SetForegroundColor(COLOR_NUMBER)
+        );
         if slot.n_tokens == 0 {
             let desc = format!("● slot {} starting...", slot.slot_id);
             let _ = queue!(
@@ -934,8 +939,8 @@ impl Display {
         t.newline();
 
         // Log ring is the llama-server's stdout/stderr, which only exists
-     // on the server. In `--remote` mode we have a local_state (for the
-      // client's own bsearch counts) but no llama-server feeding its
+        // on the server. In `--remote` mode we have a local_state (for the
+        // client's own bsearch counts) but no llama-server feeding its
         // log_lines, so show a placeholder rather than an empty void.
         if self.remote || self.local_state.is_none() {
             let _ = queue!(
@@ -968,8 +973,8 @@ impl Display {
     }
 
     pub fn print_summary(&self) {
-    // print_summary is only meaningful on the server side — it's where
-      // llama-server actually ran. A client Display (no local_state) just
+        // print_summary is only meaningful on the server side — it's where
+        // llama-server actually ran. A client Display (no local_state) just
         // restores the cursor and bails.
         let Some(ref state) = self.local_state else {
             let _ = execute!(io::stdout(), Show);

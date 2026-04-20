@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::opencode_config;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuiConfig {
@@ -188,6 +190,15 @@ pub struct ServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_port: Option<u16>,
 
+    // When true, lui writes `compaction.prune: false` into opencode's config,
+    // telling opencode to stop its tool-output pruning. Preserves
+    // llama-server's prompt cache at the cost of unbounded context growth,
+    // which matters for huge (160k+) local contexts. Off by default — users
+    // of cloud providers don't want a global compaction override they didn't
+    // ask for.
+    #[serde(default)]
+    pub opencode_disable_prune: bool,
+
     // When true, save_config strips per-model sections that have no
     // overrides set. Off by default: the empty sections at the bottom of
     // the file act as a history of every --hf the user has ever run, so
@@ -266,6 +277,7 @@ impl Default for ServerConfig {
             extra_args: Vec::new(),
             websearch_disabled: false,
             web_port: None,
+            opencode_disable_prune: false,
             prune_unused_model_configs: false,
             allow_vram_oversubscription: false,
         }
@@ -288,7 +300,9 @@ fn default_chat_template_kwargs() -> std::collections::BTreeMap<String, toml::Va
 /// Resolve the port the local websearch HTTP server binds to.
 /// Defaults to `llama_port + 1` unless the user set `--web-port`.
 pub fn websearch_port(config: &ServerConfig) -> u16 {
-    config.web_port.unwrap_or_else(|| config.port.saturating_add(1))
+    config
+        .web_port
+        .unwrap_or_else(|| config.port.saturating_add(1))
 }
 
 /// Render the "source" line shown under the Model KV: `--hf ORG/REPO`,
@@ -641,10 +655,8 @@ pub fn resolve_hf_alias(config: &LuiConfig, name: &str) -> String {
 /// (contains '/', '\', or starts with '.'/'~') as a literal path and
 /// don't consult the pool, so users can't shadow real files.
 pub fn resolve_model_alias(config: &LuiConfig, name: &str) -> String {
-    let path_shaped = name.contains('/')
-        || name.contains('\\')
-        || name.starts_with('.')
-        || name.starts_with('~');
+    let path_shaped =
+        name.contains('/') || name.contains('\\') || name.starts_with('.') || name.starts_with('~');
     if !path_shaped {
         if let Some(full) = config.aliases.model.get(name) {
             return full.clone();
@@ -693,183 +705,110 @@ pub fn derive_model_name(config: &ServerConfig) -> String {
     }
 }
 
-pub fn opencode_config_path() -> PathBuf {
-    // opencode uses ~/.config/opencode/opencode.json (XDG-style), not ~/Library/Application Support/
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".config").join("opencode").join("opencode.json")
-}
-
-fn websearch_bash_pattern(port: u16) -> String {
-    // opencode's permission.bash keys use simple `*` / `?` wildcard matching
-    // (see https://opencode.ai/docs/permissions/). This narrowly allows only
-    // curl calls to lui's local search endpoint on the configured port.
-    format!("curl*http://127.0.0.1:{}/*", port)
-}
-
-/// Manage the `permission.bash` entry that allows curl to lui's local search
-/// endpoint, so opencode doesn't prompt for every search. We only touch keys
-/// shaped like our pattern (any port) — anything else the user put there is
-/// left untouched. When websearch is disabled, we remove stale entries.
-fn update_websearch_permission(
-    root: &mut serde_json::Map<String, serde_json::Value>,
-    web_port: u16,
-    disabled: bool,
-) {
-    let current_pattern = websearch_bash_pattern(web_port);
-
-    if !root.contains_key("permission") {
-        if disabled {
-            return;
-        }
-        root.insert("permission".to_string(), serde_json::json!({}));
-    }
-    let permission = match root.get_mut("permission").and_then(|v| v.as_object_mut()) {
-        Some(p) => p,
-        None => return,
-    };
-
-    if !permission.contains_key("bash") {
-        if disabled {
-            return;
-        }
-        permission.insert("bash".to_string(), serde_json::json!({}));
-    }
-    let bash = match permission.get_mut("bash").and_then(|v| v.as_object_mut()) {
-        Some(b) => b,
-        None => return,
-    };
-
-    // Drop any prior lui-webseach keys (e.g. stale port after --web-port
-    // change) so we never leave a dead allowlist entry behind.
-    bash.retain(|k, _| {
-        !(k.starts_with("curl*http://127.0.0.1:") && k.ends_with("/*"))
-            || k == &current_pattern
-    });
-
-    if disabled {
-        bash.remove(&current_pattern);
-    } else {
-        bash.insert(current_pattern, serde_json::json!("allow"));
-    }
-}
-
-/// Build the opencode JSON value for this model, layered on top of any
-/// existing config (so unrelated keys the user has hand-set are preserved).
-/// Pure function — no filesystem touches. The local path writes the result
-/// to `~/.config/opencode/opencode.json`; the `--ssh` path pipes it over
-/// SSH to a client; the `--remote` path writes it locally on the
-/// client.
+/// Pick which opencode config file to read/write:
+///   - `opencode.jsonc` exists → edit it
+///   - only `opencode.json` exists → edit it (never orphan it with a sibling
+///     `.jsonc` — opencode would merge both and produce duplicated keys)
+///   - neither exists → create `opencode.jsonc`
 ///
-/// `model_name` is the short provider-model id (see `derive_model_name`).
-/// `websearch_disabled` matches `ServerConfig::websearch_disabled`.
-/// `llama_base_url` is what opencode's "lui" provider will point at — for
-/// local use that's `http://localhost:<port>/v1`; for tunneled use it's a
-/// URL pointing at whichever local port will be forwarded to the server's
-/// llama-server. `web_port` is the port opencode's bash permission pattern
-/// will allow curl calls to (same-side port for each role).
-pub fn build_opencode_json(
-    model_name: &str,
-    websearch_disabled: bool,
-    llama_base_url: &str,
-    web_port: u16,
-    ctx_size: u32,
-    existing: Option<&str>,
-) -> serde_json::Value {
-    let mut json: serde_json::Value = existing
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    if !json.is_object() {
-        json = serde_json::json!({});
+/// Fresh-machine default is `.jsonc` because opencode's own docs lead with
+/// it and hand-maintained team configs almost universally use it. JSON is a
+/// strict subset of JSONC, so a user who never wants comments loses nothing.
+pub fn opencode_config_path() -> PathBuf {
+    // opencode uses ~/.config/opencode/ (XDG-style), not ~/Library/Application Support/
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let dir = home.join(".config").join("opencode");
+    let jsonc = dir.join("opencode.jsonc");
+    if jsonc.exists() {
+        return jsonc;
     }
-    let obj = json.as_object_mut().unwrap();
-
-    obj.insert(
-        "model".to_string(),
-        serde_json::json!(format!("lui/{}", model_name)),
-    );
-
-    // Disable opencode's tool-output pruning. Pruning replaces old tool results
-    // with "[Old tool result content cleared]" between turns, which mutates the
-    // prompt prefix and invalidates llama-server's prompt cache - on a 160k
-    // context that's tens of thousands of tokens re-prefilled per turn.
-    // Only set if the user hasn't explicitly configured compaction, so we
-    // don't clobber their override.
-    if !obj.contains_key("compaction") {
-        obj.insert("compaction".to_string(), serde_json::json!({}));
+    let json = dir.join("opencode.json");
+    if json.exists() {
+        return json;
     }
-    let compaction = obj
-        .get_mut("compaction")
-        .and_then(|v| v.as_object_mut())
-        .unwrap();
-    if !compaction.contains_key("prune") {
-        compaction.insert("prune".to_string(), serde_json::json!(false));
+    jsonc
+}
+
+/// Return the `.luibackup` sibling for an opencode config file. Preserves the
+/// full filename so `opencode.jsonc` → `opencode.jsonc.luibackup` (not
+/// `opencode.luibackup`).
+fn luibackup_path(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".luibackup");
+    PathBuf::from(os)
+}
+
+/// Before lui first edits an opencode config that predates lui touching it
+/// (no `provider.lui` entry), copy the original to a `.luibackup` sibling.
+/// Written exactly once — never overwrites an existing backup. Failure is
+/// non-fatal; the backup is a belt-and-suspenders, not a hard dependency.
+fn maybe_write_luibackup(path: &Path, existing_text: &str) {
+    if !opencode_config::needs_backup(existing_text) {
+        return;
     }
-
-    if !obj.contains_key("provider") {
-        obj.insert("provider".to_string(), serde_json::json!({}));
+    let backup = luibackup_path(path);
+    if backup.exists() {
+        return;
     }
-    let providers = obj.get_mut("provider").unwrap().as_object_mut().unwrap();
-    providers.insert(
-        "lui".to_string(),
-        serde_json::json!({
-            "name": "lui",
-            "npm": "@ai-sdk/openai-compatible",
-            "options": {
-                "baseURL": llama_base_url,
-                "toolParser": [
-                    { "type": "raw-function-call" },
-                    { "type": "json" }
-                ]
-            },
-            "models": {
-                // Key is the variable `model_name`; serde_json's json! macro
-                // treats a bare identifier here as a string-expr key.
-                model_name: {
-                    "name": model_name,
-                    "supportsToolCalls": true,
-                    "limit": {
-                        "context": ctx_size,
-                        "input": ctx_size,
-                        "output": 8192
-                    }
-                }
-            }
-        }),
-    );
-
-    update_websearch_permission(obj, web_port, websearch_disabled);
-
-    json
+    if let Err(e) = std::fs::write(&backup, existing_text) {
+        eprintln!("Warning: failed to write {}: {}", backup.display(), e);
+    }
 }
 
 pub fn update_opencode_config(config: &ServerConfig) {
     let path = opencode_config_path();
 
-    let existing = if path.exists() {
-        std::fs::read_to_string(&path).ok()
-    } else {
-        None
-    };
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    maybe_write_luibackup(&path, &existing);
 
     let base_url = format!("http://localhost:{}/v1", config.port);
     let model_name = derive_model_name(config);
-    let json = build_opencode_json(
+    let new_text = match opencode_config::update_opencode_config_text(
+        &existing,
         &model_name,
-        config.websearch_disabled,
         &base_url,
         websearch_port(config),
         config.ctx_size,
-        existing.as_deref(),
-    );
+        config.websearch_disabled,
+        config.opencode_disable_prune,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Warning: failed to update {}: {}", path.display(), e);
+            return;
+        }
+    };
+
+    // Skip the write (and atomic-rename churn) if nothing changed. Preserves
+    // mtime so file-watchers don't fire for no reason.
+    if new_text == existing {
+        return;
+    }
 
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(contents) = serde_json::to_string_pretty(&json) {
-        if let Err(e) = std::fs::write(&path, contents) {
-            eprintln!("Warning: failed to write {}: {}", path.display(), e);
-        }
+
+    // Atomic write: temp file + rename. We're now promising to preserve the
+    // user's comments and formatting, so a power-loss mid-write would destroy
+    // their hand-maintained config. Rename is atomic on POSIX when source and
+    // dest are on the same filesystem, which they are (same directory).
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".luitmp");
+    let tmp_path = PathBuf::from(tmp);
+    if let Err(e) = std::fs::write(&tmp_path, &new_text) {
+        eprintln!("Warning: failed to write {}: {}", tmp_path.display(), e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &path) {
+        eprintln!(
+            "Warning: failed to rename {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            e
+        );
+        let _ = std::fs::remove_file(&tmp_path);
     }
 }
 
@@ -892,11 +831,18 @@ pub fn render_websearch_skill(port: u16) -> String {
     format!(
         r#"---
 name: lui-web-search
-description: Search the web via lui's browser-mediated search endpoint. Use whenever the user asks to search the web, look up current information, or find documentation online. Returns JSON results with title, url, and snippet.
+description: Browser-mediated web search for local/self-hosted models that have no native web-search tool. If you already have a native search tool (e.g. web_search, browse), use that instead — this skill requires the user to click a browser bookmarklet and blocks on their interaction. Returns JSON results with title, url, and snippet.
 license: BSD-2-Clause
 ---
 
 # lui-web-search
+
+> **When to use this skill.** Only when you have no native web-search tool
+> available. If you have one (Anthropic's `web_search`, OpenAI's browse, a
+> native `search` tool, etc.), prefer that — it's faster, doesn't require a
+> browser tab, and doesn't block on user interaction. This skill is the
+> fallback for local/self-hosted models (llama.cpp, etc.) whose provider
+> doesn't expose web search.
 
 lui's search endpoint opens a Google search tab in the user's real
 browser. The user clicks a one-time-installed `lui-grab` bookmarklet on
@@ -1007,18 +953,10 @@ pub fn update_websearch_skill(config: &ServerConfig) {
     let body = render_websearch_skill(websearch_port(config));
 
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!(
-            "Warning: failed to create {}: {}",
-            dir.display(),
-            e
-        );
+        eprintln!("Warning: failed to create {}: {}", dir.display(), e);
         return;
     }
     if let Err(e) = std::fs::write(&skill_path, body) {
-        eprintln!(
-            "Warning: failed to write {}: {}",
-            skill_path.display(),
-            e
-        );
+        eprintln!("Warning: failed to write {}: {}", skill_path.display(), e);
     }
 }

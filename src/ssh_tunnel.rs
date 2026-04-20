@@ -52,10 +52,11 @@ use std::time::Duration;
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 
 use crate::config::{
-    build_opencode_json, derive_model_name, opencode_config_path, render_websearch_skill,
-    websearch_port, websearch_skill_dir, ServerConfig,
+    derive_model_name, opencode_config_path, render_websearch_skill, websearch_port,
+    websearch_skill_dir, ServerConfig,
 };
 use crate::display::Display;
+use crate::opencode_config;
 use crate::server::{ConfigSummary, ServerState};
 use crate::websearch::{self, LuiConfigResponse, CONFIG_VERSION};
 
@@ -163,7 +164,9 @@ fn ssh_run(target: &SshTarget, args: &[&str], stdin: Option<&[u8]>) -> Result<St
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("failed to spawn ssh: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn ssh: {}", e))?;
     if let Some(bytes) = stdin {
         let mut si = child
             .stdin
@@ -217,25 +220,71 @@ fn check_opencode(target: &SshTarget) -> Result<(), String> {
     }
 }
 
-/// Fetch the existing remote opencode.json, if any. A missing file (ssh
-/// exits non-zero from `cat`) is not an error here — we just layer onto an
-/// empty object in that case.
-fn fetch_remote_opencode_json(target: &SshTarget) -> Option<String> {
-    ssh_run(target, &["cat", "~/.config/opencode/opencode.json"], None).ok()
+/// Probe the remote for an existing opencode config. Prefer `opencode.jsonc`
+/// if present (some teams standardize on JSONC for inline comments), fall back
+/// to `opencode.json`. Returns the remote basename (so the caller knows where
+/// to write back) and the file contents (empty if missing).
+fn fetch_remote_opencode_config(target: &SshTarget) -> Result<(String, String), String> {
+    // First line of stdout is one of: JSONC / JSON / MISSING. Everything after
+    // the first newline is the file content (empty for MISSING).
+    let probe = r#"
+if [ -f ~/.config/opencode/opencode.jsonc ]; then
+  echo JSONC
+  cat ~/.config/opencode/opencode.jsonc
+elif [ -f ~/.config/opencode/opencode.json ]; then
+  echo JSON
+  cat ~/.config/opencode/opencode.json
+else
+  echo MISSING
+fi"#;
+    let out = ssh_run(target, &[probe], None)?;
+    let (kind, rest) = match out.split_once('\n') {
+        Some(pair) => pair,
+        None => (out.as_str(), ""),
+    };
+    let basename = match kind.trim() {
+        "JSONC" => "opencode.jsonc",
+        "JSON" => "opencode.json",
+        // Fresh-machine fallback: match the local path picker by creating
+        // `opencode.jsonc` (opencode's own docs lead with it, and team
+        // configs hand-maintained enough to get --ssh'd into tend to want
+        // comments eventually).
+        "MISSING" => "opencode.jsonc",
+        other => {
+            return Err(format!("unexpected probe result on remote: {:?}", other));
+        }
+    };
+    Ok((basename.to_string(), rest.to_string()))
 }
 
-/// Write the opencode.json on the remote, creating ~/.config/opencode if
-/// needed. We shell out to bash with a heredoc-free pipe — the JSON arrives
-/// on stdin and `cat > file` writes it, which avoids any quoting concerns.
-fn write_remote_opencode_json(target: &SshTarget, contents: &str) -> Result<(), String> {
-    ssh_run(
-        target,
-        &[
-            "mkdir -p ~/.config/opencode && cat > ~/.config/opencode/opencode.json",
-        ],
-        Some(contents.as_bytes()),
-    )?;
+/// Write the opencode config on the remote at the given basename
+/// (`opencode.json` or `opencode.jsonc`), creating `~/.config/opencode` if
+/// needed. Pipes contents via stdin to avoid quoting concerns.
+fn write_remote_opencode_config(
+    target: &SshTarget,
+    basename: &str,
+    contents: &str,
+) -> Result<(), String> {
+    let cmd = format!(
+        "mkdir -p ~/.config/opencode && cat > ~/.config/opencode/{}",
+        basename
+    );
+    ssh_run(target, &[&cmd], Some(contents.as_bytes()))?;
     Ok(())
+}
+
+/// If this is lui's first-ever touch of the remote opencode config (no
+/// `provider.lui` entry), copy it to `<basename>.luibackup`. `cp -n` is
+/// no-clobber so an existing backup is preserved. Best-effort; non-fatal.
+fn maybe_backup_remote_opencode(target: &SshTarget, basename: &str, existing_text: &str) {
+    if !opencode_config::needs_backup(existing_text) {
+        return;
+    }
+    let cmd = format!(
+        "cp -n ~/.config/opencode/{0} ~/.config/opencode/{0}.luibackup 2>/dev/null || true",
+        basename
+    );
+    let _ = ssh_run(target, &[&cmd], None);
 }
 
 /// Write (or remove) the lui-web-search SKILL.md on the remote. Baked with
@@ -255,7 +304,10 @@ fn write_remote_websearch_skill(
         // what we want.
         let _ = ssh_run(
             target,
-            &[&format!("rm -f {} && rmdir {} 2>/dev/null || true", skill_path, skill_dir)],
+            &[&format!(
+                "rm -f {} && rmdir {} 2>/dev/null || true",
+                skill_path, skill_dir
+            )],
             None,
         );
         return Ok(());
@@ -277,8 +329,16 @@ fn print_share_success(
     remote_web: u16,
 ) {
     let mut stdout = std::io::stdout();
-    let lavender = Color::Rgb { r: 180, g: 150, b: 255 };
-    let muted = Color::Rgb { r: 120, g: 100, b: 180 };
+    let lavender = Color::Rgb {
+        r: 180,
+        g: 150,
+        b: 255,
+    };
+    let muted = Color::Rgb {
+        r: 120,
+        g: 100,
+        b: 180,
+    };
 
     let local_llama = effective.port;
     let local_web = websearch_port(effective);
@@ -292,7 +352,11 @@ fn print_share_success(
     if !effective.websearch_disabled {
         cmd = format!(
             "ssh -R {}:localhost:{} -R {}:localhost:{} {}",
-            remote_llama, local_llama, remote_web, local_web, target.spec()
+            remote_llama,
+            local_llama,
+            remote_web,
+            local_web,
+            target.spec()
         );
     }
 
@@ -331,21 +395,22 @@ pub fn setup_share(target: &SshTarget, effective: &ServerConfig) -> Result<(), S
     let remote_llama = pick_remote_port();
     let remote_web = remote_llama + 1;
 
-    let existing = fetch_remote_opencode_json(target);
+    let (basename, existing) = fetch_remote_opencode_config(target)?;
+    maybe_backup_remote_opencode(target, &basename, &existing);
+
     let base_url = format!("http://localhost:{}/v1", remote_llama);
     let model_name = derive_model_name(effective);
-    let json = build_opencode_json(
+    let contents = opencode_config::update_opencode_config_text(
+        &existing,
         &model_name,
-        effective.websearch_disabled,
         &base_url,
         remote_web,
         effective.ctx_size,
-        existing.as_deref(),
-    );
-    let contents = serde_json::to_string_pretty(&json)
-        .map_err(|e| format!("failed to serialize opencode.json: {}", e))?;
+        effective.websearch_disabled,
+        effective.opencode_disable_prune,
+    )?;
 
-    write_remote_opencode_json(target, &contents)?;
+    write_remote_opencode_config(target, &basename, &contents)?;
     write_remote_websearch_skill(target, remote_web, effective.websearch_disabled)?;
 
     print_share_success(target, effective, remote_llama, remote_web);
@@ -432,8 +497,13 @@ fn fetch_lui_config(target: &UseTarget) -> Result<LuiConfigResponse, String> {
             code
         ));
     }
-    let resp: LuiConfigResponse = serde_json::from_str(&body)
-        .map_err(|e| format!("{} returned unparseable JSON: {}", target.http_url("/config"), e))?;
+    let resp: LuiConfigResponse = serde_json::from_str(&body).map_err(|e| {
+        format!(
+            "{} returned unparseable JSON: {}",
+            target.http_url("/config"),
+            e
+        )
+    })?;
     if resp.version != CONFIG_VERSION {
         return Err(format!(
             "server reported /config version {}, this lui understands {}. Upgrade the older side.",
@@ -443,29 +513,43 @@ fn fetch_lui_config(target: &UseTarget) -> Result<LuiConfigResponse, String> {
     Ok(resp)
 }
 
-/// Write `opencode.json` into the local `~/.config/opencode/` directory,
-/// layered on any existing file so hand-added keys survive. `llama_base_url`
-/// points directly at the server's exposed llama-server over HTTP — no tunnel
+/// Write the local opencode config into `~/.config/opencode/`, layered on
+/// any existing file so hand-added keys survive. Prefers `opencode.jsonc`
+/// when present (same rule as the main path). `llama_base_url` points
+/// directly at the server's exposed llama-server over HTTP — no tunnel
 /// involved — while `local_web` is the port of the bsearch server we're
 /// running in-process on this client.
-fn write_local_opencode_json(
+fn write_local_opencode_config(
     model_name: &str,
     llama_base_url: &str,
     local_web: u16,
     ctx_size: u32,
 ) -> Result<(), String> {
     let path = opencode_config_path();
-    let existing = std::fs::read_to_string(&path).ok();
-    let json = build_opencode_json(
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    // Mirror the main local path's backup behavior so --remote users on a
+    // machine that already has an elaborate opencode config get the same
+    // safety net.
+    if opencode_config::needs_backup(&existing) {
+        let mut backup = path.as_os_str().to_os_string();
+        backup.push(".luibackup");
+        let backup = std::path::PathBuf::from(backup);
+        if !backup.exists() {
+            let _ = std::fs::write(&backup, &existing);
+        }
+    }
+
+    let contents = opencode_config::update_opencode_config_text(
+        &existing,
         model_name,
-        /* websearch_disabled */ false,
         llama_base_url,
         local_web,
         ctx_size,
-        existing.as_deref(),
-    );
-    let contents = serde_json::to_string_pretty(&json)
-        .map_err(|e| format!("failed to serialize opencode.json: {}", e))?;
+        /* websearch_disabled */ false,
+        /* opencode_disable_prune */ false,
+    )?;
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create {}: {}", parent.display(), e))?;
@@ -493,8 +577,16 @@ fn print_use_banner(
     local_web: u16,
 ) {
     let mut stdout = std::io::stdout();
-    let lavender = Color::Rgb { r: 180, g: 150, b: 255 };
-    let muted = Color::Rgb { r: 120, g: 100, b: 180 };
+    let lavender = Color::Rgb {
+        r: 180,
+        g: 150,
+        b: 255,
+    };
+    let muted = Color::Rgb {
+        r: 120,
+        g: 100,
+        b: 180,
+    };
 
     let _ = crossterm::execute!(
         stdout,
@@ -546,7 +638,12 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
     // so the URL matches what they'd see in `lui --public`'s banner.
     let llama_base_url = format!("http://{}:{}/v1", target.host, lui_cfg.llama_port);
 
-    write_local_opencode_json(&lui_cfg.model_name, &llama_base_url, local_web, lui_cfg.ctx_size)?;
+    write_local_opencode_config(
+        &lui_cfg.model_name,
+        &llama_base_url,
+        local_web,
+        lui_cfg.ctx_size,
+    )?;
     write_local_websearch_skill(local_web)?;
 
     // In-process bsearch server. We synthesize a minimal ServerState just
@@ -563,8 +660,8 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
         model_name: lui_cfg.model_name.clone(),
         ctx_size: lui_cfg.ctx_size,
     };
- // Minimal ConfigSummary for the client's in-process HTTP server. Nothing
-  // ever polls this client's /data (the renderer points at the *server's*
+    // Minimal ConfigSummary for the client's in-process HTTP server. Nothing
+    // ever polls this client's /data (the renderer points at the *server's*
     // /data, not ours), so fields here are placeholders — but we keep the
     // shape coherent in case something future introspects it.
     let dummy_summary = ConfigSummary {
@@ -590,8 +687,8 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
     // opencode was pointed at without having to exit.
     print_use_banner(target, &lui_cfg, &llama_base_url, local_web);
 
- // Render the server's UI by polling its `/data`. We pass `Some(state)`
-  // for the client's in-process bsearch ServerState — the log ring is
+    // Render the server's UI by polling its `/data`. We pass `Some(state)`
+    // for the client's in-process bsearch ServerState — the log ring is
     // empty (no llama-server feeding it) but `websearch_total` and
     // `active_searches` reflect the user's opencode-driven searches through
     // *our* bsearch, which is what they care about. The `remote: true`
