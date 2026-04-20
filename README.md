@@ -8,7 +8,9 @@ A friendly TUI wrapper for [llama.cpp](https://github.com/ggml-org/llama.cpp)'s 
 2. **Put `llama-server` on your PATH.**
    - **macOS:** `brew install llama.cpp`
    - **Windows:** grab the matching `llama-bin-win-*` zip **and** the `cudart-llama-bin-win-cuda-*` zip (for NVIDIA) from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases), extract them into the same folder, and add that folder to your `PATH`.
-3. **Build lui** — `cargo build --release`, then put `target/release/lui` on your PATH (symlink, copy, or add the directory).
+    - **Linux:** grab the matching `llama-bin-ubuntu-*` tarball from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) — `*-vulkan-*` for AMD/Intel GPUs, `*-rocm-*` for AMD GPUs — extract it, and add the folder to your `PATH`.
+    - Verify the install — run `llama-server --version` and make sure it detects your GPU with no serious errors.
+3. **Build lui** — `cargo build --release`, then put `target/release/lui` on your PATH (symlink, copy, or add the directory to your `PATH`).
 
 ## Run
 
