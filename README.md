@@ -1,16 +1,16 @@
 # lui
 
-A friendly TUI wrapper for [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. Pronounced **"Louie"** — short for *llama.cpp ui*.
+A friendly TUI wrapper for [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. Pronounced **"Louie"** - short for *llama.cpp ui*.
 
 ## Setup
 
-1. **Install opencode** — <https://opencode.ai>. No config needed; lui will wire it up for you.
+1. **Install opencode** - <https://opencode.ai>. No config needed; lui will wire it up for you.
 2. **Put `llama-server` on your PATH.**
    - **macOS:** `brew install llama.cpp`
    - **Windows:** grab the matching `llama-bin-win-*` zip **and** the `cudart-llama-bin-win-cuda-*` zip (for NVIDIA) from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases), extract them into the same folder, and add that folder to your `PATH`.
-    - **Linux:** grab the matching `llama-bin-ubuntu-*` tarball from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) — `*-vulkan-*` for AMD/Intel GPUs, `*-rocm-*` for AMD GPUs — extract it, and add the folder to your `PATH`.
-    - Verify the install — run `llama-server --version` and make sure it detects your GPU with no serious errors.
-3. **Build lui** — `cargo build --release`, then put `target/release/lui` on your PATH (symlink, copy, or add the directory to your `PATH`).
+    - **Linux:** grab the matching `llama-bin-ubuntu-*` tarball from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) - `*-rocm-*` for AMD GPUs, `*-vulkan-*` for any other GPU - extract it, and add the folder to your `PATH`.
+    - Verify the install - run `llama-server --version` and make sure it detects your GPU with no serious errors.
+3. **Build lui** - `cargo build --release`, then put `target/release/lui` on your PATH (symlink, copy, or add the directory to your `PATH`).
 
 ## Run
 
@@ -41,7 +41,7 @@ Other useful flags: `-m <path>` for a local GGUF, `--ngl <n>` for GPU layers, `-
 
 lui supports two machines connecting to share a model. The two flags are mutually exclusive (`--ssh` and `--remote` can't be used together) and neither is persisted to `lui.toml`.
 
-### `--ssh` — share your local LLM with a remote machine
+### `--ssh` - share your local LLM with a remote machine
 
 `lui --ssh` is a turnkey way to let someone access the LLM running on your workstation over SSH. It configures their machine to point back at your llama-server through a reverse tunnel, so they can use opencode as if the model were running locally on their end.
 
@@ -59,7 +59,7 @@ Run `lui --ssh USER@HOST` **on the server** (the machine where `llama-server` is
 **Requirements:**
 
 - `opencode` must already be installed on the client (lui probes the default PATH, login shell PATH, and the installer canonical location `~/.opencode/bin/opencode`).
-- SSH access to the client (`USER@HOST` format required — no bare hostnames).
+- SSH access to the client (`USER@HOST` format required - no bare hostnames).
 - The client should be able to reach this machine's network interface for the reverse tunnel to work.
 
 **Example:**
@@ -72,7 +72,7 @@ lui --ssh user@workstation
 ssh -R 23847:localhost:8080 -R 23848:localhost:8081 user@workstation
 ```
 
-### `--remote` — use a remote LLM while keeping web search local
+### `--remote` - use a remote LLM while keeping web search local
 
 `lui --remote` is a special mode that doesn't run `llama-server` locally. Instead, it connects to a lui instance on another machine (running with `--public`) while still providing local web search on your workstation. The TUI renders by polling the remote server, and the in-process web search server runs here so browser-mediated search works from your browser.
 
@@ -92,7 +92,7 @@ Run `lui --remote HOST[:PORT]` **on your client** (your laptop or workstation th
 
 - The server must be running with `--public` (so the HTTP server binds to `0.0.0.0` and is reachable over the network).
 - Network access from the client to the server's HTTP port (default 8081).
-- The server's llama-server port will be read from its `/config` — it doesn't have to match the HTTP port.
+- The server's llama-server port will be read from its `/config` - it doesn't have to match the HTTP port.
 
 **Example:**
 
@@ -122,7 +122,7 @@ lui --remote server.local:9000    # custom HTTP port
 
 * **I never remember these model names, help!**
   * Fix: Use `--alias NAME` right after selecting a model. `lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --alias qwen` lets you later run just `lui qwen`.
-  * Fix: The alias pool is inferred — `--hf` aliases go under `[aliases.hf]`, local-path aliases under `[aliases.model]`. Bare positionals (`lui qwen`) look up both pools; a collision is a hard error.
+  * Fix: The alias pool is inferred - `--hf` aliases go under `[aliases.hf]`, local-path aliases under `[aliases.model]`. Bare positionals (`lui qwen`) look up both pools; a collision is a hard error.
   * Tip: Aliases also work as the argument to `--hf` / `-m` (e.g. `lui --hf qwen --this -c 131072`).
 
 * **How do I switch between cached models without typing the full repo every time?**
@@ -142,11 +142,11 @@ lui --remote server.local:9000    # custom HTTP port
 ### VRAM & fit
 
 * **This model is using too much VRAM!**
-  * Fix: `--fit-target N` — reserves N MiB of free VRAM headroom; llama-server's `--fit` logic will offload more to CPU to honor it. Default is 1024.
+  * Fix: `--fit-target N` - reserves N MiB of free VRAM headroom; llama-server's `--fit` logic will offload more to CPU to honor it. Default is 1024.
   * Fix: Lower `-c` / `--ctx-size`. A huge context is usually the real VRAM hog; halving it often solves the problem alone.
   * Impact: llama-server will offload more of the model to CPU, which typically makes generation slower.
 
-* **lui aborts because it thinks the model won't fit in VRAM — but I know better.**
+* **lui aborts because it thinks the model won't fit in VRAM - but I know better.**
   * Fix: `--avo` ("allow VRAM oversubscription") skips lui's pre-flight abort. Flip back with `--no-avo` (the default).
   * Impact: You're now trusting llama-server's own fit logic; if it's wrong you'll get an OOM instead of a clean lui error.
 
@@ -156,20 +156,20 @@ lui --remote server.local:9000    # custom HTTP port
 ### Context, samplers, batching
 
 * **The context window is too small / too big.**
-  * Fix: `-c N` or `--ctx-size N`. `0` means "whatever the model ships with". Large contexts multiply KV-cache VRAM usage — pair with `--ctk/--ctv` if needed.
+  * Fix: `-c N` or `--ctx-size N`. `0` means "whatever the model ships with". Large contexts multiply KV-cache VRAM usage - pair with `--ctk/--ctv` if needed.
 
 * **The model feels too random / too deterministic.**
   * Fix: `--temp F` (sampling temperature).
   * Fix: `--top-p F` (nucleus), `--top-k N`, `--min-p F`. Omitting a sampler uses llama.cpp's default; set `--this --top-p default` to clear a per-model override.
 
 * **Prefill is slow / prompt processing is CPU-bound.**
-  * Fix: `--ubatch-size N` (aka `--ub`) — physical batch size llama.cpp processes at once. Larger = faster prefill, more VRAM.
-  * Fix: `--batch-size N` — logical batch size (lui defaults this to 512 instead of llama.cpp's 2048, which is kinder to VRAM).
-  * Fix: `--threads-batch N` (aka `--tb`) — threads llama-server uses for prompt/batch work. Tune to your CPU's physical core count.
-  * Fix: `--prio-batch 0..3` — OS-level thread priority for batch work. Higher values are more aggressive.
+  * Fix: `--ubatch-size N` (aka `--ub`) - physical batch size llama.cpp processes at once. Larger = faster prefill, more VRAM.
+  * Fix: `--batch-size N` - logical batch size (lui defaults this to 512 instead of llama.cpp's 2048, which is kinder to VRAM).
+  * Fix: `--threads-batch N` (aka `--tb`) - threads llama-server uses for prompt/batch work. Tune to your CPU's physical core count.
+  * Fix: `--prio-batch 0..3` - OS-level thread priority for batch work. Higher values are more aggressive.
 
 * **I want multiple concurrent sessions on one server.**
-  * Fix: `--parallel N` (aka `--np`) — number of llama-server slots. Default is 1.
+  * Fix: `--parallel N` (aka `--np`) - number of llama-server slots. Default is 1.
   * Impact: Each extra slot roughly multiplies context VRAM usage by N.
 
 ### KV cache
@@ -178,7 +178,7 @@ lui --remote server.local:9000    # custom HTTP port
   * Fix: `--swa-full` to force-enable, `--no-swa-full` to force-disable (this also disables lui's auto-detection). Without either, lui auto-detects.
 
 * **Prompt caching across requests would be great.**
-  * Fix: `--cache-ram MIB` — llama-server's host-memory prompt cache. Useful for agentic workloads that re-run similar prompts.
+  * Fix: `--cache-ram MIB` - llama-server's host-memory prompt cache. Useful for agentic workloads that re-run similar prompts.
 
 ### Server / networking
 
@@ -194,7 +194,7 @@ lui --remote server.local:9000    # custom HTTP port
   * Fix: `--web-port N` chooses a specific port for the websearch endpoint (default: llama port + 1).
 
 * **I want to SSH into another machine and let that machine use my local lui instance!**
-  * Fix: `lui --ssh USER@HOST` on the server — writes an opencode config on the client and prints the matching `ssh -R ...` command. See the "Connecting to a Shared Server" section above.
+  * Fix: `lui --ssh USER@HOST` on the server - writes an opencode config on the client and prints the matching `ssh -R ...` command. See the "Connecting to a Shared Server" section above.
 
 * **I want to use a another `--public` lui server from my machine, but keep web search running locally.**
   * Fix: `lui --remote HOST[:PORT]` on the client. It fetches `/config`, writes a local opencode config pointing at the server, and runs a local websearch server.
@@ -202,10 +202,10 @@ lui --remote server.local:9000    # custom HTTP port
 ### Debug / introspection
 
 * **How do I know if the right settings are being passed to `llama-server`?**
-  * Fix: `--cmd` — prints the fully-resolved llama-server command line (with all scope merging, defaults, and auto-detected SWA applied) and exits. Copy-pasteable.
+  * Fix: `--cmd` - prints the fully-resolved llama-server command line (with all scope merging, defaults, and auto-detected SWA applied) and exits. Copy-pasteable.
 
 * **llama-server is failing at startup and I can't see why.**
-  * Fix: `--debug PATH` — dumps raw llama-server stdout/stderr to a file for inspection.
+  * Fix: `--debug PATH` - dumps raw llama-server stdout/stderr to a file for inspection.
 
 * **I want to pass a llama-server flag lui doesn't expose.**
   * Fix: Everything after `--` is appended to llama-server's argv. `lui -- --flash-attn 1 --something-else`.
@@ -213,7 +213,7 @@ lui --remote server.local:9000    # custom HTTP port
   * Note: Passing _any_ extras for a given scope replaces the stored list for that scope. To clear pass-through args, re-run with an empty `--` tail under the right scope.
 
 * **Where is my config stored?**
-  * Fix: lui writes a toml at its standard config path (see `lui -l` or inspect the path logic in `src/config.rs`). Everything you pass on the command line is persisted there — next run, plain `lui` picks up where you left off.
+  * Fix: lui writes a toml at its standard config path (see `lui -l` or inspect the path logic in `src/config.rs`). Everything you pass on the command line is persisted there - next run, plain `lui` picks up where you left off.
 
 ### Quick recipes
 
