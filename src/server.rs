@@ -16,11 +16,16 @@ use crate::config::{
 
 const LOG_RING_SIZE: usize = 200;
 const MAX_RECENT_REQUESTS: usize = 3;
+/// How long a warning stays in the list before it's pruned. Transient drift
+/// notices shouldn't stick around forever — if the underlying condition is
+/// still live, the canary will re-fire on the next triggering event and the
+/// warning comes back.
+const WARNING_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Wire-format version for `/data`. Bump on breaking changes; additive
 /// fields (with `#[serde(default)]` on the reader side) don't require a
 /// bump. Kept so a client renderer can refuse an incompatible server.
-pub const UI_SNAPSHOT_VERSION: u32 = 1;
+pub const UI_SNAPSHOT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct SlotInfo {
@@ -141,6 +146,17 @@ pub struct ServerState {
     // under the WebSearch KV. Active count is just `.len()`.
     pub websearch_total: u64,
     pub active_searches: HashMap<String, String>,
+
+    // Canary messages surfaced in the UI's Warnings section. Populated by
+    // parse_line when an expected startup field never got parsed, or when
+    // runtime events (requests completing) show up without the paired
+    // telemetry we expect. A populated list usually means llama-server's log
+    // format drifted and one of our parsers needs an update.
+    //
+    // Stored with the push Instant so entries can age out after WARNING_TTL.
+    // A still-live condition just re-fires its canary and the warning comes
+    // back; a transient one drops off quietly.
+    pub warnings: Vec<(Instant, String)>,
 }
 
 impl ServerState {
@@ -149,6 +165,25 @@ impl ServerState {
             self.log_lines.pop_front();
         }
         self.log_lines.push_back(line);
+    }
+
+    /// Append a warning to be shown in the UI's Warnings section. Prunes
+    /// expired entries first, then dedupes on exact text so canaries
+    /// triggered from repeated events (e.g. every `done request`) don't
+    /// pile up duplicates while still live.
+    pub fn push_warning(&mut self, msg: String) {
+        self.prune_warnings();
+        if !self.warnings.iter().any(|(_, w)| w == &msg) {
+            self.warnings.push((Instant::now(), msg));
+        }
+    }
+
+    /// Drop any warning older than WARNING_TTL. Called from push_warning and
+    /// to_snapshot so the list is always fresh at both ingress and egress.
+    pub fn prune_warnings(&mut self) {
+        let now = Instant::now();
+        self.warnings
+            .retain(|(t, _)| now.duration_since(*t) < WARNING_TTL);
     }
 }
 
@@ -221,6 +256,11 @@ pub struct UiSnapshot {
 
     pub websearch_total: u64,
     pub active_searches: Vec<String>,
+
+    /// Log-parser canaries surfaced in the UI's Warnings section. Usually
+    /// empty; a populated list means llama-server's log format changed
+    /// enough that one of our parsers stopped landing its expected hits.
+    pub warnings: Vec<String>,
 
     /// Pre-formatted config pieces the renderer needs (bind, sampling,
     /// tuning, model source). Static for the lifetime of a server, but we
@@ -315,7 +355,10 @@ impl ServerState {
     /// since the server process started — supplied by the caller because the
     /// lui HTTP server (not `ServerState`) owns that clock. `config` is
     /// the pre-formatted `ConfigSummary`, built once at spawn time.
-    pub fn to_snapshot(&self, uptime: Duration, config: &ConfigSummary) -> UiSnapshot {
+    pub fn to_snapshot(&mut self, uptime: Duration, config: &ConfigSummary) -> UiSnapshot {
+        // Age out stale warnings before the renderer sees them. Keeps a
+        // late-expiring warning from hanging on until the next canary push.
+        self.prune_warnings();
         let mut slots: Vec<SlotSnapshot> =
             self.active_slots.values().map(SlotInfo::to_snapshot).collect();
         // HashMap iteration is unordered; sort so the renderer sees a
@@ -393,6 +436,8 @@ impl ServerState {
 
             websearch_total: self.websearch_total,
             active_searches,
+
+            warnings: self.warnings.iter().map(|(_, w)| w.clone()).collect(),
 
             config: config.clone(),
         }
@@ -742,22 +787,19 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
     }
     // context_length from model metadata (e.g. "llama.context_length u32 = 131072")
     else if line.contains(".context_length") && line.contains("u32") {
-        if let Some(pos) = line.rfind("= ") {
-            if let Ok(v) = line[pos + 2..].trim().parse::<u32>() {
-                state.max_ctx_size = v;
-            }
+        if let Some(v) = extract_after_eq(line).and_then(|s| s.parse::<u32>().ok()) {
+            state.max_ctx_size = v;
         }
     }
     // file type
     else if line.contains("print_info: file type") {
-        if let Some(pos) = line.find("= ") {
-            state.quantization = line[pos + 2..].trim().to_string();
+        if let Some(v) = extract_after_eq(line) {
+            state.quantization = v.to_string();
         }
     }
     // file size: "4.36 GiB (4.91 BPW)"
     else if line.contains("print_info: file size") {
-        if let Some(pos) = line.find("= ") {
-            let val = line[pos + 2..].trim();
+        if let Some(val) = extract_after_eq(line) {
             let parts: Vec<&str> = val.splitn(3, ' ').collect();
             if parts.len() >= 2 {
                 state.file_size_n = parts[0].to_string();
@@ -777,8 +819,7 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
     }
     // model params: "7.62 B"
     else if line.contains("print_info: model params") {
-        if let Some(pos) = line.find("= ") {
-            let val = line[pos + 2..].trim();
+        if let Some(val) = extract_after_eq(line) {
             let parts: Vec<&str> = val.splitn(2, ' ').collect();
             if parts.len() == 2 {
                 state.model_params_n = parts[0].to_string();
@@ -879,9 +920,12 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
             state.overflow_layers = 0;
         }
         // Per-device summary line: "  - CUDA0 (...): 41 layers (28 overflowing), ..."
+        // Only the "(N overflowing)" fragment is stable enough to match on —
+        // the device label and layer count formatting have both shifted
+        // between llama.cpp versions. The outer `llama_params_fit_impl:`
+        // guard above already limits this regex to the right line family.
         static OVERFLOW_RE: OnceLock<Regex> = OnceLock::new();
-        let re = OVERFLOW_RE
-            .get_or_init(|| Regex::new(r"-\s+\S.*?:\s+\d+\s+layers\s+\(\s*(\d+)\s+overflowing\)").unwrap());
+        let re = OVERFLOW_RE.get_or_init(|| Regex::new(r"\(\s*(\d+)\s+overflowing\)").unwrap());
         if let Some(caps) = re.captures(line) {
             let n: u32 = caps[1].parse().unwrap_or(0);
             state.overflow_layers = state.overflow_layers.saturating_add(n);
@@ -930,16 +974,24 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
             state.ctx_size = caps[1].parse().unwrap_or(0);
         }
     }
-    // Server ready: "server is listening on http://127.0.0.1:8080"
+    // Server ready: "server is listening on http://127.0.0.1:8080".
+    // This is where we also run the startup log-parse canary: if any of the
+    // fields we expect to populate during model load never got set, the log
+    // format probably drifted and the operator needs to know.
     else if line.contains("server is listening on") {
         if let Some(pos) = line.find("on ") {
             state.listen_url = line[pos + 3..].trim().to_string();
         }
         state.ready = true;
+        check_startup_canary(state);
     }
-    // HTTP request completed
+    // HTTP request completed. Also the trigger for the runtime-telemetry
+    // canary: once requests are landing we should be seeing paired
+    // prompt_eval / eval timing lines. If we aren't, something in the
+    // timing-log format moved.
     else if line.contains("done request: POST") {
         state.request_count += 1;
+        check_runtime_canary(state);
     }
     // Prompt cache reuse failed: llama-server is redoing the whole prefill.
     // Message shape: "forcing full prompt re-processing due to lack of cache data
@@ -1047,8 +1099,10 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
             }
         }
     }
-    // Generation eval timing
-    else if line.starts_with("       eval time =") || line.contains("\teval time =") {
+    // Generation eval timing. llama.cpp pads the label with a run of spaces
+    // (or, historically, a tab); match on the trimmed prefix so a future
+    // indent tweak doesn't silently drop the sample.
+    else if line.trim_start().starts_with("eval time =") {
         static RE: OnceLock<Regex> = OnceLock::new();
         let re = RE.get_or_init(|| Regex::new(r"(\d+\.?\d*)\s+tokens per second").unwrap());
         if let Some(caps) = re.captures(line) {
@@ -1060,8 +1114,9 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
         }
         // Gen timing doesn't have slot id in the line, update via last_timing_slot
     }
-    // Total timing: "      total time =   25690.22 ms / 14289 tokens"
-    else if line.starts_with("      total time =") {
+    // Total timing: "      total time =   25690.22 ms / 14289 tokens".
+    // Trim-then-prefix avoids depending on llama.cpp's exact padding.
+    else if line.trim_start().starts_with("total time =") {
         static RE_TIME: OnceLock<Regex> = OnceLock::new();
         let re =
             RE_TIME.get_or_init(|| Regex::new(r"(\d+\.?\d*)\s+ms\s*/\s*(\d+)\s+tokens").unwrap());
@@ -1104,11 +1159,65 @@ fn is_kv_line(line: &str) -> bool {
 }
 
 fn extract_kv_str(line: &str) -> Option<String> {
-    // Pattern: "kv  N:   key str    = value"
-    // Use the first occurrence of " = " on a known-safe KV line to avoid
-    // pulling junk from tail content that happens to contain "= ".
-    let eq_pos = line.find(" = ")?;
-    Some(line[eq_pos + 3..].trim().to_string())
+    extract_after_eq(line).map(|s| s.to_string())
+}
+
+/// Return the substring after the first `" = "` divider, trimmed. Shared
+/// by the KV-metadata and `print_info:` parsers whose lines all have the
+/// "key <type> = value" shape. Using the space-bracketed form avoids
+/// matching `!= ` / `>= ` / `<= ` and the `" = "` variant is what llama.cpp
+/// emits consistently across both llama_model_loader and print_info.
+fn extract_after_eq(line: &str) -> Option<&str> {
+    line.find(" = ").map(|p| line[p + 3..].trim())
+}
+
+/// Called once when `server is listening on` first lands. Walks the small
+/// set of startup fields we expect to populate during any model load and
+/// emits a single warning naming whichever ones are still empty. Cosmetic
+/// fields (size_label, file_bpw) are intentionally excluded to keep the
+/// signal high — their parsers are tolerant of missing data and a drift
+/// there isn't worth the noise.
+fn check_startup_canary(state: &mut ServerState) {
+    let expected: &[(&str, bool)] = &[
+        ("model_name", !state.model_name.is_empty()),
+        ("quantization", !state.quantization.is_empty()),
+        ("file_size", !state.file_size_n.is_empty()),
+        ("model_params", !state.model_params_n.is_empty()),
+        ("layer_offload", state.total_layers > 0),
+        ("n_ctx", state.ctx_size > 0),
+    ];
+    let missing: Vec<&str> = expected
+        .iter()
+        .filter(|(_, ok)| !ok)
+        .map(|(name, _)| *name)
+        .collect();
+    if !missing.is_empty() {
+        state.push_warning(format!(
+            "llama-server log format drift: startup fields not parsed: {}",
+            missing.join(", ")
+        ));
+    }
+}
+
+/// Fires on every `done request: POST`. The check itself is O(1) and
+/// push_warning dedupes, so calling it repeatedly is cheap. We wait for a
+/// small handful of requests before complaining — a single request finishing
+/// before its timing block gets flushed through the pty is plausible; three
+/// in a row without any timing samples is not.
+fn check_runtime_canary(state: &mut ServerState) {
+    const THRESHOLD: u64 = 3;
+    if state.request_count >= THRESHOLD {
+        if state.prompt_tps_samples == 0 {
+            state.push_warning(
+                "llama-server log format drift: no prompt_eval timing samples parsed after several requests".to_string(),
+            );
+        }
+        if state.gen_tps_samples == 0 {
+            state.push_warning(
+                "llama-server log format drift: no generation-eval timing samples parsed after several requests".to_string(),
+            );
+        }
+    }
 }
 
 fn extract_mib(line: &str) -> Option<f64> {
@@ -1252,5 +1361,130 @@ mod tests {
             &mut s,
         );
         assert_eq!(s.cpu_forced_count, 87);
+    }
+
+    // A representative healthy startup sequence. The canary should stay
+    // quiet — if it fires here, either the fixture drifted or a parser
+    // regressed.
+    fn healthy_startup(s: &mut ServerState) {
+        feed(
+            s,
+            &[
+                "llama_model_loader: - kv   0:                       general.name str      = Qwen3 8B",
+                "print_info: file type          = Q4_K_M",
+                "print_info: file size          = 4.36 GiB (4.91 BPW)",
+                "print_info: model params       = 7.62 B",
+                "load_tensors: offloaded 29/29 layers to GPU",
+                "llama_context: n_ctx         = 131072",
+                "main: server is listening on http://127.0.0.1:8080",
+            ],
+        );
+    }
+
+    #[test]
+    fn startup_canary_quiet_on_healthy_load() {
+        let mut s = ServerState::default();
+        healthy_startup(&mut s);
+        assert!(s.ready);
+        assert!(
+            s.warnings.is_empty(),
+            "expected no warnings, got {:?}",
+            s.warnings
+        );
+    }
+
+    #[test]
+    fn startup_canary_names_missing_fields() {
+        // Strip the offload and n_ctx lines — parsers for those two should
+        // report themselves as the missing ones.
+        let mut s = ServerState::default();
+        feed(
+            &mut s,
+            &[
+                "llama_model_loader: - kv   0:                       general.name str      = Qwen3 8B",
+                "print_info: file type          = Q4_K_M",
+                "print_info: file size          = 4.36 GiB (4.91 BPW)",
+                "print_info: model params       = 7.62 B",
+                "main: server is listening on http://127.0.0.1:8080",
+            ],
+        );
+        assert_eq!(s.warnings.len(), 1);
+        let w = &s.warnings[0].1;
+        assert!(w.contains("layer_offload"), "warning was: {}", w);
+        assert!(w.contains("n_ctx"), "warning was: {}", w);
+        assert!(!w.contains("model_name"), "warning was: {}", w);
+    }
+
+    #[test]
+    fn runtime_canary_fires_after_several_silent_requests() {
+        // Three `done request` lines with no timing samples -> both tps
+        // canaries fire. push_warning dedupes, so running the loop a
+        // fourth time must not pile on duplicates.
+        let mut s = ServerState::default();
+        healthy_startup(&mut s);
+        assert!(s.warnings.is_empty());
+
+        for _ in 0..4 {
+            parse_line("srv  log_server_r: done request: POST /completion", &mut s);
+        }
+        assert_eq!(s.request_count, 4);
+        assert_eq!(s.warnings.len(), 2, "warnings: {:?}", s.warnings);
+        assert!(s.warnings.iter().any(|(_, w)| w.contains("prompt_eval")));
+        assert!(s.warnings.iter().any(|(_, w)| w.contains("generation-eval")));
+    }
+
+    #[test]
+    fn runtime_canary_quiet_when_timings_flow() {
+        let mut s = ServerState::default();
+        healthy_startup(&mut s);
+        for _ in 0..4 {
+            parse_line(
+                "prompt eval time =     728.45 ms /   536 tokens (    1.36 ms per token,   735.81 tokens per second)",
+                &mut s,
+            );
+            parse_line(
+                "       eval time =    1000.00 ms /    50 tokens (   20.00 ms per token,    50.00 tokens per second)",
+                &mut s,
+            );
+            parse_line("srv  log_server_r: done request: POST /completion", &mut s);
+        }
+        assert!(s.warnings.is_empty(), "warnings: {:?}", s.warnings);
+    }
+
+    #[test]
+    fn warnings_age_out_after_ttl() {
+        // Backdate an entry past WARNING_TTL and prove prune drops it. Uses
+        // the internal tuple representation directly so the test doesn't
+        // have to sleep for five minutes.
+        let mut s = ServerState::default();
+        let stale = Instant::now() - WARNING_TTL - Duration::from_secs(1);
+        s.warnings.push((stale, "stale canary".to_string()));
+        s.warnings
+            .push((Instant::now(), "fresh canary".to_string()));
+        s.prune_warnings();
+        assert_eq!(s.warnings.len(), 1);
+        assert_eq!(s.warnings[0].1, "fresh canary");
+
+        // After the stale entry is gone, the same text can be pushed again —
+        // dedup shouldn't block a legitimate re-fire of a recurring canary.
+        s.push_warning("stale canary".to_string());
+        assert_eq!(s.warnings.len(), 2);
+    }
+
+    #[test]
+    fn total_time_parses_across_whitespace_variants() {
+        // Historical "      total time =" padding and a tab-prefixed variant
+        // should both land in the same branch after trim_start.
+        let mut s = ServerState::default();
+        parse_line(
+            "      total time =   25690.22 ms / 14289 tokens",
+            &mut s,
+        );
+        parse_line(
+            "\ttotal time =   25690.22 ms / 14289 tokens",
+            &mut s,
+        );
+        // Not much to assert without a live slot to update, but the test
+        // proves the branches don't panic on either padding style.
     }
 }

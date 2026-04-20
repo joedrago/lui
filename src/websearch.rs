@@ -271,7 +271,7 @@ async fn handle_config(State(state): State<AppState>) -> Json<LuiConfigResponse>
 async fn handle_data(State(state): State<AppState>) -> Json<UiSnapshot> {
     let uptime = state.start_time.elapsed();
     let snapshot = {
-        let st = state.server_state.lock().unwrap();
+        let mut st = state.server_state.lock().unwrap();
         st.to_snapshot(uptime, &state.config_summary)
     };
     Json(snapshot)

@@ -38,6 +38,11 @@ const COLOR_NUMBER: Color = Color::Rgb {
     g: 150,
     b: 255,
 };
+const WARNING_AMBER: Color = Color::Rgb {
+    r: 230,
+    g: 180,
+    b: 80,
+};
 
 pub struct Display {
     /// Host to poll `/data` on. `"127.0.0.1"` locally; a server's hostname
@@ -741,11 +746,46 @@ impl Display {
             t.newline();
         }
 
+        // Warnings section — only rendered when the snapshot carries at
+        // least one warning. Sits between Performance and Server Log so
+        // drift notices don't scroll off with the log ring.
+        self.render_warnings(&mut t, snap);
+
         // Server log -- fills remaining space
         t.newline();
         self.render_log(&mut t);
         t.clear_rest();
         t.flush();
+    }
+
+    fn render_warnings(&self, t: &mut TermBuf, snap: &UiSnapshot) {
+        if snap.warnings.is_empty() {
+            return;
+        }
+        t.newline();
+        let prefix = "  ── Warnings ";
+        let header = format!(
+            "{}{}",
+            prefix,
+            "─".repeat(t.width.saturating_sub(prefix.chars().count()))
+        );
+        let _ = queue!(
+            t.stdout,
+            SetForegroundColor(MUTED_PURPLE),
+            Print(truncate(&header, t.width)),
+            ResetColor
+        );
+        t.newline();
+        for w in &snap.warnings {
+            let _ = queue!(
+                t.stdout,
+                Print("  "),
+                SetForegroundColor(WARNING_AMBER),
+                Print(truncate(w, t.width.saturating_sub(2))),
+                ResetColor
+            );
+            t.newline();
+        }
     }
 
     fn render_source(&self, t: &mut TermBuf, snap: &UiSnapshot) {
