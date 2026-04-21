@@ -384,7 +384,16 @@ impl Display {
 
         // Memory
         if st.gpu_mem_mib > 0.0 || st.kv_cache_mib > 0.0 {
-            let gpu_total = st.gpu_mem_mib + st.kv_cache_mib + st.compute_buf_mib;
+            // On Metal, `MTL0_Mapped model buffer size` reports the size of
+            // the whole-file mmap, which does NOT shrink when MoE experts
+            // spill to CPU_REPACK — the spilled tensors are duplicated into
+            // host RAM, but the Metal buffer still covers them. Subtract the
+            // CPU_REPACK total to recover the GPU's actual working set.
+            // `cpu_repack_mib` is 0 on CUDA (which routes spill through
+            // CPU_Mapped and accurately shrinks its own GPU buffer), so this
+            // is a no-op there.
+            let gpu_model_active = (st.gpu_mem_mib - st.cpu_repack_mib).max(0.0);
+            let gpu_total = gpu_model_active + st.kv_cache_mib + st.compute_buf_mib;
             let cpu_total = st.cpu_mem_mib + st.cpu_repack_mib + st.cpu_compute_mib;
             let _ = queue!(
                 t.stdout,
@@ -414,8 +423,8 @@ impl Display {
             // split the line into GPU and CPU halves so the user can see where
             // every MiB went; otherwise the single-side form is less cluttered.
             let mut gpu_parts = Vec::new();
-            if st.gpu_mem_mib > 0.0 {
-                gpu_parts.push(format!("{:.0} model", st.gpu_mem_mib));
+            if gpu_model_active > 0.0 {
+                gpu_parts.push(format!("{:.0} model", gpu_model_active));
             }
             if st.kv_cache_mib > 0.0 {
                 gpu_parts.push(format!("{:.0} KV", st.kv_cache_mib));
