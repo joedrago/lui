@@ -759,6 +759,20 @@ fn read_output_sync(
 
 /// Parse a log line. Returns true if this is a transient progress line (don't add to log ring).
 fn parse_line(line: &str, state: &mut ServerState) -> bool {
+    // llama-server dumps the full request and response bodies to stdout via
+    // `srv operator(): converted request: {...}` and `srv log_server_r:
+    // request:` / `response:`. Those dumps echo arbitrary prompt/tool-output
+    // JSON — a prompt containing lui's own source code has been observed to
+    // inject fake "model buffer size = 7948 MiB" and "general.name str = ..."
+    // fragments per pty-wrapped chunk, driving gpu_mem_mib to ~55 GiB and
+    // overwriting model_name. Filter them here before any parser runs. Keep
+    // `log_server_r: done request:` — that one is the real completion event
+    // that feeds request_count.
+    if line.contains("converted request:")
+        || (line.contains("log_server_r:") && !line.contains("done request:"))
+    {
+        return false;
+    }
     // Download progress: "Downloading Qwen3.6-35B-A3B-UD-Q4_K_M.gguf ──       9%"
     // ConPTY on Windows can concatenate multiple progress lines into one,
     // so we use captures_iter with a non-greedy match to extract all entries.
@@ -779,6 +793,25 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
         }
         return found;
     }
+    // Everything below the download check is split into load-phase parsers
+    // (fields set once during model load) and runtime parsers (request-level
+    // events). Gating the load parsers on !state.ready is belt-and-braces on
+    // top of the echo filter above: even if some future llama-server log
+    // prefix slips past the filter, the accumulators (gpu_mem_mib, etc.) and
+    // one-shot fields (model_name, quantization, ...) can no longer be
+    // clobbered after startup.
+    if !state.ready {
+        parse_load_line(line, state);
+    } else {
+        parse_runtime_line(line, state);
+    }
+    false
+}
+
+/// Parsers for fields that only appear during model load. Called only while
+/// `state.ready == false`; the `server is listening on` branch flips that
+/// bit and ends this phase.
+fn parse_load_line(line: &str, state: &mut ServerState) {
     // general.name
     if is_kv_line(line) && line.contains("general.name") && line.contains("str") {
         if let Some(val) = extract_kv_str(line) {
@@ -988,11 +1021,16 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
         state.ready = true;
         check_startup_canary(state);
     }
+}
+
+/// Parsers for request-level events. Called only after `server is listening
+/// on` has fired; load-phase fields are frozen by this point.
+fn parse_runtime_line(line: &str, state: &mut ServerState) {
     // HTTP request completed. Also the trigger for the runtime-telemetry
     // canary: once requests are landing we should be seeing paired
     // prompt_eval / eval timing lines. If we aren't, something in the
     // timing-log format moved.
-    else if line.contains("done request: POST") {
+    if line.contains("done request: POST") {
         state.request_count += 1;
         check_runtime_canary(state);
     }
@@ -1144,7 +1182,6 @@ fn parse_line(line: &str, state: &mut ServerState) -> bool {
             }
         }
     }
-    false
 }
 
 /// Extract "id  N | task M" from a slot log line
@@ -1456,6 +1493,67 @@ mod tests {
             parse_line("srv  log_server_r: done request: POST /completion", &mut s);
         }
         assert!(s.warnings.is_empty(), "warnings: {:?}", s.warnings);
+    }
+
+    #[test]
+    fn request_body_echo_does_not_corrupt_load_phase_state() {
+        // llama-server's `srv operator(): converted request: {...}` dump puts
+        // the entire chat JSON on one stdout line; the 200-col pty then wraps
+        // it into chunks. When the user's prompt contains lui's own source
+        // code, those chunks can look exactly like load-time log events and
+        // clobber model_name / gpu_mem_mib. This is the regression: nothing
+        // under an echo prefix should reach any parser.
+        let mut s = ServerState::default();
+        // Bait: the fixture string from this file's own test, verbatim, glued
+        // onto the request-body prefix the way the pty would emit it.
+        parse_line(
+            "srv    operator(): converted request: {\"messages\":[...\"load_tensors:        CUDA0 model buffer size =  7948.14 MiB\"...",
+            &mut s,
+        );
+        parse_line(
+            "srv  log_server_r: request: ...\"llama_model_loader: - kv   0: general.name str = Qwen3 8B\"...",
+            &mut s,
+        );
+        parse_line(
+            "srv  log_server_r: response: ...\"load_tensors:  MTL0_Mapped model buffer size = 21098.65 MiB\"...",
+            &mut s,
+        );
+        assert_eq!(s.gpu_mem_mib, 0.0);
+        assert!(s.model_name.is_empty());
+    }
+
+    #[test]
+    fn done_request_still_fires_through_echo_filter() {
+        // The echo filter must not swallow `log_server_r: done request:` —
+        // that's the real completion event that drives request_count and
+        // the runtime canary.
+        let mut s = ServerState::default();
+        healthy_startup(&mut s);
+        parse_line("srv  log_server_r: done request: POST /completion", &mut s);
+        assert_eq!(s.request_count, 1);
+    }
+
+    #[test]
+    fn post_ready_load_lines_do_not_accumulate() {
+        // Defense in depth on top of the echo filter: once the server is
+        // ready, a raw load-phase line that somehow sneaks past must not be
+        // able to double-add gpu_mem_mib or rename the model. In the wild
+        // this happened via pty-wrapped prompt echoes; this test feeds the
+        // raw fragments directly to prove the load-phase gate holds.
+        let mut s = ServerState::default();
+        healthy_startup(&mut s);
+        let name_before = s.model_name.clone();
+        let gpu_before = s.gpu_mem_mib;
+        parse_line(
+            "load_tensors:        CUDA0 model buffer size =  7948.14 MiB",
+            &mut s,
+        );
+        parse_line(
+            "llama_model_loader: - kv   0: general.name str = Something Else",
+            &mut s,
+        );
+        assert_eq!(s.gpu_mem_mib, gpu_before);
+        assert_eq!(s.model_name, name_before);
     }
 
     #[test]
