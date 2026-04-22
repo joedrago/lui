@@ -16,10 +16,9 @@ use crate::config::{
 
 const LOG_RING_SIZE: usize = 200;
 const MAX_RECENT_REQUESTS: usize = 3;
-/// How long a warning stays in the list before it's pruned. Transient drift
-/// notices shouldn't stick around forever — if the underlying condition is
-/// still live, the canary will re-fire on the next triggering event and the
-/// warning comes back.
+/// How long a warning stays in the list before it's pruned. A recurring
+/// condition just re-pushes the warning and it sticks around; a transient
+/// one drops off quietly after the TTL.
 const WARNING_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Wire-format version for `/data`. Bump on breaking changes; additive
@@ -147,15 +146,9 @@ pub struct ServerState {
     pub websearch_total: u64,
     pub active_searches: HashMap<String, String>,
 
-    // Canary messages surfaced in the UI's Warnings section. Populated by
-    // parse_line when an expected startup field never got parsed, or when
-    // runtime events (requests completing) show up without the paired
-    // telemetry we expect. A populated list usually means llama-server's log
-    // format drifted and one of our parsers needs an update.
-    //
-    // Stored with the push Instant so entries can age out after WARNING_TTL.
-    // A still-live condition just re-fires its canary and the warning comes
-    // back; a transient one drops off quietly.
+    // Warnings surfaced in the UI's Warnings section. Stored with the push
+    // Instant so entries can age out after WARNING_TTL; a recurring condition
+    // just re-pushes and the warning sticks, a transient one drops off.
     pub warnings: Vec<(Instant, String)>,
 }
 
@@ -168,9 +161,11 @@ impl ServerState {
     }
 
     /// Append a warning to be shown in the UI's Warnings section. Prunes
-    /// expired entries first, then dedupes on exact text so canaries
-    /// triggered from repeated events (e.g. every `done request`) don't
-    /// pile up duplicates while still live.
+    /// expired entries first, then dedupes on exact text so a recurring
+    /// warning doesn't pile up duplicates while still live. Intentionally
+    /// kept with no current callers — the plumbing (state, TTL, UI) is
+    /// ready for future warnings to wire in.
+    #[allow(dead_code)]
     pub fn push_warning(&mut self, msg: String) {
         self.prune_warnings();
         if !self.warnings.iter().any(|(_, w)| w == &msg) {
@@ -254,9 +249,7 @@ pub struct UiSnapshot {
     pub websearch_total: u64,
     pub active_searches: Vec<String>,
 
-    /// Log-parser canaries surfaced in the UI's Warnings section. Usually
-    /// empty; a populated list means llama-server's log format changed
-    /// enough that one of our parsers stopped landing its expected hits.
+    /// Warnings surfaced in the UI's Warnings section. Usually empty.
     pub warnings: Vec<String>,
 
     /// Pre-formatted config pieces the renderer needs (bind, sampling,
@@ -358,8 +351,7 @@ impl ServerState {
     /// lui HTTP server (not `ServerState`) owns that clock. `config` is
     /// the pre-formatted `ConfigSummary`, built once at spawn time.
     pub fn to_snapshot(&mut self, uptime: Duration, config: &ConfigSummary) -> UiSnapshot {
-        // Age out stale warnings before the renderer sees them. Keeps a
-        // late-expiring warning from hanging on until the next canary push.
+        // Age out stale warnings before the renderer sees them.
         self.prune_warnings();
         let mut slots: Vec<SlotSnapshot> = self
             .active_slots
@@ -1033,28 +1025,20 @@ fn parse_load_line(line: &str, state: &mut ServerState) {
         }
     }
     // Server ready: "server is listening on http://127.0.0.1:8080".
-    // This is where we also run the startup log-parse canary: if any of the
-    // fields we expect to populate during model load never got set, the log
-    // format probably drifted and the operator needs to know.
     else if line.contains("server is listening on") {
         if let Some(pos) = line.find("on ") {
             state.listen_url = line[pos + 3..].trim().to_string();
         }
         state.ready = true;
-        check_startup_canary(state);
     }
 }
 
 /// Parsers for request-level events. Called only after `server is listening
 /// on` has fired; load-phase fields are frozen by this point.
 fn parse_runtime_line(line: &str, state: &mut ServerState) {
-    // HTTP request completed. Also the trigger for the runtime-telemetry
-    // canary: once requests are landing we should be seeing paired
-    // prompt_eval / eval timing lines. If we aren't, something in the
-    // timing-log format moved.
+    // HTTP request completed.
     if line.contains("done request: POST") {
         state.request_count += 1;
-        check_runtime_canary(state);
     }
     // Prompt cache reuse failed: llama-server is redoing the whole prefill.
     // Message shape: "forcing full prompt re-processing due to lack of cache data
@@ -1234,55 +1218,6 @@ fn extract_after_eq(line: &str) -> Option<&str> {
     line.find(" = ").map(|p| line[p + 3..].trim())
 }
 
-/// Called once when `server is listening on` first lands. Walks the small
-/// set of startup fields we expect to populate during any model load and
-/// emits a single warning naming whichever ones are still empty. Cosmetic
-/// fields (size_label, file_bpw) are intentionally excluded to keep the
-/// signal high — their parsers are tolerant of missing data and a drift
-/// there isn't worth the noise.
-fn check_startup_canary(state: &mut ServerState) {
-    let expected: &[(&str, bool)] = &[
-        ("model_name", !state.model_name.is_empty()),
-        ("quantization", !state.quantization.is_empty()),
-        ("file_size", !state.file_size_n.is_empty()),
-        ("model_params", !state.model_params_n.is_empty()),
-        ("layer_offload", state.total_layers > 0),
-        ("n_ctx", state.ctx_size > 0),
-    ];
-    let missing: Vec<&str> = expected
-        .iter()
-        .filter(|(_, ok)| !ok)
-        .map(|(name, _)| *name)
-        .collect();
-    if !missing.is_empty() {
-        state.push_warning(format!(
-            "llama-server log format drift: startup fields not parsed: {}",
-            missing.join(", ")
-        ));
-    }
-}
-
-/// Fires on every `done request: POST`. The check itself is O(1) and
-/// push_warning dedupes, so calling it repeatedly is cheap. We wait for a
-/// small handful of requests before complaining — a single request finishing
-/// before its timing block gets flushed through the pty is plausible; three
-/// in a row without any timing samples is not.
-fn check_runtime_canary(state: &mut ServerState) {
-    const THRESHOLD: u64 = 3;
-    if state.request_count >= THRESHOLD {
-        if state.prompt_tps_samples == 0 {
-            state.push_warning(
-                "llama-server log format drift: no prompt_eval timing samples parsed after several requests".to_string(),
-            );
-        }
-        if state.gen_tps_samples == 0 {
-            state.push_warning(
-                "llama-server log format drift: no generation-eval timing samples parsed after several requests".to_string(),
-            );
-        }
-    }
-}
-
 fn extract_mib(line: &str) -> Option<f64> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"(\d+\.?\d*)\s+MiB").unwrap());
@@ -1426,9 +1361,7 @@ mod tests {
         assert_eq!(s.cpu_forced_count, 87);
     }
 
-    // A representative healthy startup sequence. The canary should stay
-    // quiet — if it fires here, either the fixture drifted or a parser
-    // regressed.
+    // A representative healthy startup sequence used by multiple tests.
     fn healthy_startup(s: &mut ServerState) {
         feed(
             s,
@@ -1442,79 +1375,6 @@ mod tests {
                 "main: server is listening on http://127.0.0.1:8080",
             ],
         );
-    }
-
-    #[test]
-    fn startup_canary_quiet_on_healthy_load() {
-        let mut s = ServerState::default();
-        healthy_startup(&mut s);
-        assert!(s.ready);
-        assert!(
-            s.warnings.is_empty(),
-            "expected no warnings, got {:?}",
-            s.warnings
-        );
-    }
-
-    #[test]
-    fn startup_canary_names_missing_fields() {
-        // Strip the offload and n_ctx lines — parsers for those two should
-        // report themselves as the missing ones.
-        let mut s = ServerState::default();
-        feed(
-            &mut s,
-            &[
-                "llama_model_loader: - kv   0:                       general.name str      = Qwen3 8B",
-                "print_info: file type          = Q4_K_M",
-                "print_info: file size          = 4.36 GiB (4.91 BPW)",
-                "print_info: model params       = 7.62 B",
-                "main: server is listening on http://127.0.0.1:8080",
-            ],
-        );
-        assert_eq!(s.warnings.len(), 1);
-        let w = &s.warnings[0].1;
-        assert!(w.contains("layer_offload"), "warning was: {}", w);
-        assert!(w.contains("n_ctx"), "warning was: {}", w);
-        assert!(!w.contains("model_name"), "warning was: {}", w);
-    }
-
-    #[test]
-    fn runtime_canary_fires_after_several_silent_requests() {
-        // Three `done request` lines with no timing samples -> both tps
-        // canaries fire. push_warning dedupes, so running the loop a
-        // fourth time must not pile on duplicates.
-        let mut s = ServerState::default();
-        healthy_startup(&mut s);
-        assert!(s.warnings.is_empty());
-
-        for _ in 0..4 {
-            parse_line("srv  log_server_r: done request: POST /completion", &mut s);
-        }
-        assert_eq!(s.request_count, 4);
-        assert_eq!(s.warnings.len(), 2, "warnings: {:?}", s.warnings);
-        assert!(s.warnings.iter().any(|(_, w)| w.contains("prompt_eval")));
-        assert!(s
-            .warnings
-            .iter()
-            .any(|(_, w)| w.contains("generation-eval")));
-    }
-
-    #[test]
-    fn runtime_canary_quiet_when_timings_flow() {
-        let mut s = ServerState::default();
-        healthy_startup(&mut s);
-        for _ in 0..4 {
-            parse_line(
-                "prompt eval time =     728.45 ms /   536 tokens (    1.36 ms per token,   735.81 tokens per second)",
-                &mut s,
-            );
-            parse_line(
-                "       eval time =    1000.00 ms /    50 tokens (   20.00 ms per token,    50.00 tokens per second)",
-                &mut s,
-            );
-            parse_line("srv  log_server_r: done request: POST /completion", &mut s);
-        }
-        assert!(s.warnings.is_empty(), "warnings: {:?}", s.warnings);
     }
 
     #[test]
@@ -1547,8 +1407,7 @@ mod tests {
     #[test]
     fn done_request_still_fires_through_echo_filter() {
         // The echo filter must not swallow `log_server_r: done request:` —
-        // that's the real completion event that drives request_count and
-        // the runtime canary.
+        // that's the real completion event that drives request_count.
         let mut s = ServerState::default();
         healthy_startup(&mut s);
         parse_line("srv  log_server_r: done request: POST /completion", &mut s);
@@ -1585,16 +1444,16 @@ mod tests {
         // have to sleep for five minutes.
         let mut s = ServerState::default();
         let stale = Instant::now() - WARNING_TTL - Duration::from_secs(1);
-        s.warnings.push((stale, "stale canary".to_string()));
+        s.warnings.push((stale, "stale warning".to_string()));
         s.warnings
-            .push((Instant::now(), "fresh canary".to_string()));
+            .push((Instant::now(), "fresh warning".to_string()));
         s.prune_warnings();
         assert_eq!(s.warnings.len(), 1);
-        assert_eq!(s.warnings[0].1, "fresh canary");
+        assert_eq!(s.warnings[0].1, "fresh warning");
 
         // After the stale entry is gone, the same text can be pushed again —
-        // dedup shouldn't block a legitimate re-fire of a recurring canary.
-        s.push_warning("stale canary".to_string());
+        // dedup shouldn't block a legitimate re-push of a recurring warning.
+        s.push_warning("stale warning".to_string());
         assert_eq!(s.warnings.len(), 2);
     }
 
