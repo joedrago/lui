@@ -212,6 +212,12 @@ pub struct ServerConfig {
     // system RAM) and you'd rather take that risk than have lui exit.
     #[serde(default)]
     pub allow_vram_oversubscription: bool,
+
+    // When true, lui writes/updates opencode.jsonc and the lui-web-search
+    // SKILL.md. Set to false when running under external harnesses that
+    // manage their own opencode config. Always global; rejected with --this.
+    #[serde(default)]
+    pub harness_opencode: bool,
 }
 
 // Defaults applied when the user hasn't set a value in CLI or TOML.
@@ -280,6 +286,7 @@ impl Default for ServerConfig {
             opencode_disable_prune: false,
             prune_unused_model_configs: false,
             allow_vram_oversubscription: false,
+            harness_opencode: true,
         }
     }
 }

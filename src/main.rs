@@ -109,6 +109,8 @@ MACHINE SETTINGS (always global; rejected with --this):
                                    (preserves llama-server prompt cache on
                                     large contexts; off by default so cloud
                                     providers retain opencode's normal pruning)
+         --harness-opencode        Allow lui to manage opencode.jsonc and skill files
+         --no-harness-opencode     Skip all opencode config/skill manipulation (default: on)
 
 REMOTE (one-shot; not persisted):
         --ssh <USER@HOST>          Run on a server. Configures that
@@ -351,6 +353,14 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
             Long("opencode-disable-prune") => {
                 require_global(scope, "--opencode-disable-prune");
                 config.server.opencode_disable_prune = true;
+            }
+            Long("harness-opencode") => {
+                require_global(scope, "--harness-opencode");
+                config.server.harness_opencode = true;
+            }
+            Long("no-harness-opencode") => {
+                require_global(scope, "--no-harness-opencode");
+                config.server.harness_opencode = false;
             }
 
             Short('l') | Long("list") => list = true,
@@ -1469,7 +1479,7 @@ async fn main() {
     // this machine. Blocks until Ctrl-C. Doesn't spawn llama-server and
     // doesn't touch lui.toml beyond whatever was already saved above.
     if let Some(target) = &opts.use_lui {
-        if let Err(e) = ssh_tunnel::setup_use(target).await {
+        if let Err(e) = ssh_tunnel::setup_use(target, &effective).await {
             eprintln!("lui: {}", e);
             std::process::exit(1);
         }
@@ -1492,11 +1502,11 @@ async fn main() {
         return;
     }
 
-    // Update opencode config
-    update_opencode_config(&effective);
-
-    // Write (or remove) the lui-web-search opencode skill.
-    update_websearch_skill(&effective);
+    // Update opencode config and skill files (only when harness_opencode is on).
+    if effective.harness_opencode {
+        update_opencode_config(&effective);
+        update_websearch_skill(&effective);
+    }
 
     // Get llama-server version
     let llama_version = match std::process::Command::new("llama-server")
@@ -1575,23 +1585,25 @@ async fn main() {
         }
     });
 
-    // Update opencode config once server is ready and we know actual ctx_size
-    let state_for_opencode = proc.state.clone();
-    let config_for_opencode = effective.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let st = state_for_opencode.lock().unwrap();
-            if st.ready && st.ctx_size > 0 {
-                drop(st);
-                update_opencode_config(&config_for_opencode);
-                break;
+    // Update opencode config once server is ready and we know actual ctx_size.
+    if effective.harness_opencode {
+        let state_for_opencode = proc.state.clone();
+        let config_for_opencode = effective.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let st = state_for_opencode.lock().unwrap();
+                if st.ready && st.ctx_size > 0 {
+                    drop(st);
+                    update_opencode_config(&config_for_opencode);
+                    break;
+                }
+                if st.exited {
+                    break;
+                }
             }
-            if st.exited {
-                break;
-            }
-        }
-    });
+        });
+    }
 
     // Set up shutdown signal
     let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);

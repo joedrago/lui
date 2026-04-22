@@ -389,31 +389,33 @@ fn print_share_success(
 /// `--ssh`: configure the given client's opencode to point back
 /// at this server over a reverse tunnel. Any error here is fatal — the caller
 /// prints it and exits.
-pub fn setup_share(target: &SshTarget, effective: &ServerConfig) -> Result<(), String> {
+pub fn setup_share(target: &SshTarget, config: &ServerConfig) -> Result<(), String> {
     check_opencode(target)?;
 
     let remote_llama = pick_remote_port();
     let remote_web = remote_llama + 1;
 
-    let (basename, existing) = fetch_remote_opencode_config(target)?;
-    maybe_backup_remote_opencode(target, &basename, &existing);
+    if config.harness_opencode {
+        let (basename, existing) = fetch_remote_opencode_config(target)?;
+        maybe_backup_remote_opencode(target, &basename, &existing);
 
-    let base_url = format!("http://localhost:{}/v1", remote_llama);
-    let model_name = derive_model_name(effective);
-    let contents = opencode_config::update_opencode_config_text(
-        &existing,
-        &model_name,
-        &base_url,
-        remote_web,
-        effective.ctx_size,
-        effective.websearch_disabled,
-        effective.opencode_disable_prune,
-    )?;
+        let base_url = format!("http://localhost:{}/v1", remote_llama);
+        let model_name = derive_model_name(config);
+        let contents = opencode_config::update_opencode_config_text(
+            &existing,
+            &model_name,
+            &base_url,
+            remote_web,
+            config.ctx_size,
+            config.websearch_disabled,
+            config.opencode_disable_prune,
+        )?;
 
-    write_remote_opencode_config(target, &basename, &contents)?;
-    write_remote_websearch_skill(target, remote_web, effective.websearch_disabled)?;
+        write_remote_opencode_config(target, &basename, &contents)?;
+        write_remote_websearch_skill(target, remote_web, config.websearch_disabled)?;
+    }
 
-    print_share_success(target, effective, remote_llama, remote_web);
+    print_share_success(target, config, remote_llama, remote_web);
     Ok(())
 }
 
@@ -623,7 +625,7 @@ fn print_use_banner(
 /// life of the opencode session. No SSH anywhere — `--public` on the server is
 /// the only prerequisite, and if `/config` is reachable so is llama-server
 /// on the same interface.
-pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
+pub async fn setup_use(target: &UseTarget, config: &ServerConfig) -> Result<(), String> {
     let lui_cfg = fetch_lui_config(target)?;
 
     // Use the conventional 8081 port here, not a randomized high port. A
@@ -638,13 +640,15 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
     // so the URL matches what they'd see in `lui --public`'s banner.
     let llama_base_url = format!("http://{}:{}/v1", target.host, lui_cfg.llama_port);
 
-    write_local_opencode_config(
-        &lui_cfg.model_name,
-        &llama_base_url,
-        local_web,
-        lui_cfg.ctx_size,
-    )?;
-    write_local_websearch_skill(local_web)?;
+    if config.harness_opencode {
+        write_local_opencode_config(
+            &lui_cfg.model_name,
+            &llama_base_url,
+            local_web,
+            lui_cfg.ctx_size,
+        )?;
+        write_local_websearch_skill(local_web)?;
+    }
 
     // In-process bsearch server. We synthesize a minimal ServerState just
     // to satisfy the API; only `websearch_total` / `active_searches` get
