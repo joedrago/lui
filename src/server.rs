@@ -153,7 +153,17 @@ pub struct ServerState {
 }
 
 impl ServerState {
+    /// Pre-filtered log ingress: drops CUDA Graph reuse noise before it
+    /// reaches the ring buffer.
     pub fn push_log(&mut self, line: String) {
+        // Suppress "CUDA Graph id N reused" lines — they are informational
+        // reuse notifications that clutter the log with no diagnostic value.
+        static CUDA_GRAPH_RE: OnceLock<Regex> = OnceLock::new();
+        let re = CUDA_GRAPH_RE
+            .get_or_init(|| Regex::new(r"^\s*CUDA Graph id \d+ reused\s*$").unwrap());
+        if re.is_match(&line) {
+            return;
+        }
         if self.log_lines.len() >= LOG_RING_SIZE {
             self.log_lines.pop_front();
         }
@@ -1466,5 +1476,25 @@ mod tests {
         parse_line("\ttotal time =   25690.22 ms / 14289 tokens", &mut s);
         // Not much to assert without a live slot to update, but the test
         // proves the branches don't panic on either padding style.
+    }
+
+    #[test]
+    fn cuda_graph_reuse_lines_are_filtered() {
+        // "CUDA Graph id N reused" lines are noise in the log ring; they
+        // should be silently dropped by push_log and never appear in
+        // log_lines. Leading/trailing whitespace (llama.cpp padding) is also
+        // filtered.
+        let mut s = ServerState::default();
+        s.push_log("CUDA Graph id 0 reused".to_string());
+        s.push_log("CUDA Graph id 42 reused".to_string());
+        s.push_log("CUDA Graph id 999999 reused".to_string());
+        s.push_log("   CUDA Graph id 1 reused".to_string());
+        s.push_log("CUDA Graph id 2 reused   ".to_string());
+        s.push_log("\tCUDA Graph id 3 reused\t".to_string());
+        assert_eq!(s.log_lines.len(), 0);
+
+        // Real log lines should still pass through.
+        s.push_log("prompt eval time =   100.00 ms /  50 tokens".to_string());
+        assert_eq!(s.log_lines.len(), 1);
     }
 }
