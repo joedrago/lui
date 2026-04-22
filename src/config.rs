@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::opencode_config;
+use crate::pi_config;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuiConfig {
@@ -216,8 +217,15 @@ pub struct ServerConfig {
     // When true, lui writes/updates opencode.jsonc and the lui-web-search
     // SKILL.md. Set to false when running under external harnesses that
     // manage their own opencode config. Always global; rejected with --this.
-    #[serde(default)]
+    #[serde(default = "default_harness_opencode")]
     pub harness_opencode: bool,
+
+    // When true, lui writes/updates ~/.pi/agent/models.json and the
+    // lui-web-search SKILL.md for pi. Set to false when running under
+    // external harnesses that manage their own pi config. Always global;
+    // rejected with --this.
+    #[serde(default = "default_harness_pi")]
+    pub harness_pi: bool,
 }
 
 // Defaults applied when the user hasn't set a value in CLI or TOML.
@@ -255,6 +263,14 @@ fn default_host() -> String {
     "127.0.0.1".to_string()
 }
 
+fn default_harness_opencode() -> bool {
+    true
+}
+
+fn default_harness_pi() -> bool {
+    false
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
@@ -287,6 +303,7 @@ impl Default for ServerConfig {
             prune_unused_model_configs: false,
             allow_vram_oversubscription: false,
             harness_opencode: true,
+            harness_pi: false,
         }
     }
 }
@@ -966,4 +983,49 @@ pub fn update_websearch_skill(config: &ServerConfig) {
     if let Err(e) = std::fs::write(&skill_path, body) {
         eprintln!("Warning: failed to write {}: {}", skill_path.display(), e);
     }
+}
+
+/// Write/update ~/.pi/agent/models.json with the lui provider entry.
+pub fn update_pi_models_config(config: &ServerConfig) {
+    let path = pi_config::pi_models_json_path();
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    // Mirror the opencode backup behavior: first-ever touch gets a backup.
+    if pi_config::pi_needs_backup(&existing) {
+        let mut backup = path.as_os_str().to_os_string();
+        backup.push(".luibackup");
+        let backup = PathBuf::from(backup);
+        if !backup.exists() {
+            let _ = std::fs::write(&backup, &existing);
+        }
+    }
+
+    let base_url = format!("http://localhost:{}", config.port);
+    let model_name = derive_model_name(config);
+    let new_text = match pi_config::update_pi_models_json(
+        &existing,
+        &model_name,
+        &base_url,
+        config.ctx_size,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Warning: failed to update {}: {}", path.display(), e);
+            return;
+        }
+    };
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    if let Err(e) = std::fs::write(&path, &new_text) {
+        eprintln!("Warning: failed to write {}: {}", path.display(), e);
+    }
+}
+
+/// Write/update the lui-web-search SKILL.md for pi.
+pub fn update_pi_websearch_skill(config: &ServerConfig) {
+    pi_config::update_pi_websearch_skill(websearch_port(config), config.websearch_disabled)
 }

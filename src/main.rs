@@ -5,6 +5,7 @@ mod config;
 mod display;
 mod gguf;
 mod opencode_config;
+mod pi_config;
 mod server;
 mod ssh_tunnel;
 mod websearch;
@@ -14,8 +15,9 @@ use std::path::PathBuf;
 
 use config::{
     config_path, derive_model_name, load_config, model_key, resolve, resolve_hf_alias,
-    resolve_model_alias, save_config, update_opencode_config, update_websearch_skill,
-    websearch_port, LuiConfig, DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
+    resolve_model_alias, save_config, update_opencode_config, update_pi_models_config,
+    update_pi_websearch_skill, update_websearch_skill, websearch_port, LuiConfig,
+    DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
 };
 use display::Display;
 use server::{spawn_server, ConfigSummary};
@@ -109,8 +111,11 @@ MACHINE SETTINGS (always global; rejected with --this):
                                    (preserves llama-server prompt cache on
                                     large contexts; off by default so cloud
                                     providers retain opencode's normal pruning)
-         --harness-opencode        Allow lui to manage opencode.jsonc and skill files
-         --no-harness-opencode     Skip all opencode config/skill manipulation (default: on)
+        --harness-opencode         Allow lui to manage opencode.jsonc and skill files
+        --no-harness-opencode      Skip all opencode config/skill manipulation (default: on)
+        --harness-pi               Allow lui to manage ~/.pi/agent/models.json and
+                                   skill files for pi (default: off)
+        --no-harness-pi            Explicitly disable pi config/skill management
 
 REMOTE (one-shot; not persisted):
         --ssh <USER@HOST>          Run on a server. Configures that
@@ -361,6 +366,14 @@ fn parse_args(config: &mut LuiConfig) -> RunOpts {
             Long("no-harness-opencode") => {
                 require_global(scope, "--no-harness-opencode");
                 config.server.harness_opencode = false;
+            }
+            Long("harness-pi") => {
+                require_global(scope, "--harness-pi");
+                config.server.harness_pi = true;
+            }
+            Long("no-harness-pi") => {
+                require_global(scope, "--no-harness-pi");
+                config.server.harness_pi = false;
             }
 
             Short('l') | Long("list") => list = true,
@@ -1508,6 +1521,12 @@ async fn main() {
         update_websearch_skill(&effective);
     }
 
+    // Update pi models.json and skill files (only when harness_pi is on).
+    if effective.harness_pi {
+        update_pi_models_config(&effective);
+        update_pi_websearch_skill(&effective);
+    }
+
     // Get llama-server version
     let llama_version = match std::process::Command::new("llama-server")
         .arg("--version")
@@ -1596,6 +1615,26 @@ async fn main() {
                 if st.ready && st.ctx_size > 0 {
                     drop(st);
                     update_opencode_config(&config_for_opencode);
+                    break;
+                }
+                if st.exited {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Update pi models.json once server is ready and we know actual ctx_size.
+    if effective.harness_pi {
+        let state_for_pi = proc.state.clone();
+        let config_for_pi = effective.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let st = state_for_pi.lock().unwrap();
+                if st.ready && st.ctx_size > 0 {
+                    drop(st);
+                    update_pi_models_config(&config_for_pi);
                     break;
                 }
                 if st.exited {

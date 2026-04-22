@@ -57,6 +57,7 @@ use crate::config::{
 };
 use crate::display::Display;
 use crate::opencode_config;
+use crate::pi_config;
 use crate::server::{ConfigSummary, ServerState};
 use crate::websearch::{self, LuiConfigResponse, CONFIG_VERSION};
 
@@ -322,6 +323,70 @@ fn write_remote_websearch_skill(
     Ok(())
 }
 
+// ----------------------------------------------------------------------------
+// Remote pi helpers
+// ----------------------------------------------------------------------------
+
+/// Probe the remote for an existing pi models.json. Returns the file contents
+/// (empty if missing).
+fn fetch_remote_pi_models(target: &SshTarget) -> Result<String, String> {
+    let probe = r#"
+if [ -f ~/.pi/agent/models.json ]; then
+  cat ~/.pi/agent/models.json
+else
+  echo -n ""
+fi"#;
+    let out = ssh_run(target, &[probe], None)?;
+    Ok(out.trim().to_string())
+}
+
+/// If this is lui's first-ever touch of the remote pi models.json (no
+/// `providers.lui` entry), copy it to `models.json.luibackup`. Best-effort.
+fn maybe_backup_remote_pi_models(target: &SshTarget, existing_text: &str) {
+    if !pi_config::pi_needs_backup(existing_text) {
+        return;
+    }
+    let cmd = "cp -n ~/.pi/agent/models.json ~/.pi/agent/models.json.luibackup 2>/dev/null || true";
+    let _ = ssh_run(target, &[cmd], None);
+}
+
+/// Write the pi models.json on the remote, creating ~/.pi/agent if needed.
+fn write_remote_pi_models(target: &SshTarget, contents: &str) -> Result<(), String> {
+    let cmd = "mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json";
+    ssh_run(target, &[&cmd], Some(contents.as_bytes()))?;
+    Ok(())
+}
+
+/// Write (or remove) the lui-web-search SKILL.md for pi on the remote.
+fn write_remote_pi_websearch_skill(
+    target: &SshTarget,
+    remote_web_port: u16,
+    disabled: bool,
+) -> Result<(), String> {
+    let skill_dir = "~/.pi/agent/skills/lui-web-search";
+    let skill_path = format!("{}/SKILL.md", skill_dir);
+
+    if disabled {
+        let _ = ssh_run(
+            target,
+            &[&format!(
+                "rm -f {} && rmdir {} 2>/dev/null || true",
+                skill_path, skill_dir
+            )],
+            None,
+        );
+        return Ok(());
+    }
+
+    let body = pi_config::render_pi_websearch_skill(remote_web_port);
+    ssh_run(
+        target,
+        &[&format!("mkdir -p {} && cat > {}", skill_dir, skill_path)],
+        Some(body.as_bytes()),
+    )?;
+    Ok(())
+}
+
 fn print_share_success(
     target: &SshTarget,
     effective: &ServerConfig,
@@ -413,6 +478,23 @@ pub fn setup_share(target: &SshTarget, config: &ServerConfig) -> Result<(), Stri
 
         write_remote_opencode_config(target, &basename, &contents)?;
         write_remote_websearch_skill(target, remote_web, config.websearch_disabled)?;
+    }
+
+    if config.harness_pi {
+        let remote_models = fetch_remote_pi_models(target)?;
+        maybe_backup_remote_pi_models(target, &remote_models);
+
+        let base_url = format!("http://localhost:{}", remote_llama);
+        let model_name = derive_model_name(config);
+        let contents = pi_config::update_pi_models_json(
+            &remote_models,
+            &model_name,
+            &base_url,
+            config.ctx_size,
+        )?;
+
+        write_remote_pi_models(target, &contents)?;
+        write_remote_pi_websearch_skill(target, remote_web, config.websearch_disabled)?;
     }
 
     print_share_success(target, config, remote_llama, remote_web);
@@ -648,6 +730,36 @@ pub async fn setup_use(target: &UseTarget, config: &ServerConfig) -> Result<(), 
             lui_cfg.ctx_size,
         )?;
         write_local_websearch_skill(local_web)?;
+    }
+
+    if config.harness_pi {
+        let base_url = format!("http://{}:{}", target.host, lui_cfg.llama_port);
+        let models_path = pi_config::pi_models_json_path();
+        let existing = std::fs::read_to_string(&models_path).unwrap_or_default();
+
+        if pi_config::pi_needs_backup(&existing) {
+            let mut backup = models_path.as_os_str().to_os_string();
+            backup.push(".luibackup");
+            let backup = std::path::PathBuf::from(backup);
+            if !backup.exists() {
+                let _ = std::fs::write(&backup, &existing);
+            }
+        }
+
+        let contents = pi_config::update_pi_models_json(
+            &existing,
+            &lui_cfg.model_name,
+            &base_url,
+            lui_cfg.ctx_size,
+        )?;
+        if let Some(parent) = models_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&models_path, &contents) {
+            eprintln!("Warning: failed to write {}: {}", models_path.display(), e);
+        }
+
+        pi_config::update_pi_websearch_skill(local_web, false);
     }
 
     // In-process bsearch server. We synthesize a minimal ServerState just
