@@ -1610,7 +1610,6 @@ async fn main() {
         web_port,
         Some(proc.state.clone()),
         local_setup_url,
-        false,
     );
 
     // Monitor child process exit in background

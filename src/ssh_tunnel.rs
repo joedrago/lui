@@ -688,12 +688,11 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
     print_use_banner(target, &lui_cfg, &llama_base_url, local_web);
 
     // Render the server's UI by polling its `/data`. We pass `Some(state)`
-    // for the client's in-process bsearch ServerState — the log ring is
-    // empty (no llama-server feeding it) but `websearch_total` and
-    // `active_searches` reflect the user's opencode-driven searches through
-    // *our* bsearch, which is what they care about. The `remote: true`
-    // flag tells Display to render the Server Log panel as "Not available
-    // in remote mode" instead of an empty void. The bookmarklet URL is
+    // for the client's in-process bsearch ServerState — `websearch_total`
+    // and `active_searches` reflect the user's opencode-driven searches
+    // through *our* bsearch, which is what they care about. The server's
+    // log lines now come via `/data` so the Server Log panel works in
+    // remote mode too. The bookmarklet URL is
     // this client's own bsearch (8081 by convention), not the server's —
     // bookmarklets live in the browser the user is sitting at.
     let local_setup_url = Some(format!("http://127.0.0.1:{}/setup", local_web));
@@ -702,7 +701,6 @@ pub async fn setup_use(target: &UseTarget) -> Result<(), String> {
         target.http_port,
         Some(state.clone()),
         local_setup_url,
-        true,
     );
 
     // Display.run owns the screen and exits on Ctrl-C / 'q' / the server

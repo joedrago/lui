@@ -53,16 +53,10 @@ pub struct Display {
     /// The ServerState backing this renderer's *local* HTTP server. In
     /// local mode it's the server's own state (log ring, websearch counts,
     /// the lot). In `--remote` mode it's the client's in-process bsearch
-    /// state — log ring is always empty, but websearch counts reflect
-    /// opencode's searches through our local bsearch (which is what the
-    /// user cares about; the remote server's counts are meaningless when
-    /// opencode runs on this machine).
+    /// state — websearch counts reflect opencode's searches through our
+    /// local bsearch (which is what the user cares about; the remote
+    /// server's counts are meaningless when opencode runs on this machine).
     local_state: Option<Arc<Mutex<ServerState>>>,
-    /// True when this Display is watching a different machine's server over
-    /// HTTP. Controls the Server Log panel: in client mode we can't
-    /// populate the local log ring from the remote's llama-server output,
-    /// so the panel shows a placeholder instead of an empty void.
-    remote: bool,
     /// URL of the bookmarklet `/setup` page the user should open in their
     /// *local* browser. Always a 127.0.0.1 URL — browser-mediated search
     /// is a this-machine-has-a-user concern, not a server-side concern. `None`
@@ -137,13 +131,11 @@ impl Display {
         snapshot_port: u16,
         local_state: Option<Arc<Mutex<ServerState>>>,
         local_setup_url: Option<String>,
-        remote: bool,
     ) -> Self {
         Display {
             snapshot_host,
             snapshot_port,
             local_state,
-            remote,
             local_setup_url,
             start_time: Instant::now(),
         }
@@ -359,7 +351,7 @@ impl Display {
             self.render_source(&mut t, snap);
             t.newline();
 
-            self.render_log(&mut t);
+            Display::render_log(snap, &mut t);
             t.clear_rest();
             t.flush();
             return;
@@ -763,7 +755,7 @@ impl Display {
 
         // Server log -- fills remaining space
         t.newline();
-        self.render_log(&mut t);
+        Display::render_log(snap, &mut t);
         t.clear_rest();
         t.flush();
     }
@@ -932,7 +924,7 @@ impl Display {
         t.newline();
     }
 
-    fn render_log(&self, t: &mut TermBuf) {
+    fn render_log(snap: &UiSnapshot, t: &mut TermBuf) {
         let log_prefix = "  ── Server Log ";
         let log_header = format!(
             "{}{}",
@@ -947,26 +939,20 @@ impl Display {
         );
         t.newline();
 
-        // Log ring is the llama-server's stdout/stderr, which only exists
-        // on the server. In `--remote` mode we have a local_state (for the
-        // client's own bsearch counts) but no llama-server feeding its
-        // log_lines, so show a placeholder rather than an empty void.
-        if self.remote || self.local_state.is_none() {
+        let show = t.remaining().saturating_sub(1).max(1);
+        if snap.log_lines.is_empty() {
             let _ = queue!(
                 t.stdout,
                 Print("  "),
                 SetForegroundColor(Color::DarkGrey),
-                Print("Not available in remote mode"),
+                Print("(no log lines yet)"),
                 ResetColor
             );
             t.newline();
             return;
         }
 
-        let state = self.local_state.as_ref().unwrap();
-        let st = state.lock().unwrap();
-        let show = t.remaining().saturating_sub(1).max(1);
-        let lines: Vec<&String> = st.log_lines.iter().collect();
+        let lines: Vec<&String> = snap.log_lines.iter().collect();
         let start = lines.len().saturating_sub(show);
         for line in &lines[start..] {
             let display = truncate(line, t.width.saturating_sub(4));

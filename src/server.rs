@@ -25,7 +25,7 @@ const WARNING_TTL: Duration = Duration::from_secs(5 * 60);
 /// Wire-format version for `/data`. Bump on breaking changes; additive
 /// fields (with `#[serde(default)]` on the reader side) don't require a
 /// bump. Kept so a client renderer can refuse an incompatible server.
-pub const UI_SNAPSHOT_VERSION: u32 = 2;
+pub const UI_SNAPSHOT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct SlotInfo {
@@ -187,13 +187,10 @@ impl ServerState {
     }
 }
 
-/// Wire-format snapshot of the live state the UI needs to render its upper
-/// sections (everything above the Server Log). Built from `ServerState` on
-/// each `/data` request; the server-side log ring is deliberately not
-/// included because the Display renders logs from its local `ServerState`
-/// directly (they're large and update far faster than the 4 Hz render tick).
+/// Wire-format snapshot of the live state the UI needs to render.
+/// Built from `ServerState` on each `/data` request.
 ///
-/// A client renderer pointed at a server's `/data` gets the full upper UI from
+/// A client renderer pointed at a server's `/data` gets the full UI from
 /// this struct — that's the motivation for replacing `Instant` with
 /// `processing_elapsed_ms` and carrying `uptime_seconds` explicitly instead
 /// of computing it on the renderer side.
@@ -267,6 +264,11 @@ pub struct UiSnapshot {
     /// include it in every snapshot so the renderer has a single source of
     /// truth per frame.
     pub config: ConfigSummary,
+
+    /// Tail of the server log ring (up to 40 lines, newest first, each
+    /// truncated to 150 chars). Used by the Server Log panel in both local
+    /// and remote mode.
+    pub log_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,6 +390,22 @@ impl ServerState {
         let mut active_searches: Vec<String> = self.active_searches.values().cloned().collect();
         active_searches.sort();
 
+        // Tail of the log ring: newest first, up to 100 lines, each
+        // truncated to 300 chars to keep the wire payload reasonable.
+        let log_lines: Vec<String> = self
+            .log_lines
+            .iter()
+            .rev()
+            .take(100)
+            .map(|l| {
+                if l.len() > 300 {
+                    l[..300].to_string()
+                } else {
+                    l.clone()
+                }
+            })
+            .collect();
+
         UiSnapshot {
             version: UI_SNAPSHOT_VERSION,
 
@@ -445,6 +463,10 @@ impl ServerState {
             warnings: self.warnings.iter().map(|(_, w)| w.clone()).collect(),
 
             config: config.clone(),
+
+            // Tail of the log ring: newest first, up to 40 lines, each
+            // truncated to 150 chars to keep the wire payload reasonable.
+            log_lines,
         }
     }
 }
