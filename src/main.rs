@@ -1112,20 +1112,23 @@ fn print_current_config() {
         "--threads-batch <n>",
         s.threads_batch.is_none(),
     );
-    let ctk = s.cache_type_k.clone().unwrap_or_else(|| "f16".to_string());
-    print_setting(
-        "KV type (K)",
-        &ctk,
-        "--cache-type-k <t>",
-        s.cache_type_k.is_none(),
-    );
-    let ctv = s.cache_type_v.clone().unwrap_or_else(|| "f16".to_string());
-    print_setting(
-        "KV type (V)",
-        &ctv,
-        "--cache-type-v <t>",
-        s.cache_type_v.is_none(),
-    );
+    // Only show KV type settings when explicitly set.
+    if let Some(ref ctk) = s.cache_type_k {
+        print_setting(
+            "KV type (K)",
+            ctk,
+            "--cache-type-k <t>",
+            false,
+        );
+    }
+    if let Some(ref ctv) = s.cache_type_v {
+        print_setting(
+            "KV type (V)",
+            ctv,
+            "--cache-type-v <t>",
+            false,
+        );
+    }
     let (swa_str, swa_is_default) = match s.swa_full {
         Some(true) => ("on (forced)", false),
         Some(false) => ("off (forced)", false),

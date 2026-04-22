@@ -242,14 +242,6 @@ pub const DEFAULT_BATCH_SIZE: u32 = 512;
 
 // KV cache element types. llama.cpp defaults both to f16; q8_0 halves VRAM
 // usage with essentially no quality impact (~0.002-0.05 ppl on modern GQA
-// models) as long as flash attention is on — which lui forces via `-fa on`.
-// We emit these as the llama-server value when the user hasn't overridden,
-// so a later default change propagates without touching stored lui.toml
-// files. The user can restore llama-server's own default with
-// `--ctk f16 --ctv f16`.
-pub const DEFAULT_CACHE_TYPE_K: &str = "q8_0";
-pub const DEFAULT_CACHE_TYPE_V: &str = "q8_0";
-
 fn default_ctx_size() -> u32 {
     0
 }
@@ -376,11 +368,10 @@ pub fn format_tuning(cfg: &ServerConfig) -> String {
         parts.push(format!("ubatch={}", ub));
     }
 
-    // Always surface the effective KV types so the tuning line shows what
-    // llama-server is actually running with — built-in default or override.
-    let ctk = cfg.cache_type_k.as_deref().unwrap_or(DEFAULT_CACHE_TYPE_K);
-    let ctv = cfg.cache_type_v.as_deref().unwrap_or(DEFAULT_CACHE_TYPE_V);
-    parts.push(format!("KV={}/{}", ctk, ctv));
+    // Only include KV types when the user explicitly set them.
+    if let (Some(ctk), Some(ctv)) = (&cfg.cache_type_k, &cfg.cache_type_v) {
+        parts.push(format!("KV={}/{}", ctk, ctv));
+    }
     let default_b = cfg
         .ubatch_size
         .map(|ub| ub.max(DEFAULT_BATCH_SIZE))
