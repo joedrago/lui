@@ -10,7 +10,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{format_source, websearch_port};
+use crate::settings::setting::PassthroughMode;
 use crate::settings::store::Effective;
+use crate::settings::value::Value;
 
 const LOG_RING_SIZE: usize = 200;
 const MAX_RECENT_REQUESTS: usize = 3;
@@ -676,12 +678,50 @@ pub fn build_args(eff: &Effective) -> Vec<String> {
     }
 
     // Everything else — sampler knobs, KV cache types, batch sizes, swa,
-    // chat-template-kwargs, post-`--` extras — is produced by walking the
+    // chat-template-kwargs, post-`--` extras — flows from walking the
     // SettingsRegistry. Adding a new passthrough flag is one declaration
-    // in `src/settings/registry.rs`; no changes here.
-    crate::settings::build_args::append_passthrough(eff, eff.registry, &mut args);
+    // in `src/settings/registry.rs`; this loop picks it up for free.
+    for s in eff.registry.settings() {
+        match s.passthrough {
+            PassthroughMode::None => {}
+            PassthroughMode::FlagValue => {
+                let Some(val) = eff.get(s.name) else { continue };
+                let Some(flag) = s.llama_flag else { continue };
+                args.push(flag.to_string());
+                args.push(format_passthrough_value(val));
+            }
+            PassthroughMode::BoolFlagIfTrue => {
+                if matches!(eff.get(s.name), Some(Value::Bool(true))) {
+                    if let Some(flag) = s.llama_flag {
+                        args.push(flag.to_string());
+                    }
+                }
+            }
+            PassthroughMode::LiteralTokens => {
+                // Append-semantics: global entries, then active-model entries.
+                // `extra_args` is the sole consumer today; any future
+                // StringArray setting with this mode gets the same treatment.
+                args.extend(eff.merged_string_array(s.name));
+            }
+        }
+    }
 
     args
+}
+
+/// Stringify a `Value` as llama-server would expect it on the argv.
+/// Integers and floats get their natural display; strings forward
+/// verbatim. Maps are serialised as a JSON object (llama-server's
+/// --chat-template-kwargs takes this shape). Bool and StringArray aren't
+/// `FlagValue`-valid — the registry should never route them here.
+fn format_passthrough_value(v: &Value) -> String {
+    match v {
+        Value::Integer(n) => n.to_string(),
+        Value::Float(f) => format!("{}", f),
+        Value::String(s) => s.clone(),
+        Value::Map(m) => toml_map_to_json_object(m).to_string(),
+        Value::Bool(_) | Value::StringArray(_) => String::new(),
+    }
 }
 
 pub fn spawn_server(

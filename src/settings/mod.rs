@@ -8,7 +8,6 @@
 //! output, argv parser, TOML IO, llama-server passthrough, UI payload —
 //! walks the `Registry` rather than naming settings individually.
 
-pub mod build_args;
 pub mod help;
 pub mod migrate;
 pub mod registry;
