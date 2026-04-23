@@ -493,6 +493,29 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .help(&["Logical batch size (llama-server -b)"]),
     );
     reg.push(
+        Setting::new("threads")
+            .short('t')
+            .long("threads")
+            .placeholder("N")
+            .kind(Integer)
+            .min(1)
+            .scope(Both)
+            .passthrough(FlagValue)
+            .llama_flag("-t")
+            .default(Value::Integer(
+                (std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+                    - 2)
+                .max(1) as i64,
+            ))
+            .section("SETTINGS")
+            .group("tuning")
+            .ui_label("Threads")
+            .ui_unset("auto")
+            .help(&["CPU threads for generation (llama-server -t)"]),
+    );
+    reg.push(
         Setting::new("threads_batch")
             .long("tb")
             .long_aliases(&["threads-batch"])
