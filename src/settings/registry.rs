@@ -604,7 +604,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .placeholder("on|off|auto")
             .kind(String)
             .scope(Both)
-            .default(Value::String("auto".to_string()))
             .passthrough(FlagValue)
             .llama_flag("--reasoning")
             .section("SETTINGS")
