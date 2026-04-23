@@ -49,6 +49,43 @@ pub struct SearchResult {
     pub snippet: String,
 }
 
+/// What `/bsearch` returns to the skill. Wrapping the array in an object
+/// lets the bookmarklet attach `warnings` — e.g. "the class-name fast
+/// path failed; the structural fallback was used" — so the model can
+/// surface drift back to the user without us having to watch server logs.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct SearchResponse {
+    pub results: Vec<SearchResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Shape accepted on POST /results. The current bookmarklet sends the
+/// structured form; we still accept a bare array so an older bookmarklet
+/// a user has in their bookmarks bar keeps working until they re-drag it.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ResultsPayload {
+    Structured {
+        results: Vec<SearchResult>,
+        #[serde(default)]
+        warnings: Vec<String>,
+    },
+    Bare(Vec<SearchResult>),
+}
+
+impl From<ResultsPayload> for SearchResponse {
+    fn from(p: ResultsPayload) -> Self {
+        match p {
+            ResultsPayload::Structured { results, warnings } => Self { results, warnings },
+            ResultsPayload::Bare(results) => Self {
+                results,
+                warnings: vec![],
+            },
+        }
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     server_state: Arc<Mutex<ServerState>>,
@@ -57,7 +94,7 @@ struct AppState {
     // The bookmarklet POSTs to /results?id=<id>, which fires the sender and
     // unblocks the tool call. std Mutex is fine — only held briefly to hash
     // a key in/out, never across an await.
-    pending: Arc<Mutex<HashMap<String, oneshot::Sender<Vec<SearchResult>>>>>,
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<SearchResponse>>>>,
     port: u16,
     config_info: LuiConfigResponse,
     /// When the server process started. Used by `/data` to serve a server-side
@@ -229,7 +266,7 @@ async fn handle_results_preflight() -> impl IntoResponse {
 async fn handle_results(
     State(state): State<AppState>,
     Query(rq): Query<ResultsQuery>,
-    Json(results): Json<Vec<SearchResult>>,
+    Json(payload): Json<ResultsPayload>,
 ) -> impl IntoResponse {
     // Try the bookmarklet-provided id first; if it's missing or unknown
     // (Google stripped the `lui` param), fall back to matching the pending
@@ -255,7 +292,7 @@ async fn handle_results(
             // If the receiver was dropped (timeout fired), tx.send returns
             // Err — that's fine, the bookmarklet still gets a 200 so it can
             // close the tab. We just discard the orphan results.
-            let _ = tx.send(results);
+            let _ = tx.send(payload.into());
             (StatusCode::OK, cors_headers(), "ok")
         }
         None => (
@@ -288,7 +325,7 @@ async fn handle_data(State(state): State<AppState>) -> Json<UiSnapshot> {
 async fn handle_bsearch(
     State(state): State<AppState>,
     Query(q): Query<SearchQuery>,
-) -> Result<Json<Vec<SearchResult>>, (StatusCode, String)> {
+) -> Result<Json<SearchResponse>, (StatusCode, String)> {
     let query = q.q.trim().to_string();
     if query.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "missing q".into()));
@@ -333,7 +370,7 @@ async fn handle_bsearch(
         .remove(&id);
 
     match outcome {
-        Ok(Ok(results)) => Ok(Json(results)),
+        Ok(Ok(response)) => Ok(Json(response)),
         Ok(Err(_)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             "result channel closed unexpectedly".into(),
@@ -382,6 +419,15 @@ async fn handle_setup(State(state): State<AppState>) -> HtmlResponse<String> {
 /// Reads the rendered DOM (so we get whatever Google's JS produced —
 /// no fragile HTML scraping), POSTs to lui, falls back to clipboard
 /// if the POST is blocked (CSP / mixed content / lui not running).
+///
+/// Two-tier selector strategy. The *fast path* uses Google's current
+/// result-container class names (`div.g`, `div.tF2Cxc`, `div.MjjYud`).
+/// Those class names rotate every few months. The *structural fallback*
+/// walks from every `<h3>` up to an enclosing `<a>` — "h3 inside a" has
+/// been the shape of an organic result for ~20 years. When the fallback
+/// fires it appends to `warnings`, which rides the response all the way
+/// to the model so the drift surfaces as a user-visible note instead of
+/// hiding in a log file.
 fn bookmarklet_js(port: u16) -> String {
     // Note: kept readable here for maintenance; URL-encoded once at
     // render time below.
@@ -391,41 +437,69 @@ fn bookmarklet_js(port: u16) -> String {
     var params = new URL(location.href).searchParams;
     var id = params.get('lui') || '';
     var q = params.get('q') || '';
-    var nodes = document.querySelectorAll('div.g, div.tF2Cxc, div.MjjYud');
     var results = [];
+    var warnings = [];
     var seen = {{}};
-    nodes.forEach(function(node) {{
-      var h3 = node.querySelector('h3');
-      if (!h3) return;
-      var a = node.querySelector('a[href^="http"]');
-      if (!a) return;
+    function pushResult(h3, a, container) {{
+      if (!h3 || !a) return;
       var url = a.href;
-      if (seen[url]) return;
+      if (!url || seen[url]) return;
       seen[url] = 1;
-      var snipEl = node.querySelector('div.VwiC3b, span.aCOpRe, div[data-sncf]');
+      var scope = container || a.parentElement || document;
+      var snipEl = scope.querySelector('div.VwiC3b, span.aCOpRe, div[data-sncf]');
       results.push({{
         title: (h3.innerText || '').trim(),
         url: url,
-        snippet: snipEl ? (snipEl.innerText || '').trim() : ''
+        snippet: snipEl && !snipEl.contains(h3) ? (snipEl.innerText || '').trim() : ''
       }});
+    }}
+    // Fast path: Google's current result-container class names.
+    document.querySelectorAll('div.g, div.tF2Cxc, div.MjjYud').forEach(function(node) {{
+      pushResult(node.querySelector('h3'), node.querySelector('a[href^="http"]'), node);
     }});
+    var fastCount = results.length;
+    // Structural fallback. A normal SERP has 10+ organic results; if we
+    // got fewer than 3 the fast-path classes are probably stale.
+    if (fastCount < 3) {{
+      document.querySelectorAll('h3').forEach(function(h3) {{
+        var a = h3.closest('a[href^="http"]');
+        if (!a) return;
+        var container = null;
+        var n = a.parentElement;
+        for (var i = 0; i < 5 && n; i++) {{
+          if (n.querySelector('div.VwiC3b, span.aCOpRe, div[data-sncf]')) {{ container = n; break; }}
+          n = n.parentElement;
+        }}
+        pushResult(h3, a, container);
+      }});
+      var added = results.length - fastCount;
+      if (fastCount === 0 && added > 0) {{
+        warnings.push('lui-grab: the fast-path Google selectors (div.g, div.tF2Cxc, div.MjjYud) matched no results; the structural fallback recovered ' + added + '. The class names in lui\'s websearch.rs likely need updating.');
+      }} else if (added > 0) {{
+        warnings.push('lui-grab: the fast-path Google selectors matched only ' + fastCount + ' of ' + results.length + ' results; the structural fallback filled in the rest. The class names in lui\'s websearch.rs may be partially out of date.');
+      }}
+      // If added === 0, either it was a low-hit query or neither path
+      // found anything; the empty-results alert below catches the
+      // zero-total case.
+    }}
     if (results.length === 0) {{
       alert('lui-grab: found no results on this page. Are you on a Google search results page?');
       return;
     }}
+    var payload = {{ results: results, warnings: warnings }};
     fetch('http://127.0.0.1:{port}/results?id=' + encodeURIComponent(id) + '&q=' + encodeURIComponent(q), {{
       method: 'POST',
       headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify(results)
+      body: JSON.stringify(payload)
     }}).then(function(r) {{
       if (r.ok) {{
-        document.title = '\u2713 lui-grab: ' + results.length + ' results sent';
+        document.title = '\u2713 lui-grab: ' + results.length + ' results sent' + (warnings.length ? ' (' + warnings.length + ' warning)' : '');
         try {{ window.close(); }} catch (e) {{}}
       }} else {{
         alert('lui-grab: server returned ' + r.status + ' (search may have timed out)');
       }}
     }}).catch(function(err) {{
-      navigator.clipboard.writeText(JSON.stringify(results, null, 2))
+      navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
         .then(function() {{ alert('lui-grab: server unreachable, ' + results.length + ' results copied to clipboard'); }})
         .catch(function() {{ alert('lui-grab failed: ' + err); }});
     }});
@@ -438,10 +512,10 @@ fn bookmarklet_js(port: u16) -> String {
 
 fn setup_page_html(port: u16) -> String {
     let js = bookmarklet_js(port);
-    // Minify the JS by stripping leading whitespace per line; bookmarklets
-    // don't need the indentation and shorter URLs are friendlier in the
-    // bookmark bar.
-    let minified: String = js.lines().map(|l| l.trim()).collect::<Vec<_>>().join("");
+    // Minify the JS by stripping leading whitespace per line. Keep the
+    // newlines: joining with `""` would glue a `// line comment` onto the
+    // next line and silently comment out the rest of the program.
+    let minified: String = js.lines().map(|l| l.trim()).collect::<Vec<_>>().join("\n");
     let href = format!("javascript:{}", urlencoding::encode(&minified));
     // Manually escape `"` for embedding the href in an HTML attribute. The
     // urlencoded JS contains no `"` itself.
@@ -485,4 +559,40 @@ fn setup_page_html(port: u16) -> String {
 </html>
 "##
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: an earlier minify step joined with `""`, which glued
+    /// `// line comment` onto the next line and silently commented out
+    /// the rest of the program. Now we join with `\n` and check that
+    /// the minified output actually parses.
+    #[test]
+    fn bookmarklet_js_minifies_to_valid_syntax() {
+        let js = bookmarklet_js(8080);
+        let minified: String = js.lines().map(|l| l.trim()).collect::<Vec<_>>().join("\n");
+        let mut path = std::env::temp_dir();
+        path.push(format!("lui-bookmarklet-{}.js", std::process::id()));
+        std::fs::write(&path, &minified).unwrap();
+        let out = match std::process::Command::new("node")
+            .arg("--check")
+            .arg(&path)
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => {
+                eprintln!("node not available; skipping syntax check");
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+        };
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            out.status.success(),
+            "node --check failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }

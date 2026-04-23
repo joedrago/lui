@@ -337,18 +337,30 @@ user to click the bookmarklet. On timeout you'll get HTTP 504.
 
 ## Response
 
-JSON array of objects:
+JSON object:
 
 ```json
-[
-  {{"title": "...", "url": "https://...", "snippet": "..."}}
-]
+{{
+  "results": [
+    {{"title": "...", "url": "https://...", "snippet": "..."}}
+  ],
+  "warnings": ["..."]
+}}
 ```
+
+`results` is always present. `warnings` is present only when the
+bookmarklet had something to tell you — for example, when Google's
+CSS class names rotated and the bookmarklet had to fall back to a
+structural selector to find results. **If `warnings` is non-empty,
+surface each warning verbatim to the user** at the end of your reply
+(under a short heading like "Note from lui-grab:"), on top of your
+normal answer. The user is the only one who can act on it (usually
+by updating lui).
 
 An HTTP 504 means the user did not click the bookmarklet in time
 (probably they were AFK or the browser tab got buried). Other 4xx/5xx
-or an empty array means the search failed — say so plainly rather than
-fabricating answers.
+or an empty `results` array means the search failed — say so plainly
+rather than fabricating answers.
 
 ## How to invoke
 
