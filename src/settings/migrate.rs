@@ -53,10 +53,7 @@ fn flip_websearch_sense(table: &mut toml::value::Table) -> bool {
     let Some(toml::Value::Boolean(disabled)) = server_tbl.remove("websearch_disabled") else {
         return false;
     };
-    server_tbl.insert(
-        "websearch".to_string(),
-        toml::Value::Boolean(!disabled),
-    );
+    server_tbl.insert("websearch".to_string(), toml::Value::Boolean(!disabled));
     true
 }
 

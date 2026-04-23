@@ -34,10 +34,7 @@ pub fn emit_help(reg: &Registry) -> String {
 
     for section in SECTIONS {
         let in_section: Vec<&Row> = rows.iter().filter(|r| r.section == section.name).collect();
-        if in_section.is_empty()
-            && section.extra_rows.is_empty()
-            && section.postamble.is_empty()
-        {
+        if in_section.is_empty() && section.extra_rows.is_empty() && section.postamble.is_empty() {
             continue;
         }
         out.push_str(section.title);
@@ -191,4 +188,3 @@ fn signature_positive(s: &Setting) -> String {
     }
     out
 }
-

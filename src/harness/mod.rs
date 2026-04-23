@@ -92,12 +92,7 @@ pub fn arr(v: Vec<CstInputValue>) -> CstInputValue {
     CstInputValue::Array(v)
 }
 pub fn obj<I: IntoIterator<Item = (&'static str, CstInputValue)>>(props: I) -> CstInputValue {
-    CstInputValue::Object(
-        props
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect(),
-    )
+    CstInputValue::Object(props.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
 }
 
 /// Pick the local config file path for a harness: first existing
@@ -413,4 +408,3 @@ Be deliberate about when to search:
 "#
     )
 }
-

@@ -43,8 +43,7 @@ pub const SECTIONS: &[Section] = &[
         preamble: "",
         extra_rows: &[ExtraRow {
             signature: "<NAME>",
-            description:
-                "Active model (alias or literal key). New keys need -m or --hf.",
+            description: "Active model (alias or literal key). New keys need -m or --hf.",
         }],
         postamble: "",
     },
@@ -206,8 +205,7 @@ impl Registry {
     /// Within a section, the order matches declaration order.
     pub fn iter_by_section(&self) -> impl Iterator<Item = &Setting> {
         // Group into known sections, then trailing unknowns.
-        let mut buckets: Vec<Vec<&Setting>> =
-            (0..SECTIONS.len() + 1).map(|_| Vec::new()).collect();
+        let mut buckets: Vec<Vec<&Setting>> = (0..SECTIONS.len() + 1).map(|_| Vec::new()).collect();
         for s in &self.settings {
             let idx = SECTIONS
                 .iter()
@@ -317,9 +315,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .scope(Ephemeral)
             .section("SCOPE")
             .no_form(false)
-            .help(&[
-                "Subsequent settings update [models.\"<active-model>\"] only",
-            ]),
+            .help(&["Subsequent settings update [models.\"<active-model>\"] only"]),
     );
 
     // ---------- SETTINGS ----------
@@ -682,9 +678,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .max(65535)
             .scope(Global)
             .section("MACHINE")
-            .help(&[
-                "Port for the local web-search endpoint (default: llama port + 1)",
-            ]),
+            .help(&["Port for the local web-search endpoint (default: llama port + 1)"]),
     );
     reg.push(
         Setting::new("allow_vram_oversubscription")

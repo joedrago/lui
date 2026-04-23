@@ -13,9 +13,7 @@ mod websearch;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use config::{
-    config_path, derive_model_name, load_config, model_key, save_config, websearch_port,
-};
+use config::{config_path, derive_model_name, load_config, model_key, save_config, websearch_port};
 use display::Display;
 use server::{spawn_server, ConfigSummary};
 use settings::registry::Registry;
@@ -246,7 +244,9 @@ fn parse_args(config: &mut Config) -> RunOpts {
         if v.is_empty() {
             config.global.unset("extra_args");
         } else {
-            config.global.set("extra_args", SettingValue::StringArray(v));
+            config
+                .global
+                .set("extra_args", SettingValue::StringArray(v));
         }
     }
     for (k, v) in new_model_extras {
@@ -495,10 +495,7 @@ fn take_string(parser: &mut lexopt::Parser, flag: &str) -> String {
 /// Assemble the universal inputs every harness apply fn takes. `ctx_size`
 /// is explicit because the post-ready task passes llama-server's reported
 /// value (which may differ from what the user configured).
-fn build_harness_inputs(
-    eff: &settings::store::Effective,
-    ctx_size: u32,
-) -> harness::HarnessInputs {
+fn build_harness_inputs(eff: &settings::store::Effective, ctx_size: u32) -> harness::HarnessInputs {
     let port = eff.get_i64("port").unwrap_or(8080) as u16;
     harness::HarnessInputs {
         model_name: derive_model_name(eff),
@@ -613,7 +610,11 @@ fn print_current_config() {
     );
 
     let mut print_setting = |label: &str, value: &str, flag: &str, is_default: bool| {
-        let label_color = if is_default { Color::DarkGrey } else { lavender };
+        let label_color = if is_default {
+            Color::DarkGrey
+        } else {
+            lavender
+        };
         let value_color = if is_default {
             Color::DarkGrey
         } else {
@@ -743,8 +744,7 @@ fn print_current_config() {
                 if setting.name == "type" || !store.contains(setting.name) {
                     continue;
                 }
-                let Some(display) = render_config_row_value(&per_model_eff, setting)
-                else {
+                let Some(display) = render_config_row_value(&per_model_eff, setting) else {
                     continue;
                 };
                 let label = setting.derived_ui_label();
@@ -1081,8 +1081,7 @@ async fn main() {
     // thing); we pass `None` when websearch is disabled so the renderer
     // omits that header row.
     let websearch = effective.get_bool("websearch").unwrap_or(true);
-    let local_setup_url =
-        websearch.then(|| format!("http://127.0.0.1:{}/setup", web_port));
+    let local_setup_url = websearch.then(|| format!("http://127.0.0.1:{}/setup", web_port));
     let display = Display::new(
         "127.0.0.1".to_string(),
         web_port,

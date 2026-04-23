@@ -136,11 +136,8 @@ pub struct Setting {
 
 /// Formatter hook for UI rendering of a setting's value. See
 /// `Setting::ui_format`.
-pub type UiFormatter = fn(
-    value: Option<&Value>,
-    eff: &Effective,
-    setting: &Setting,
-) -> Option<String>;
+pub type UiFormatter =
+    fn(value: Option<&Value>, eff: &Effective, setting: &Setting) -> Option<String>;
 
 impl Setting {
     pub fn new(name: &'static str) -> Self {
@@ -319,11 +316,7 @@ pub fn format_negative_as_all(
 
 /// Context-size renderer — `0` is the "unset" sentinel and maps to `None`
 /// so the caller falls back to the setting's `ui_unset` phrase.
-pub fn format_nonzero_int(
-    value: Option<&Value>,
-    _eff: &Effective,
-    _s: &Setting,
-) -> Option<String> {
+pub fn format_nonzero_int(value: Option<&Value>, _eff: &Effective, _s: &Setting) -> Option<String> {
     match value {
         Some(Value::Integer(0)) | None => None,
         Some(Value::Integer(n)) => Some(n.to_string()),
@@ -334,11 +327,7 @@ pub fn format_nonzero_int(
 /// Presence-only bool with an off-form: `true` → label alone (no `=value`
 /// suffix), `false` → `label=off`. Matches llama-server's `--swa-full`
 /// surface where mere presence flips it on.
-pub fn format_bare_or_off(
-    value: Option<&Value>,
-    _eff: &Effective,
-    _s: &Setting,
-) -> Option<String> {
+pub fn format_bare_or_off(value: Option<&Value>, _eff: &Effective, _s: &Setting) -> Option<String> {
     match value {
         Some(Value::Bool(true)) => Some(String::new()),
         Some(Value::Bool(false)) => Some("off".to_string()),

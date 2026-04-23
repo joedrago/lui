@@ -55,12 +55,7 @@ fn needs_backup(existing: &str) -> bool {
     providers.get("lui").is_none()
 }
 
-fn set_providers_lui(
-    root_obj: &CstObject,
-    model_name: &str,
-    base_url: &str,
-    ctx_size: u32,
-) {
+fn set_providers_lui(root_obj: &CstObject, model_name: &str, base_url: &str, ctx_size: u32) {
     let providers = root_obj.object_value_or_set("providers");
 
     let lui_value = obj([

@@ -160,8 +160,8 @@ impl ServerState {
         // Suppress "CUDA Graph id N reused" lines — they're informational
         // reuse notifications that clutter the log with no diagnostic value.
         static CUDA_GRAPH_RE: OnceLock<Regex> = OnceLock::new();
-        let re = CUDA_GRAPH_RE
-            .get_or_init(|| Regex::new(r"^\s*CUDA Graph id \d+ reused\s*$").unwrap());
+        let re =
+            CUDA_GRAPH_RE.get_or_init(|| Regex::new(r"^\s*CUDA Graph id \d+ reused\s*$").unwrap());
         if re.is_match(&line) {
             return;
         }
@@ -405,9 +405,7 @@ fn render_value(
 /// Default renderer for scalar values. Composite kinds (`Map`,
 /// `StringArray`) don't have a sensible single-row form here — settings
 /// that need one provide a `ui_format`.
-fn generic_value_display(
-    value: Option<&crate::settings::value::Value>,
-) -> Option<String> {
+fn generic_value_display(value: Option<&crate::settings::value::Value>) -> Option<String> {
     use crate::settings::value::Value;
     match value? {
         Value::Bool(b) => Some(b.to_string()),
@@ -417,7 +415,6 @@ fn generic_value_display(
         Value::StringArray(_) | Value::Map(_) => None,
     }
 }
-
 
 impl SlotInfo {
     fn to_snapshot(&self) -> SlotSnapshot {
@@ -730,10 +727,7 @@ fn format_passthrough_value(v: &Value) -> String {
     }
 }
 
-pub fn spawn_server(
-    eff: &Effective,
-    debug_log: Option<&str>,
-) -> Result<ServerProcess, String> {
+pub fn spawn_server(eff: &Effective, debug_log: Option<&str>) -> Result<ServerProcess, String> {
     let args = build_args(eff);
 
     let pty_system = native_pty_system();
@@ -761,9 +755,7 @@ pub fn spawn_server(
         .map_err(|e| format!("Failed to clone pty reader: {}", e))?;
 
     let state = Arc::new(Mutex::new(ServerState {
-        allow_vram_oversubscription: eff
-            .get_bool("allow_vram_oversubscription")
-            .unwrap_or(false),
+        allow_vram_oversubscription: eff.get_bool("allow_vram_oversubscription").unwrap_or(false),
         ..ServerState::default()
     }));
 

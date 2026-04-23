@@ -82,12 +82,7 @@ fn preflight_ssh(target: &SshTarget) -> Result<(), String> {
     }
 }
 
-fn set_provider_lui(
-    root_obj: &CstObject,
-    model_name: &str,
-    llama_base_url: &str,
-    ctx_size: u32,
-) {
+fn set_provider_lui(root_obj: &CstObject, model_name: &str, llama_base_url: &str, ctx_size: u32) {
     let provider = root_obj.object_value_or_set("provider");
 
     let model_entry = CstInputValue::Object(vec![(

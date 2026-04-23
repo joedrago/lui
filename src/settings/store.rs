@@ -198,11 +198,7 @@ impl<'a> Effective<'a> {
 
 /// Clamp a parsed integer to the setting's min/max. Returns Err(reason)
 /// so the caller can format `"--flag: value N out of range"` consistently.
-pub fn validate_integer(
-    registry: &Registry,
-    name: &str,
-    n: i64,
-) -> Result<i64, String> {
+pub fn validate_integer(registry: &Registry, name: &str, n: i64) -> Result<i64, String> {
     let Some(s) = registry.get(name) else {
         return Ok(n);
     };

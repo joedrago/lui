@@ -101,7 +101,10 @@ pub fn load_config_from(path: &Path) -> Config {
     let mut root_table: toml::value::Table = match contents.parse::<toml::Value>() {
         Ok(toml::Value::Table(t)) => t,
         Ok(_) => {
-            eprintln!("Warning: {} is not a toml table at the root", path.display());
+            eprintln!(
+                "Warning: {} is not a toml table at the root",
+                path.display()
+            );
             return Config::new();
         }
         Err(e) => {
@@ -118,11 +121,7 @@ pub fn load_config_from(path: &Path) -> Config {
         let backup = pre_migration_backup_path(path);
         if !backup.exists() {
             if let Err(e) = std::fs::write(&backup, &contents) {
-                eprintln!(
-                    "Warning: failed to write {}: {}",
-                    backup.display(),
-                    e
-                );
+                eprintln!("Warning: failed to write {}: {}", backup.display(), e);
             }
         }
         for w in &outcome.warnings {
@@ -196,10 +195,7 @@ pub fn save_config_to(config: &Config, path: &Path) {
         if !active.is_empty() {
             let entry = config.per_model.entry(active.clone()).or_default();
             if !entry.contains("type") {
-                entry.set(
-                    "type",
-                    Value::String(infer_model_type(&active).to_string()),
-                );
+                entry.set("type", Value::String(infer_model_type(&active).to_string()));
             }
         }
     }
@@ -298,15 +294,11 @@ fn emit_model_section(key: &str, entry: &toml::value::Table) -> String {
             out
         }
         Err(e) => {
-            eprintln!(
-                "Warning: failed to serialize [models.{:?}]: {}",
-                key, e
-            );
+            eprintln!("Warning: failed to serialize [models.{:?}]: {}", key, e);
             String::new()
         }
     }
 }
-
 
 /// The identity string used to key per-model overrides. Deliberately the
 /// EXACT text the user typed after `--hf` (or `-m`) — including org prefix
@@ -356,4 +348,3 @@ fn is_path_shaped(s: &str) -> bool {
     s.contains('/')
         && (s.starts_with('/') || s.starts_with("./") || s.starts_with('~') || s.ends_with(".gguf"))
 }
-
