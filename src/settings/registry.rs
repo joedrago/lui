@@ -667,7 +667,9 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long("avo")
             .kind(Bool)
             .scope(Global)
+            .default(Value::Bool(false))
             .section("MACHINE")
+            .ui_label("Allow VRAM Oversubscription")
             .help(&[
                 "Allow VRAM oversubscription (skip lui's abort on GPU over-budget)",
                 "Abort on VRAM oversubscription (default)",
@@ -695,8 +697,10 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long("harness-opencode-disable-prune")
             .kind(Bool)
             .scope(Global)
+            .default(Value::Bool(false))
             .no_form(false)
             .section("HARNESS")
+            .ui_label("Opencode: Disable Compaction Pruning")
             .help(&[
                 "Tell opencode not to prune tool outputs",
                 "(preserves llama-server prompt cache on",
