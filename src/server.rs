@@ -487,7 +487,12 @@ impl ServerState {
             .take(100)
             .map(|l| {
                 if l.len() > 300 {
-                    l[..300].to_string()
+                    let end = l
+                        .char_indices()
+                        .find(|(i, _)| *i >= 300)
+                        .map(|(i, _)| i)
+                        .unwrap_or(l.len());
+                    l[..end].to_string()
                 } else {
                     l.clone()
                 }
@@ -630,6 +635,7 @@ pub fn build_args(eff: &Effective) -> Vec<String> {
     args.push("--cache-reuse".to_string());
     args.push("256".to_string());
     args.push("-kvu".to_string());
+    args.push("--no-mmproj".to_string());
 
     // Model identity: `[server].active_model` names a per-model entry
     // whose `type` field decides between `-hf` and `-m`. Fallback path

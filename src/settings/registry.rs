@@ -591,6 +591,27 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--chat-template-kwargs")
             .section("SETTINGS"),
     );
+    // Reasoning switch: llama-server --reasoning [on|off|auto].
+    // Controls whether thinking/reasoning tags are used in the chat.
+    // auto = detect from template (default).
+    reg.push(
+        Setting::new("reasoning")
+            .long("reasoning")
+            .placeholder("on|off|auto")
+            .kind(String)
+            .scope(Both)
+            .default(Value::String("auto".to_string()))
+            .passthrough(FlagValue)
+            .llama_flag("--reasoning")
+            .section("SETTINGS")
+            .group("tuning")
+            .ui_label("Reasoning")
+            .ui_unset("auto")
+            .help(&[
+                "Reasoning/thinking in chat: on, off, or auto",
+                "(detect from template; default: auto)",
+            ]),
+    );
     // Extra args: post-`--` passthrough. Append semantics at resolve
     // time (global entries + active model's entries, concatenated). The
     // `ui_label` doubles as the "+N _label_" phrase on the tuning line.
