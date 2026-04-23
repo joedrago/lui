@@ -343,7 +343,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             // window" row, not the aggregated tuning line. Same for
             // gpu_layers.
             .ui_label("Context")
-            .ui_format(super::ui::format_nonzero_int)
+            .ui_format(super::setting::format_nonzero_int)
             .ui_unset("model default")
             .help(&["Context window (0 = model default)"]),
     );
@@ -360,7 +360,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("-ngl")
             .section("SETTINGS")
             .ui_label("GPU layers")
-            .ui_format(super::ui::format_negative_as_all)
+            .ui_format(super::setting::format_negative_as_all)
             .help(&["GPU layers (-1 = all)"]),
     );
     reg.push(
@@ -524,7 +524,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .section("SETTINGS")
             .group("tuning")
             .ui_label("cache-ram")
-            .ui_format(super::ui::format_mib)
+            .ui_format(super::setting::format_mib)
             .ui_unset("server default")
             .help(&["Host-memory prompt cache (llama-server --cache-ram)"]),
     );
@@ -572,7 +572,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .section("SETTINGS")
             .group("tuning")
             .ui_label("swa-full")
-            .ui_format(super::ui::format_bare_or_off)
+            .ui_format(super::setting::format_bare_or_off)
             .ui_unset("auto (SWA/hybrid detection at launch)")
             .help(&[
                 "Force --swa-full on",
@@ -602,7 +602,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .section("SETTINGS")
             .group("tuning")
             .ui_label("extra")
-            .ui_format(super::ui::format_count_aggregate),
+            .ui_format(super::setting::format_count_aggregate),
     );
 
     // ---------- MACHINE (global-only; rejected under --this) ----------

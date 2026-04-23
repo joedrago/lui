@@ -13,7 +13,6 @@ pub mod migrate;
 pub mod registry;
 pub mod setting;
 pub mod store;
-pub mod ui;
 pub mod value;
 
 #[allow(unused_imports)]
