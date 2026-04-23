@@ -317,7 +317,7 @@ async fn handle_data(State(state): State<AppState>) -> Json<UiSnapshot> {
     let uptime = state.start_time.elapsed();
     let snapshot = {
         let mut st = state.server_state.lock().unwrap();
-        st.to_snapshot(uptime, &state.config_summary, &state.setting_entries)
+        st.build_snapshot(uptime, &state.config_summary, &state.setting_entries)
     };
     Json(snapshot)
 }

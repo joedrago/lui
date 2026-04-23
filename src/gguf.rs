@@ -224,8 +224,8 @@ fn skip_array_elements(f: &mut std::fs::File, elem_type: u32, count: u64) -> io:
     let elem_size = match elem_type {
         0 | 1 | 7 => 1u64, // u8, i8, bool
         2 | 3 => 2,        // u16, i16
-        4 | 5 | 6 => 4,    // u32, i32, f32
-        10 | 11 | 12 => 8, // u64, i64, f64
+        4..=6 => 4,        // u32, i32, f32
+        10..=12 => 8,      // u64, i64, f64
         8 => {
             // Array of strings - read each one
             for _ in 0..count {

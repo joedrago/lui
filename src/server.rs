@@ -185,7 +185,7 @@ impl ServerState {
     }
 
     /// Drop any warning older than WARNING_TTL. Called from push_warning and
-    /// to_snapshot so the list is always fresh at both ingress and egress.
+    /// build_snapshot so the list is always fresh at both ingress and egress.
     pub fn prune_warnings(&mut self) {
         let now = Instant::now();
         self.warnings
@@ -438,7 +438,7 @@ impl ServerState {
     /// since the server process started — supplied by the caller because the
     /// lui HTTP server (not `ServerState`) owns that clock. `config` is
     /// the pre-formatted `ConfigSummary`, built once at spawn time.
-    pub fn to_snapshot(
+    pub fn build_snapshot(
         &mut self,
         uptime: Duration,
         config: &ConfigSummary,

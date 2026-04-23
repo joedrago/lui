@@ -257,7 +257,7 @@ impl Setting {
             return l.to_string();
         }
         let source = self.long.unwrap_or(self.name);
-        let spaced = source.replace('-', " ").replace('_', " ");
+        let spaced = source.replace(['-', '_'], " ");
         let mut chars = spaced.chars();
         match chars.next() {
             Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
