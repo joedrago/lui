@@ -7,7 +7,7 @@
 //! TOML IO, llama-server passthrough, UI payload — walks this registry
 //! rather than referring to settings by name.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::setting::{PassthroughMode, Scope, Setting};
 use super::value::{Value, ValueKind};
@@ -587,6 +587,10 @@ pub fn declare_all_settings(reg: &mut Registry) {
         Setting::new("chat_template_kwargs")
             .kind(Map)
             .scope(Both)
+            .default(Value::Map(BTreeMap::from([(
+                "preserve_thinking".to_string(),
+                toml::Value::Boolean(true),
+            )])))
             .passthrough(FlagValue)
             .llama_flag("--chat-template-kwargs")
             .section("SETTINGS"),
