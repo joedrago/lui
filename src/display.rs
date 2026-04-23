@@ -554,9 +554,18 @@ impl Display {
         };
         self.print_sub(&mut t, &ctx_display);
 
-        // Sampling (grey sub of Model) — only if any sampler was overridden.
-        if let Some(ref sampling) = snap.config.sampling {
-            self.print_sub(&mut t, sampling);
+        // Sampling (grey sub of Model) — only if any sampler was explicitly
+        // set. The renderer doesn't know which setting names belong to this
+        // group: it filters on the `group` tag the server-side walker
+        // embedded into each `SettingEntry`.
+        let sampling_parts: Vec<String> = snap
+            .settings
+            .iter()
+            .filter(|s| s.group.as_deref() == Some("sampling") && !s.is_default)
+            .map(format_setting_entry)
+            .collect();
+        if !sampling_parts.is_empty() {
+            self.print_sub(&mut t, &format!("sampling: {}", sampling_parts.join(" · ")));
         }
 
         // llamacpp + status
@@ -597,8 +606,19 @@ impl Display {
         // Bind (grey sub-line under llamacpp)
         self.print_sub(&mut t, &snap.config.bind_addr);
 
-        // Tuning (grey sub-line under llamacpp) — effective performance knobs.
-        self.print_sub(&mut t, &snap.config.tuning);
+        // Tuning (grey sub-line under llamacpp) — effective performance
+        // knobs. Every `tuning`-group entry lands here regardless of
+        // is_default; that matches legacy behavior where lui always showed
+        // `np`, `KV`, and `batch` even at their defaults.
+        let tuning_parts: Vec<String> = snap
+            .settings
+            .iter()
+            .filter(|s| s.group.as_deref() == Some("tuning"))
+            .map(format_setting_entry)
+            .collect();
+        if !tuning_parts.is_empty() {
+            self.print_sub(&mut t, &tuning_parts.join(" · "));
+        }
 
         // Performance section
         t.newline();
@@ -1113,6 +1133,19 @@ impl Display {
 
         println!();
         let _ = stdout.flush();
+    }
+}
+
+/// Render one `SettingEntry` as the `label=value` (or bare `label`) form
+/// used on the sampling and tuning sub-lines. The server-side walker has
+/// already done the hard work of resolving defaults, collapsing
+/// cache_type_k/v into a single KV row, formatting swa_full's bare / =off
+/// variants, and so on — the renderer just concatenates.
+fn format_setting_entry(s: &crate::server::SettingEntry) -> String {
+    if s.value.is_empty() {
+        s.display_label.clone()
+    } else {
+        format!("{}={}", s.display_label, s.value)
     }
 }
 

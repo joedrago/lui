@@ -1,86 +1,55 @@
-//! Pure text-in, text-out transformation of an opencode config (JSON or
-//! JSONC). Used by all three write paths:
-//!   - local `update_opencode_config`
-//!   - `--ssh` remote (pipes result over SSH)
-//!   - `--remote` client-side local write
-//!
-//! Surgical edits via `jsonc-parser`'s CST feature — comments, key order, and
-//! formatting of everything we don't touch are preserved. We only mutate our
-//! own managed keys: `model` (conditionally), `provider.lui`,
-//! `permission.bash["curl*http://127.0.0.1:<port>/*"]`, and optionally
-//! `compaction.prune`.
-//!
-//! `build_opencode_json` is gone — the "parse to serde_json::Value, mutate,
-//! re-serialize" path dropped comments on the floor and reordered keys, which
-//! destroyed elaborate hand-maintained `opencode.jsonc` files.
+// Copyright 2026 Joe Drago. All rights reserved.
+// SPDX-License-Identifier: BSD-2-Clause
+
+//! opencode harness: writes `~/.config/opencode/opencode.{jsonc,json}` and
+//! manages the `permission.bash` curl allowlist for lui's web-search port.
+//! Respects `harness_opencode_disable_prune` when set.
 
 use jsonc_parser::cst::{CstInputValue, CstObject, CstObjectProp, CstRootNode};
 use jsonc_parser::ParseOptions;
 use regex::Regex;
 
-// We'd like to use jsonc_parser's `json!` macro here, but it has an arm-order
-// issue in 0.32.3 that trips E0425 on object keys in some call contexts.
-// Build `CstInputValue` via the crate's `From` impls instead — equally safe,
-// no magic.
-fn s(v: impl Into<String>) -> CstInputValue {
-    CstInputValue::String(v.into())
-}
-fn b(v: bool) -> CstInputValue {
-    CstInputValue::Bool(v)
-}
-fn n(v: u32) -> CstInputValue {
-    CstInputValue::from(v)
-}
-fn arr(v: Vec<CstInputValue>) -> CstInputValue {
-    CstInputValue::Array(v)
-}
-fn obj<I: IntoIterator<Item = (&'static str, CstInputValue)>>(props: I) -> CstInputValue {
-    CstInputValue::Object(props.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
-}
+use super::{arr, b, n, obj, s, ConfigFile, Harness, HarnessInputs};
+use crate::settings::store::Effective;
+use crate::ssh_tunnel::{ssh_run, SshTarget};
 
-/// Parse `existing`, apply lui's managed edits, and return the new text. Empty
-/// input is treated as `{}`. If the text parses but its root isn't an object,
-/// we overwrite the root with a fresh `{}` (matching the historical behavior
-/// of `build_opencode_json`).
-pub fn update_opencode_config_text(
-    existing: &str,
-    model_name: &str,
-    llama_base_url: &str,
-    web_port: u16,
-    ctx_size: u32,
-    websearch: bool,
-    set_prune_false: bool,
-) -> Result<String, String> {
-    let source = if existing.trim().is_empty() {
-        "{}".to_string()
-    } else {
-        existing.to_string()
-    };
+pub const HARNESS: Harness = Harness {
+    name: "opencode",
+    setting_name: "harness_opencode",
+    flag_long: "harness-opencode",
+    default_on: true,
+    help: &[
+        "Manage opencode.{jsonc,json} and the lui-web-search skill",
+        "Leave opencode's config alone (for external harnesses)",
+    ],
+    config: ConfigFile {
+        dir: ".config/opencode",
+        candidates: &["opencode.jsonc", "opencode.json"],
+    },
+    apply,
+    needs_backup,
+    preflight_ssh: Some(preflight_ssh),
+};
 
-    let parse_options = ParseOptions::default();
-    let root = CstRootNode::parse(&source, &parse_options)
-        .map_err(|e| format!("parse opencode config: {}", e))?;
-
-    let root_obj = root.object_value_or_set();
-
-    update_provider_lui(&root_obj, model_name, llama_base_url, ctx_size);
-    update_permission_bash(&root_obj, web_port, websearch);
-    if set_prune_false {
-        set_compaction_prune_false_if_absent(&root_obj);
+fn apply(root: &CstObject, eff: &Effective, inputs: &HarnessInputs) {
+    set_provider_lui(root, &inputs.model_name, &inputs.base_url, inputs.ctx_size);
+    set_permission_bash(root, inputs.web_port, inputs.websearch);
+    if eff
+        .get_bool("harness_opencode_disable_prune")
+        .unwrap_or(false)
+    {
+        set_compaction_prune_false_if_absent(root);
     }
-
-    Ok(root.to_string())
 }
 
-/// True iff the text has content but no `provider.lui` entry. The caller uses
-/// this to decide whether to drop a `.luibackup` before writing. An empty/absent
-/// file → false (nothing to back up). Unparseable input → true (preserve it).
-pub fn needs_backup(existing: &str) -> bool {
+/// True iff the text has content but no `provider.lui` entry. Decides
+/// whether to drop a `.luibackup` before writing. Empty/absent → false
+/// (nothing to back up). Unparseable → true (preserve it).
+fn needs_backup(existing: &str) -> bool {
     if existing.trim().is_empty() {
         return false;
     }
-    let parse_options = ParseOptions::default();
-    let Ok(root) = CstRootNode::parse(existing, &parse_options) else {
+    let Ok(root) = CstRootNode::parse(existing, &ParseOptions::default()) else {
         return true;
     };
     let Some(root_obj) = root.object_value() else {
@@ -92,7 +61,28 @@ pub fn needs_backup(existing: &str) -> bool {
     provider.get("lui").is_none()
 }
 
-fn update_provider_lui(
+/// Verify `opencode` is installed on the remote before we start editing
+/// its config. Non-interactive SSH runs a non-login shell, so PATH edits
+/// the opencode installer makes in `~/.bashrc` / `~/.zshrc` aren't
+/// sourced. We OR three checks together so any single success suffices:
+/// `command -v opencode` (default PATH), `bash -lc 'command -v opencode'`
+/// (login-shell PATH — picks up `~/.bash_profile` / `~/.profile` edits),
+/// and the installer's canonical location `~/.opencode/bin/opencode`.
+/// Any one succeeding means opencode is usable once the user SSHes in.
+fn preflight_ssh(target: &SshTarget) -> Result<(), String> {
+    let probe = "command -v opencode \
+        || bash -lc 'command -v opencode' \
+        || { [ -x \"$HOME/.opencode/bin/opencode\" ] && echo \"$HOME/.opencode/bin/opencode\"; }";
+    match ssh_run(target, &[probe], None) {
+        Ok(out) if !out.trim().is_empty() => Ok(()),
+        Ok(_) | Err(_) => Err(format!(
+            "opencode not found on {}. Install it there first.",
+            target.spec()
+        )),
+    }
+}
+
+fn set_provider_lui(
     root_obj: &CstObject,
     model_name: &str,
     llama_base_url: &str,
@@ -146,9 +136,9 @@ fn update_provider_lui(
 /// Manage `permission.bash["curl*http://127.0.0.1:<port>/*"]` so opencode
 /// doesn't prompt for every search curl. Cleans stale port wildcards so a
 /// `--web-port` change doesn't leave a dead allowlist entry behind. When
-/// websearch is disabled we refuse to create parent objects (`permission` /
-/// `bash`) just to insert nothing.
-fn update_permission_bash(root_obj: &CstObject, web_port: u16, websearch: bool) {
+/// websearch is disabled we refuse to create parent objects (`permission`
+/// / `bash`) just to insert nothing.
+fn set_permission_bash(root_obj: &CstObject, web_port: u16, websearch: bool) {
     let current_pattern = format!("curl*http://127.0.0.1:{}/*", web_port);
 
     let has_permission = root_obj.get("permission").is_some();
@@ -193,8 +183,9 @@ fn update_permission_bash(root_obj: &CstObject, web_port: u16, websearch: bool) 
     }
 }
 
-/// Sets `compaction.prune: false` only if the key is absent — never clobbers a
-/// user-set value. Creates the parent `compaction` object only if missing.
+/// Set `compaction.prune = false` only if the key is absent — never
+/// clobbers a user-set value. Creates the parent `compaction` object
+/// only if missing.
 fn set_compaction_prune_false_if_absent(root_obj: &CstObject) {
     let compaction = root_obj.object_value_or_set("compaction");
     if compaction.get("prune").is_none() {

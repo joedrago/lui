@@ -51,13 +51,9 @@ use std::time::Duration;
 
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 
-use crate::config::{
-    derive_model_name, opencode_config_path, render_websearch_skill, websearch_port,
-    websearch_skill_dir, ServerConfig,
-};
+use crate::config::{derive_model_name, websearch_port};
 use crate::display::Display;
-use crate::opencode_config;
-use crate::pi_config;
+use crate::harness;
 use crate::server::{ConfigSummary, ServerState};
 use crate::websearch::{self, LuiConfigResponse, CONFIG_VERSION};
 
@@ -151,7 +147,11 @@ fn pick_remote_port() -> u16 {
 /// stdout on success. On non-zero exit we return a message composed from
 /// stderr (falling back to stdout) so the user sees the actual ssh/remote
 /// error verbatim.
-fn ssh_run(target: &SshTarget, args: &[&str], stdin: Option<&[u8]>) -> Result<String, String> {
+pub(crate) fn ssh_run(
+    target: &SshTarget,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> Result<String, String> {
     let mut cmd = Command::new("ssh");
     cmd.arg(target.spec());
     for a in args {
@@ -197,199 +197,9 @@ fn ssh_run(target: &SshTarget, args: &[&str], stdin: Option<&[u8]>) -> Result<St
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Verify `opencode` is installed on the remote.
-///
-/// Non-interactive SSH runs a non-login shell, so `~/.bashrc`/`~/.zshrc`
-/// aren't sourced and PATH edits the opencode installer makes there don't
-/// show up. We check three things, OR'd together:
-///   1. `command -v opencode` (the happy path: it's on the default PATH)
-///   2. `bash -lc 'command -v opencode'` (login shell — picks up
-///      `~/.bash_profile`/`~/.profile` PATH edits)
-///   3. the opencode installer's canonical location, `~/.opencode/bin/opencode`
-/// Any one succeeding means opencode is usable once the user actually SSHes
-/// in (their interactive shell will source the rc file the installer touched).
-fn check_opencode(target: &SshTarget) -> Result<(), String> {
-    let probe = "command -v opencode \
-        || bash -lc 'command -v opencode' \
-        || { [ -x \"$HOME/.opencode/bin/opencode\" ] && echo \"$HOME/.opencode/bin/opencode\"; }";
-    match ssh_run(target, &[probe], None) {
-        Ok(out) if !out.trim().is_empty() => Ok(()),
-        Ok(_) | Err(_) => Err(format!(
-            "opencode not found on {}. Install it there first.",
-            target.spec()
-        )),
-    }
-}
-
-/// Probe the remote for an existing opencode config. Prefer `opencode.jsonc`
-/// if present (some teams standardize on JSONC for inline comments), fall back
-/// to `opencode.json`. Returns the remote basename (so the caller knows where
-/// to write back) and the file contents (empty if missing).
-fn fetch_remote_opencode_config(target: &SshTarget) -> Result<(String, String), String> {
-    // First line of stdout is one of: JSONC / JSON / MISSING. Everything after
-    // the first newline is the file content (empty for MISSING).
-    let probe = r#"
-if [ -f ~/.config/opencode/opencode.jsonc ]; then
-  echo JSONC
-  cat ~/.config/opencode/opencode.jsonc
-elif [ -f ~/.config/opencode/opencode.json ]; then
-  echo JSON
-  cat ~/.config/opencode/opencode.json
-else
-  echo MISSING
-fi"#;
-    let out = ssh_run(target, &[probe], None)?;
-    let (kind, rest) = match out.split_once('\n') {
-        Some(pair) => pair,
-        None => (out.as_str(), ""),
-    };
-    let basename = match kind.trim() {
-        "JSONC" => "opencode.jsonc",
-        "JSON" => "opencode.json",
-        // Fresh-machine fallback: match the local path picker by creating
-        // `opencode.jsonc` (opencode's own docs lead with it, and team
-        // configs hand-maintained enough to get --ssh'd into tend to want
-        // comments eventually).
-        "MISSING" => "opencode.jsonc",
-        other => {
-            return Err(format!("unexpected probe result on remote: {:?}", other));
-        }
-    };
-    Ok((basename.to_string(), rest.to_string()))
-}
-
-/// Write the opencode config on the remote at the given basename
-/// (`opencode.json` or `opencode.jsonc`), creating `~/.config/opencode` if
-/// needed. Pipes contents via stdin to avoid quoting concerns.
-fn write_remote_opencode_config(
-    target: &SshTarget,
-    basename: &str,
-    contents: &str,
-) -> Result<(), String> {
-    let cmd = format!(
-        "mkdir -p ~/.config/opencode && cat > ~/.config/opencode/{}",
-        basename
-    );
-    ssh_run(target, &[&cmd], Some(contents.as_bytes()))?;
-    Ok(())
-}
-
-/// If this is lui's first-ever touch of the remote opencode config (no
-/// `provider.lui` entry), copy it to `<basename>.luibackup`. `cp -n` is
-/// no-clobber so an existing backup is preserved. Best-effort; non-fatal.
-fn maybe_backup_remote_opencode(target: &SshTarget, basename: &str, existing_text: &str) {
-    if !opencode_config::needs_backup(existing_text) {
-        return;
-    }
-    let cmd = format!(
-        "cp -n ~/.config/opencode/{0} ~/.config/opencode/{0}.luibackup 2>/dev/null || true",
-        basename
-    );
-    let _ = ssh_run(target, &[&cmd], None);
-}
-
-/// Write (or remove) the lui-web-search SKILL.md on the remote. Baked with
-/// `remote_web_port` so the curl examples in the skill match what the tunnel
-/// will actually expose on the remote side.
-fn write_remote_websearch_skill(
-    target: &SshTarget,
-    remote_web_port: u16,
-    disabled: bool,
-) -> Result<(), String> {
-    let skill_dir = "~/.config/opencode/skills/lui-web-search";
-    let skill_path = format!("{}/SKILL.md", skill_dir);
-
-    if disabled {
-        // Best-effort cleanup: if either step errors (e.g. file didn't
-        // exist) we just ignore. rmdir only succeeds if empty, which is
-        // what we want.
-        let _ = ssh_run(
-            target,
-            &[&format!(
-                "rm -f {} && rmdir {} 2>/dev/null || true",
-                skill_path, skill_dir
-            )],
-            None,
-        );
-        return Ok(());
-    }
-
-    let body = render_websearch_skill(remote_web_port);
-    ssh_run(
-        target,
-        &[&format!("mkdir -p {} && cat > {}", skill_dir, skill_path)],
-        Some(body.as_bytes()),
-    )?;
-    Ok(())
-}
-
-// ----------------------------------------------------------------------------
-// Remote pi helpers
-// ----------------------------------------------------------------------------
-
-/// Probe the remote for an existing pi models.json. Returns the file contents
-/// (empty if missing).
-fn fetch_remote_pi_models(target: &SshTarget) -> Result<String, String> {
-    let probe = r#"
-if [ -f ~/.pi/agent/models.json ]; then
-  cat ~/.pi/agent/models.json
-else
-  echo -n ""
-fi"#;
-    let out = ssh_run(target, &[probe], None)?;
-    Ok(out.trim().to_string())
-}
-
-/// If this is lui's first-ever touch of the remote pi models.json (no
-/// `providers.lui` entry), copy it to `models.json.luibackup`. Best-effort.
-fn maybe_backup_remote_pi_models(target: &SshTarget, existing_text: &str) {
-    if !pi_config::pi_needs_backup(existing_text) {
-        return;
-    }
-    let cmd = "cp -n ~/.pi/agent/models.json ~/.pi/agent/models.json.luibackup 2>/dev/null || true";
-    let _ = ssh_run(target, &[cmd], None);
-}
-
-/// Write the pi models.json on the remote, creating ~/.pi/agent if needed.
-fn write_remote_pi_models(target: &SshTarget, contents: &str) -> Result<(), String> {
-    let cmd = "mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json";
-    ssh_run(target, &[&cmd], Some(contents.as_bytes()))?;
-    Ok(())
-}
-
-/// Write (or remove) the lui-web-search SKILL.md for pi on the remote.
-fn write_remote_pi_websearch_skill(
-    target: &SshTarget,
-    remote_web_port: u16,
-    disabled: bool,
-) -> Result<(), String> {
-    let skill_dir = "~/.pi/agent/skills/lui-web-search";
-    let skill_path = format!("{}/SKILL.md", skill_dir);
-
-    if disabled {
-        let _ = ssh_run(
-            target,
-            &[&format!(
-                "rm -f {} && rmdir {} 2>/dev/null || true",
-                skill_path, skill_dir
-            )],
-            None,
-        );
-        return Ok(());
-    }
-
-    let body = pi_config::render_pi_websearch_skill(remote_web_port);
-    ssh_run(
-        target,
-        &[&format!("mkdir -p {} && cat > {}", skill_dir, skill_path)],
-        Some(body.as_bytes()),
-    )?;
-    Ok(())
-}
-
 fn print_share_success(
     target: &SshTarget,
-    effective: &ServerConfig,
+    effective: &crate::settings::store::Effective,
     remote_llama: u16,
     remote_web: u16,
 ) {
@@ -405,8 +215,9 @@ fn print_share_success(
         b: 180,
     };
 
-    let local_llama = effective.port;
+    let local_llama = effective.get_i64("port").unwrap_or(8080) as u16;
     let local_web = websearch_port(effective);
+    let websearch = effective.get_bool("websearch").unwrap_or(true);
 
     let mut cmd = format!(
         "ssh -R {}:localhost:{} {}",
@@ -414,7 +225,7 @@ fn print_share_success(
         local_llama,
         target.spec()
     );
-    if !effective.websearch_disabled {
+    if websearch {
         cmd = format!(
             "ssh -R {}:localhost:{} -R {}:localhost:{} {}",
             remote_llama,
@@ -451,53 +262,32 @@ fn print_share_success(
     );
 }
 
-/// `--ssh`: configure the given client's opencode to point back
-/// at this server over a reverse tunnel. Any error here is fatal — the caller
-/// prints it and exits.
-pub fn setup_share(target: &SshTarget, config: &ServerConfig) -> Result<(), String> {
-    check_opencode(target)?;
-
+/// `--ssh`: configure the given client's enabled harnesses to point back
+/// at this server over a reverse tunnel. Any error is fatal — the caller
+/// prints and exits.
+pub fn setup_share(
+    target: &SshTarget,
+    effective: &crate::settings::store::Effective,
+) -> Result<(), String> {
     let remote_llama = pick_remote_port();
     let remote_web = remote_llama + 1;
 
-    if config.harness_opencode {
-        let (basename, existing) = fetch_remote_opencode_config(target)?;
-        maybe_backup_remote_opencode(target, &basename, &existing);
+    let inputs = harness::HarnessInputs {
+        model_name: derive_model_name(effective),
+        base_url: format!("http://localhost:{}/v1", remote_llama),
+        ctx_size: effective.get_i64("ctx_size").unwrap_or(0) as u32,
+        web_port: remote_web,
+        websearch: effective.get_bool("websearch").unwrap_or(true),
+    };
 
-        let base_url = format!("http://localhost:{}/v1", remote_llama);
-        let model_name = derive_model_name(config);
-        let contents = opencode_config::update_opencode_config_text(
-            &existing,
-            &model_name,
-            &base_url,
-            remote_web,
-            config.ctx_size,
-            config.websearch_disabled,
-            config.opencode_disable_prune,
-        )?;
-
-        write_remote_opencode_config(target, &basename, &contents)?;
-        write_remote_websearch_skill(target, remote_web, config.websearch_disabled)?;
+    for h in harness::HARNESSES {
+        if !effective.get_bool(h.setting_name).unwrap_or(h.default_on) {
+            continue;
+        }
+        harness::apply_remote(h, target, remote_web, &inputs, effective)?;
     }
 
-    if config.harness_pi {
-        let remote_models = fetch_remote_pi_models(target)?;
-        maybe_backup_remote_pi_models(target, &remote_models);
-
-        let base_url = format!("http://localhost:{}", remote_llama);
-        let model_name = derive_model_name(config);
-        let contents = pi_config::update_pi_models_json(
-            &remote_models,
-            &model_name,
-            &base_url,
-            config.ctx_size,
-        )?;
-
-        write_remote_pi_models(target, &contents)?;
-        write_remote_pi_websearch_skill(target, remote_web, config.websearch_disabled)?;
-    }
-
-    print_share_success(target, config, remote_llama, remote_web);
+    print_share_success(target, effective, remote_llama, remote_web);
     Ok(())
 }
 
@@ -597,63 +387,6 @@ fn fetch_lui_config(target: &UseTarget) -> Result<LuiConfigResponse, String> {
     Ok(resp)
 }
 
-/// Write the local opencode config into `~/.config/opencode/`, layered on
-/// any existing file so hand-added keys survive. Prefers `opencode.jsonc`
-/// when present (same rule as the main path). `llama_base_url` points
-/// directly at the server's exposed llama-server over HTTP — no tunnel
-/// involved — while `local_web` is the port of the bsearch server we're
-/// running in-process on this client.
-fn write_local_opencode_config(
-    model_name: &str,
-    llama_base_url: &str,
-    local_web: u16,
-    ctx_size: u32,
-) -> Result<(), String> {
-    let path = opencode_config_path();
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-
-    // Mirror the main local path's backup behavior so --remote users on a
-    // machine that already has an elaborate opencode config get the same
-    // safety net.
-    if opencode_config::needs_backup(&existing) {
-        let mut backup = path.as_os_str().to_os_string();
-        backup.push(".luibackup");
-        let backup = std::path::PathBuf::from(backup);
-        if !backup.exists() {
-            let _ = std::fs::write(&backup, &existing);
-        }
-    }
-
-    let contents = opencode_config::update_opencode_config_text(
-        &existing,
-        model_name,
-        llama_base_url,
-        local_web,
-        ctx_size,
-        /* websearch_disabled */ false,
-        /* opencode_disable_prune */ false,
-    )?;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
-    }
-    std::fs::write(&path, contents).map_err(|e| format!("write {}: {}", path.display(), e))?;
-    Ok(())
-}
-
-/// Write the `lui-web-search` SKILL.md locally, pointed at the in-process
-/// bsearch server we're about to spawn. Same file layout as the local
-/// `update_websearch_skill` path uses, just bypassing the ServerConfig
-/// plumbing since we don't have a full config on this side.
-fn write_local_websearch_skill(local_web: u16) -> Result<(), String> {
-    let dir = websearch_skill_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {}", dir.display(), e))?;
-    let path = dir.join("SKILL.md");
-    std::fs::write(&path, render_websearch_skill(local_web))
-        .map_err(|e| format!("write {}: {}", path.display(), e))
-}
-
 fn print_use_banner(
     target: &UseTarget,
     lui_cfg: &LuiConfigResponse,
@@ -702,12 +435,15 @@ fn print_use_banner(
 }
 
 /// `--remote`: entry point on a client. Fetches the server's `/config`
-/// over plain HTTP, writes local opencode.json + skill, spawns an in-process
-/// bsearch HTTP server, and blocks on Ctrl-C so bsearch stays alive for the
-/// life of the opencode session. No SSH anywhere — `--public` on the server is
-/// the only prerequisite, and if `/config` is reachable so is llama-server
-/// on the same interface.
-pub async fn setup_use(target: &UseTarget, config: &ServerConfig) -> Result<(), String> {
+/// over plain HTTP, writes each enabled harness's config locally pointing
+/// at the server, spawns an in-process bsearch HTTP server, and blocks on
+/// Ctrl-C so bsearch stays alive for the life of the opencode session. No
+/// SSH anywhere — `--public` on the server is the only prerequisite, and
+/// if `/config` is reachable so is llama-server on the same interface.
+pub async fn setup_use(
+    target: &UseTarget,
+    effective: &crate::settings::store::Effective<'_>,
+) -> Result<(), String> {
     let lui_cfg = fetch_lui_config(target)?;
 
     // Use the conventional 8081 port here, not a randomized high port. A
@@ -722,44 +458,21 @@ pub async fn setup_use(target: &UseTarget, config: &ServerConfig) -> Result<(), 
     // so the URL matches what they'd see in `lui --public`'s banner.
     let llama_base_url = format!("http://{}:{}/v1", target.host, lui_cfg.llama_port);
 
-    if config.harness_opencode {
-        write_local_opencode_config(
-            &lui_cfg.model_name,
-            &llama_base_url,
-            local_web,
-            lui_cfg.ctx_size,
-        )?;
-        write_local_websearch_skill(local_web)?;
-    }
-
-    if config.harness_pi {
-        let base_url = format!("http://{}:{}", target.host, lui_cfg.llama_port);
-        let models_path = pi_config::pi_models_json_path();
-        let existing = std::fs::read_to_string(&models_path).unwrap_or_default();
-
-        if pi_config::pi_needs_backup(&existing) {
-            let mut backup = models_path.as_os_str().to_os_string();
-            backup.push(".luibackup");
-            let backup = std::path::PathBuf::from(backup);
-            if !backup.exists() {
-                let _ = std::fs::write(&backup, &existing);
-            }
+    // Apply every enabled harness locally, pointed at the remote server.
+    // Websearch is always on here — the client always spins up the local
+    // bsearch server that the skill talks to.
+    let inputs = harness::HarnessInputs {
+        model_name: lui_cfg.model_name.clone(),
+        base_url: llama_base_url.clone(),
+        ctx_size: lui_cfg.ctx_size,
+        web_port: local_web,
+        websearch: true,
+    };
+    for h in harness::HARNESSES {
+        if !effective.get_bool(h.setting_name).unwrap_or(h.default_on) {
+            continue;
         }
-
-        let contents = pi_config::update_pi_models_json(
-            &existing,
-            &lui_cfg.model_name,
-            &base_url,
-            lui_cfg.ctx_size,
-        )?;
-        if let Some(parent) = models_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = std::fs::write(&models_path, &contents) {
-            eprintln!("Warning: failed to write {}: {}", models_path.display(), e);
-        }
-
-        pi_config::update_pi_websearch_skill(local_web, false);
+        harness::apply_local(h, effective, &inputs);
     }
 
     // In-process bsearch server. We synthesize a minimal ServerState just
@@ -772,7 +485,7 @@ pub async fn setup_use(target: &UseTarget, config: &ServerConfig) -> Result<(), 
         version: CONFIG_VERSION,
         llama_port: lui_cfg.llama_port,
         web_port: local_web,
-        websearch_disabled: false,
+        websearch: true,
         model_name: lui_cfg.model_name.clone(),
         ctx_size: lui_cfg.ctx_size,
     };
@@ -783,10 +496,8 @@ pub async fn setup_use(target: &UseTarget, config: &ServerConfig) -> Result<(), 
     let dummy_summary = ConfigSummary {
         bind_addr: format!("127.0.0.1:{}", local_web),
         web_port: local_web,
-        websearch_disabled: false,
+        websearch: true,
         model_source: "none".to_string(),
-        sampling: None,
-        tuning: String::new(),
     };
     websearch::spawn(
         "127.0.0.1",
@@ -795,6 +506,7 @@ pub async fn setup_use(target: &UseTarget, config: &ServerConfig) -> Result<(), 
         config_info,
         std::time::Instant::now(),
         dummy_summary,
+        Vec::new(),
     );
 
     // Print the setup banner before the Display starts. Display doesn't

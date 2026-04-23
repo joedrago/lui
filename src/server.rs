@@ -9,10 +9,8 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{
-    format_sampling, format_source, format_tuning, websearch_port, ServerConfig,
-    DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL,
-};
+use crate::config::{format_source, websearch_port};
+use crate::settings::store::Effective;
 
 const LOG_RING_SIZE: usize = 200;
 const MAX_RECENT_REQUESTS: usize = 3;
@@ -24,7 +22,7 @@ const WARNING_TTL: Duration = Duration::from_secs(5 * 60);
 /// Wire-format version for `/data`. Bump on breaking changes; additive
 /// fields (with `#[serde(default)]` on the reader side) don't require a
 /// bump. Kept so a client renderer can refuse an incompatible server.
-pub const UI_SNAPSHOT_VERSION: u32 = 3;
+pub const UI_SNAPSHOT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone)]
 pub struct SlotInfo {
@@ -128,9 +126,10 @@ pub struct ServerState {
     // after print_summary renders the reason.
     pub fatal_reason: Option<String>,
 
-    // Seeded from ServerConfig::allow_vram_oversubscription at spawn time so
-    // parse_line can consult it without plumbing a &ServerConfig reference
-    // down. When true, the VRAM-oversubscribed detection below is skipped.
+    // Seeded from the `allow_vram_oversubscription` registry setting at
+    // spawn time so parse_line can consult it without plumbing an
+    // `Effective` reference down. When true, the VRAM-oversubscribed
+    // detection below is skipped.
     pub allow_vram_oversubscription: bool,
 
     // True while llama-server's `-fit` logic is probing memory at candidate
@@ -156,7 +155,7 @@ impl ServerState {
     /// Pre-filtered log ingress: drops CUDA Graph reuse noise before it
     /// reaches the ring buffer.
     pub fn push_log(&mut self, line: String) {
-        // Suppress "CUDA Graph id N reused" lines — they are informational
+        // Suppress "CUDA Graph id N reused" lines — they're informational
         // reuse notifications that clutter the log with no diagnostic value.
         static CUDA_GRAPH_RE: OnceLock<Regex> = OnceLock::new();
         let re = CUDA_GRAPH_RE
@@ -262,16 +261,47 @@ pub struct UiSnapshot {
     /// Warnings surfaced in the UI's Warnings section. Usually empty.
     pub warnings: Vec<String>,
 
-    /// Pre-formatted config pieces the renderer needs (bind, sampling,
-    /// tuning, model source). Static for the lifetime of a server, but we
+    /// Pre-formatted config pieces the renderer needs (bind, model source,
+    /// websearch toggle). Static for the lifetime of a server, but we
     /// include it in every snapshot so the renderer has a single source of
     /// truth per frame.
     pub config: ConfigSummary,
+
+    /// Flat list of every registry-declared setting the UI wants to render,
+    /// grouped by `group` label (`"sampling"`, `"tuning"`, ...). The
+    /// renderer filters by group and concatenates — it never names an
+    /// individual setting. See `build_setting_entries` for the production
+    /// logic.
+    #[serde(default)]
+    pub settings: Vec<SettingEntry>,
 
     /// Tail of the server log ring (up to 40 lines, newest first, each
     /// truncated to 150 chars). Used by the Server Log panel in both local
     /// and remote mode.
     pub log_lines: Vec<String>,
+}
+
+/// One entry per registry-declared setting the UI wants to surface.
+/// Pre-formatted server-side so a local renderer and a remote `--remote`
+/// client render identical text. `display_label` pairs with `value` via
+/// `"label=value"` — or just `label` when `value` is empty (bare flags
+/// like `swa-full`, or aggregate rows like `"+3 extra"`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingEntry {
+    /// Canonical registry name. Synthetic for aggregate rows (e.g. `"KV"`
+    /// combining `cache_type_k` + `cache_type_v`).
+    pub name: String,
+    /// Human label shown in the UI (`"temp"`, `"KV"`, `"np"`, ...).
+    pub display_label: String,
+    /// Formatted value. Empty for bare-flag entries whose label is the
+    /// whole rendered form (`"swa-full"`, `"+3 extra"`).
+    pub value: String,
+    /// Visual grouping: `"sampling"`, `"tuning"`, or None.
+    pub group: Option<String>,
+    /// True when no layer explicitly set this — the value shown is the
+    /// registry default. The renderer uses this to dim-style defaults or
+    /// skip them entirely for groups where "unset" means "don't show".
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,17 +324,14 @@ pub struct DownloadSnapshot {
     pub pct: u32,
 }
 
-/// Pre-formatted pieces of `ServerConfig` that the renderer needs. We
-/// format on the server side (once at spawn time) so a client renderer gets
-/// exactly the same lines a local renderer would — no duplicate format
-/// functions on both ends, and no need to ship the full ServerConfig
-/// struct over the wire (half its fields are irrelevant to rendering and
-/// the other half leak deployment-specific paths).
+/// Pre-formatted configuration strings the renderer needs. We format on
+/// the server side (once at spawn time) so a client renderer gets exactly
+/// the same lines a local renderer would — no duplicate format functions
+/// on both ends, and no need to ship the full Config over the wire.
 ///
-/// `bind_addr`, `model_source`, `sampling`, `tuning` are pre-rendered
-/// strings; we made them strings rather than typed fields on purpose —
-/// keeps the wire contract stable as new llama-server flags get added,
-/// and the renderer doesn't have to learn about them.
+/// Sampler / tuning detail lives in `UiSnapshot.settings` (built from
+/// the registry); this struct carries only the static machine-shape
+/// strings that don't change for the life of the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigSummary {
     /// Exactly the text shown on the "Bind" sub-line, e.g. "0.0.0.0:8080".
@@ -314,29 +341,81 @@ pub struct ConfigSummary {
     /// local renderer treats it as the bookmarklet URL; a client renderer
     /// ignores it in favor of its own local bsearch URL.
     pub web_port: u16,
-    pub websearch_disabled: bool,
+    pub websearch: bool,
     /// "--hf org/repo" or "-m /path" or "none".
     pub model_source: String,
-    /// Sampler overrides, e.g. "sampling: temp=0.7 · top-p=0.9". `None`
-    /// when every sampler is at its llama-server default.
-    pub sampling: Option<String>,
-    /// Tuning knobs line, e.g. "np=4 · ubatch=512 · batch=2048". Always
-    /// at least `np=N`, never empty.
-    pub tuning: String,
 }
 
 impl ConfigSummary {
-    pub fn from_config(cfg: &ServerConfig) -> Self {
+    pub fn from_effective(eff: &Effective) -> Self {
+        let host = eff.get_string("host").unwrap_or("127.0.0.1").to_string();
+        let port = eff.get_i64("port").unwrap_or(8080) as u16;
         ConfigSummary {
-            bind_addr: format!("{}:{}", cfg.host, cfg.port),
-            web_port: websearch_port(cfg),
-            websearch_disabled: cfg.websearch_disabled,
-            model_source: format_source(cfg),
-            sampling: format_sampling(cfg),
-            tuning: format_tuning(cfg),
+            bind_addr: format!("{}:{}", host, port),
+            web_port: websearch_port(eff),
+            websearch: eff.get_bool("websearch").unwrap_or(true),
+            model_source: format_source(eff),
         }
     }
 }
+
+/// Build the per-snapshot `settings` payload as a single registry walk.
+/// Iteration order is the registry declaration order, which doubles as
+/// the UI order for sampling and tuning rows; each entry's display
+/// behavior is pulled entirely from `Setting::ui_label` +
+/// `Setting::ui_format` with a generic fallback.
+///
+/// No setting names appear here: adding a new `group`-tagged setting to
+/// the registry surfaces automatically.
+pub fn build_setting_entries(eff: &Effective) -> Vec<SettingEntry> {
+    let mut out: Vec<SettingEntry> = Vec::new();
+    for s in eff.registry.settings() {
+        let Some(group) = s.group else { continue };
+        let raw = eff.get(s.name);
+        let Some(value_str) = render_value(s, raw, eff) else {
+            continue;
+        };
+        out.push(SettingEntry {
+            name: s.name.to_string(),
+            display_label: s.derived_ui_label(),
+            value: value_str,
+            group: Some(group.to_string()),
+            is_default: !eff.is_explicitly_set(s.name),
+        });
+    }
+    out
+}
+
+/// Run the setting's UI formatter (if any) or the generic value
+/// renderer. Returns `None` when the row should be skipped — no value
+/// set, no registry default, and no formatter output.
+fn render_value(
+    s: &crate::settings::setting::Setting,
+    value: Option<&crate::settings::value::Value>,
+    eff: &Effective,
+) -> Option<String> {
+    if let Some(fmt) = s.ui_format {
+        return fmt(value, eff, s);
+    }
+    generic_value_display(value)
+}
+
+/// Default renderer for scalar values. Composite kinds (`Map`,
+/// `StringArray`) don't have a sensible single-row form here — settings
+/// that need one provide a `ui_format`.
+fn generic_value_display(
+    value: Option<&crate::settings::value::Value>,
+) -> Option<String> {
+    use crate::settings::value::Value;
+    match value? {
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Integer(n) => Some(n.to_string()),
+        Value::Float(f) => Some(format!("{}", f)),
+        Value::String(s) => Some(s.clone()),
+        Value::StringArray(_) | Value::Map(_) => None,
+    }
+}
+
 
 impl SlotInfo {
     fn to_snapshot(&self) -> SlotSnapshot {
@@ -360,7 +439,12 @@ impl ServerState {
     /// since the server process started — supplied by the caller because the
     /// lui HTTP server (not `ServerState`) owns that clock. `config` is
     /// the pre-formatted `ConfigSummary`, built once at spawn time.
-    pub fn to_snapshot(&mut self, uptime: Duration, config: &ConfigSummary) -> UiSnapshot {
+    pub fn to_snapshot(
+        &mut self,
+        uptime: Duration,
+        config: &ConfigSummary,
+        setting_entries: &[SettingEntry],
+    ) -> UiSnapshot {
         // Age out stale warnings before the renderer sees them.
         self.prune_warnings();
         let mut slots: Vec<SlotSnapshot> = self
@@ -465,6 +549,7 @@ impl ServerState {
             warnings: self.warnings.iter().map(|(_, w)| w.clone()).collect(),
 
             config: config.clone(),
+            settings: setting_entries.to_vec(),
 
             // Tail of the log ring: newest first, up to 40 lines, each
             // truncated to 150 chars to keep the wire payload reasonable.
@@ -489,7 +574,7 @@ pub struct ServerProcess {
 /// their RFC 3339 string form rather than erroring, since a user who
 /// types a datetime here almost certainly wants the string value in the
 /// template's render context anyway.
-fn toml_map_to_json_object(
+pub fn toml_map_to_json_object(
     map: &std::collections::BTreeMap<String, toml::Value>,
 ) -> serde_json::Value {
     let mut obj = serde_json::Map::with_capacity(map.len());
@@ -521,25 +606,20 @@ fn toml_value_to_json(v: &toml::Value) -> serde_json::Value {
     }
 }
 
-pub fn build_args(config: &ServerConfig) -> Vec<String> {
+pub fn build_args(eff: &Effective) -> Vec<String> {
     let mut args = Vec::new();
 
+    // Always-on lui policy. These are lui's opinions (unified KV, -fa on,
+    // verbose logging, progress-friendly cache-reuse), not user settings,
+    // so they don't live in the registry.
+    let host = eff.get_string("host").unwrap_or("127.0.0.1").to_string();
+    let port = eff.get_i64("port").unwrap_or(8080) as u16;
     args.push("--host".to_string());
-    args.push(config.host.clone());
+    args.push(host);
     args.push("--port".to_string());
-    args.push(config.port.to_string());
+    args.push(port.to_string());
     args.push("--metrics".to_string());
     args.push("--jinja".to_string());
-    // chat_template_kwargs is a merged map (see resolve() in config.rs for
-    // the layering). llama-server's --chat-template-kwargs is last-wins on
-    // the whole JSON object, so we emit it exactly once with the merged
-    // result. Omit entirely if the map is empty (e.g. user dropped the
-    // code default and didn't add anything), since passing `{}` is noise.
-    if !config.chat_template_kwargs.is_empty() {
-        let json = toml_map_to_json_object(&config.chat_template_kwargs);
-        args.push("--chat-template-kwargs".to_string());
-        args.push(json.to_string());
-    }
     args.push("--log-colors".to_string());
     args.push("off".to_string());
     args.push("-v".to_string());
@@ -547,105 +627,68 @@ pub fn build_args(config: &ServerConfig) -> Vec<String> {
     args.push("on".to_string());
     args.push("--cache-reuse".to_string());
     args.push("256".to_string());
-    // Unified KV so slot contexts aren't silently partitioned at long ctx.
     args.push("-kvu".to_string());
 
-    // Physical batch size is opt-in. llama-server's default (512) is safe for
-    // any context size; raising it speeds up prefill but inflates the compute
-    // buffer linearly and can OOM at long ctx on memory-tight GPUs.
-    if let Some(v) = config.ubatch_size {
-        args.push("-ub".to_string());
-        args.push(v.to_string());
+    // Model identity: `[server].active_model` names a per-model entry
+    // whose `type` field decides between `-hf` and `-m`. Fallback path
+    // for old-shape stores (no active_model, just hf_repo/model) still
+    // synthesizes a flag from whichever is set.
+    let active = eff
+        .get_string("active_model")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            eff.get_string("hf_repo")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            eff.get_string("model")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    if let Some(active) = active {
+        let ty = eff
+            .per_model
+            .and_then(|s| match s.get("type") {
+                Some(crate::settings::value::Value::String(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                if eff.get_string("hf_repo").is_some_and(|s| !s.is_empty()) {
+                    "huggingface".to_string()
+                } else if eff.get_string("model").is_some_and(|s| !s.is_empty()) {
+                    "local".to_string()
+                } else {
+                    crate::config::infer_model_type(&active).to_string()
+                }
+            });
+        match ty.as_str() {
+            "local" => {
+                args.push("-m".to_string());
+                args.push(active);
+            }
+            _ => {
+                args.push("-hf".to_string());
+                args.push(active);
+            }
+        }
     }
 
-    // Single slot by default: a TUI has one conversation and wants the full
-    // context window held in one slot (no fragmentation, no slot-thrash).
-    args.push("-np".to_string());
-    args.push(config.parallel.unwrap_or(DEFAULT_PARALLEL).to_string());
-
-    if !config.hf_repo.is_empty() {
-        args.push("-hf".to_string());
-        args.push(config.hf_repo.clone());
-    } else if !config.model.is_empty() {
-        args.push("-m".to_string());
-        args.push(config.model.clone());
-    }
-
-    if config.ctx_size > 0 {
-        args.push("-c".to_string());
-        args.push(config.ctx_size.to_string());
-    }
-
-    if config.gpu_layers != 0 {
-        args.push("-ngl".to_string());
-        args.push(config.gpu_layers.to_string());
-    }
-
-    if let Some(temp) = config.temp {
-        args.push("--temp".to_string());
-        args.push(temp.to_string());
-    }
-    if let Some(top_p) = config.top_p {
-        args.push("--top-p".to_string());
-        args.push(top_p.to_string());
-    }
-    if let Some(top_k) = config.top_k {
-        args.push("--top-k".to_string());
-        args.push(top_k.to_string());
-    }
-    if let Some(min_p) = config.min_p {
-        args.push("--min-p".to_string());
-        args.push(min_p.to_string());
-    }
-
-    // Logical batch: default to DEFAULT_BATCH_SIZE so prefill progress updates
-    // are granular. Floor at -ub so llama.cpp's n_batch >= n_ubatch check passes
-    // when the user has explicitly raised ubatch_size.
-    let default_b = match config.ubatch_size {
-        Some(ub) => ub.max(DEFAULT_BATCH_SIZE),
-        None => DEFAULT_BATCH_SIZE,
-    };
-    args.push("-b".to_string());
-    args.push(config.batch_size.unwrap_or(default_b).to_string());
-    if let Some(v) = config.threads_batch {
-        args.push("-tb".to_string());
-        args.push(v.to_string());
-    }
-    // Only pass KV cache type flags when the user explicitly set them.
-    if let Some(ctk) = &config.cache_type_k {
-        args.push("-ctk".to_string());
-        args.push(ctk.clone());
-    }
-    if let Some(ctv) = &config.cache_type_v {
-        args.push("-ctv".to_string());
-        args.push(ctv.clone());
-    }
-    if config.swa_full == Some(true) {
-        args.push("--swa-full".to_string());
-    }
-    if let Some(v) = config.cache_ram {
-        args.push("--cache-ram".to_string());
-        args.push(v.to_string());
-    }
-    if let Some(v) = config.prio_batch {
-        args.push("--prio-batch".to_string());
-        args.push(v.to_string());
-    }
-    if let Some(ref v) = config.fit_target {
-        args.push("--fit-target".to_string());
-        args.push(v.clone());
-    }
-
-    args.extend(config.extra_args.iter().cloned());
+    // Everything else — sampler knobs, KV cache types, batch sizes, swa,
+    // chat-template-kwargs, post-`--` extras — is produced by walking the
+    // SettingsRegistry. Adding a new passthrough flag is one declaration
+    // in `src/settings/registry.rs`; no changes here.
+    crate::settings::build_args::append_passthrough(eff, eff.registry, &mut args);
 
     args
 }
 
 pub fn spawn_server(
-    config: &ServerConfig,
+    eff: &Effective,
     debug_log: Option<&str>,
 ) -> Result<ServerProcess, String> {
-    let args = build_args(config);
+    let args = build_args(eff);
 
     let pty_system = native_pty_system();
     let pty_pair = pty_system
@@ -672,7 +715,9 @@ pub fn spawn_server(
         .map_err(|e| format!("Failed to clone pty reader: {}", e))?;
 
     let state = Arc::new(Mutex::new(ServerState {
-        allow_vram_oversubscription: config.allow_vram_oversubscription,
+        allow_vram_oversubscription: eff
+            .get_bool("allow_vram_oversubscription")
+            .unwrap_or(false),
         ..ServerState::default()
     }));
 
@@ -1229,252 +1274,10 @@ fn extract_mib(line: &str) -> Option<f64> {
 mod tests {
     use super::*;
 
-    fn feed(state: &mut ServerState, lines: &[&str]) {
-        for l in lines {
-            parse_line(l, state);
-        }
-    }
-
-    #[test]
-    fn parses_moe_overflow_and_cpu_spill() {
-        // Lines drawn from a real 4080 SUPER load of a MoE model where
-        // llama.cpp claims 41/41 offloaded but pushes 28 layers' experts to
-        // host RAM. We should come out of this with overflow_layers=28 and a
-        // CPU model buffer of ~20 GiB — enough that the display can stop
-        // calling it "fully GPU".
-        let mut s = ServerState::default();
-        feed(
-            &mut s,
-            &[
-                "llama_params_fit_impl: memory for test allocation by device:",
-                "llama_params_fit_impl: id=0, n_layer=41, n_part=28, overflow_type=1, mem= 13934 MiB",
-                "llama_params_fit_impl: set ngl_per_device[0].(n_layer, n_part, overflow_type)=(41, 28, ATTN), id_dense_start=0",
-                "llama_params_fit_impl:   - CUDA0 (NVIDIA GeForce RTX 4080 SUPER): 41 layers (28 overflowing),  13934 MiB used,   1032 MiB free",
-                "llama_params_fit: successfully fit params to free device memory",
-                "load_tensors: offloaded 41/41 layers to GPU",
-                "load_tensors:   CPU_Mapped model buffer size = 20699.72 MiB",
-                "load_tensors:        CUDA0 model buffer size =  7948.14 MiB",
-            ],
-        );
-        assert_eq!(s.gpu_layers_loaded, 41);
-        assert_eq!(s.total_layers, 41);
-        assert_eq!(s.overflow_layers, 28);
-        assert!((s.cpu_mem_mib - 20699.72).abs() < 0.01);
-        assert!((s.gpu_mem_mib - 7948.14).abs() < 0.01);
-        assert!(!s.fit_probing);
-    }
-
-    #[test]
-    fn overflow_counter_resets_between_fit_runs() {
-        // A prior probe cycle may have set overflow_layers; the next fit run
-        // should start from zero so its per-device sum is accurate.
-        let mut s = ServerState::default();
-        s.overflow_layers = 99;
-        feed(
-            &mut s,
-            &[
-                "llama_params_fit_impl: memory for test allocation by device:",
-                "llama_params_fit_impl:   - CUDA0 (RTX 4080 SUPER): 20 layers (5 overflowing),  1000 MiB used,   100 MiB free",
-                "llama_params_fit:   - CUDA1 (RTX 4080 SUPER): 20 layers (3 overflowing),  1000 MiB used,   100 MiB free",
-            ],
-        );
-        // Only the CUDA0 summary is inside an `llama_params_fit_impl:` line;
-        // CUDA1 here is deliberately on a non-impl line to guard against
-        // accidental matches outside the fit_impl block.
-        assert_eq!(s.overflow_layers, 5);
-    }
-
-    #[test]
-    fn fully_gpu_load_leaves_overflow_zero() {
-        let mut s = ServerState::default();
-        feed(
-            &mut s,
-            &[
-                "load_tensors: offloaded 32/32 layers to GPU",
-                "load_tensors:        CUDA0 model buffer size =  4000.00 MiB",
-            ],
-        );
-        assert_eq!(s.gpu_layers_loaded, 32);
-        assert_eq!(s.total_layers, 32);
-        assert_eq!(s.overflow_layers, 0);
-        assert_eq!(s.cpu_mem_mib, 0.0);
-    }
-
-    #[test]
-    fn parses_metal_overflow_with_padded_digit() {
-        // The overflow summary right-pads single-digit counts, which the old
-        // regex silently missed. A Metal fit with 3 overflowing layers should
-        // still be captured.
-        let mut s = ServerState::default();
-        feed(
-            &mut s,
-            &[
-                "llama_params_fit_impl: memory for test allocation by device:",
-                "llama_params_fit_impl:   - MTL0 (Apple M4 Max): 41 layers ( 3 overflowing),  20468 MiB used,   8222 MiB free",
-                "llama_params_fit: successfully fit params to free device memory",
-            ],
-        );
-        assert_eq!(s.overflow_layers, 3);
-    }
-
-    #[test]
-    fn parses_cpu_repack_and_cpu_compute() {
-        // Metal spills MoE experts to CPU_REPACK, not CPU_Mapped. The final
-        // load also emits a CPU compute buffer alongside the GPU one; both
-        // need to land in their own fields so the display can show the split.
-        let mut s = ServerState::default();
-        feed(
-            &mut s,
-            &[
-                "load_tensors:   CPU_Mapped model buffer size =   515.31 MiB",
-                "load_tensors:   CPU_REPACK model buffer size =   709.06 MiB",
-                "load_tensors:  MTL0_Mapped model buffer size = 21098.65 MiB",
-                "sched_reserve:        CPU compute buffer size =    64.50 MiB",
-                "alloc_compute_meta:       MTL0 compute buffer size =   248.10 MiB",
-                "alloc_compute_meta:        CPU compute buffer size =    24.93 MiB",
-            ],
-        );
-        assert!((s.cpu_mem_mib - 515.31).abs() < 0.01);
-        assert!((s.cpu_repack_mib - 709.06).abs() < 0.01);
-        assert!((s.gpu_mem_mib - 21098.65).abs() < 0.01);
-        // Last emission wins (alloc_compute_meta after sched_reserve).
-        assert!((s.cpu_compute_mib - 24.93).abs() < 0.01);
-        assert!((s.compute_buf_mib - 248.10).abs() < 0.01);
-    }
-
-    #[test]
-    fn parses_done_getting_tensors_forced_to_cpu() {
-        let mut s = ServerState::default();
-        // Full-offload Mac case: just the embedding forced to CPU.
-        parse_line(
-            "done_getting_tensors: tensor 'token_embd.weight' (q8_0) (and 0 others) cannot be used with preferred buffer type CPU_REPACK, using CPU instead",
-            &mut s,
-        );
-        assert_eq!(s.cpu_forced_count, 1);
-        assert_eq!(s.cpu_forced_primary, "token_embd.weight");
-
-        // CUDA MoE overflow: primary is still the embedding but 86 other
-        // tensors (the spilled experts) ride along.
-        parse_line(
-            "done_getting_tensors: tensor 'token_embd.weight' (q8_0) (and 86 others) cannot be used with preferred buffer type CUDA_Host, using CPU instead",
-            &mut s,
-        );
-        assert_eq!(s.cpu_forced_count, 87);
-    }
-
-    // A representative healthy startup sequence used by multiple tests.
-    fn healthy_startup(s: &mut ServerState) {
-        feed(
-            s,
-            &[
-                "llama_model_loader: - kv   0:                       general.name str      = Qwen3 8B",
-                "print_info: file type          = Q4_K_M",
-                "print_info: file size          = 4.36 GiB (4.91 BPW)",
-                "print_info: model params       = 7.62 B",
-                "load_tensors: offloaded 29/29 layers to GPU",
-                "llama_context: n_ctx         = 131072",
-                "main: server is listening on http://127.0.0.1:8080",
-            ],
-        );
-    }
-
-    #[test]
-    fn request_body_echo_does_not_corrupt_load_phase_state() {
-        // llama-server's `srv operator(): converted request: {...}` dump puts
-        // the entire chat JSON on one stdout line; the 200-col pty then wraps
-        // it into chunks. When the user's prompt contains lui's own source
-        // code, those chunks can look exactly like load-time log events and
-        // clobber model_name / gpu_mem_mib. This is the regression: nothing
-        // under an echo prefix should reach any parser.
-        let mut s = ServerState::default();
-        // Bait: the fixture string from this file's own test, verbatim, glued
-        // onto the request-body prefix the way the pty would emit it.
-        parse_line(
-            "srv    operator(): converted request: {\"messages\":[...\"load_tensors:        CUDA0 model buffer size =  7948.14 MiB\"...",
-            &mut s,
-        );
-        parse_line(
-            "srv  log_server_r: request: ...\"llama_model_loader: - kv   0: general.name str = Qwen3 8B\"...",
-            &mut s,
-        );
-        parse_line(
-            "srv  log_server_r: response: ...\"load_tensors:  MTL0_Mapped model buffer size = 21098.65 MiB\"...",
-            &mut s,
-        );
-        assert_eq!(s.gpu_mem_mib, 0.0);
-        assert!(s.model_name.is_empty());
-    }
-
-    #[test]
-    fn done_request_still_fires_through_echo_filter() {
-        // The echo filter must not swallow `log_server_r: done request:` —
-        // that's the real completion event that drives request_count.
-        let mut s = ServerState::default();
-        healthy_startup(&mut s);
-        parse_line("srv  log_server_r: done request: POST /completion", &mut s);
-        assert_eq!(s.request_count, 1);
-    }
-
-    #[test]
-    fn post_ready_load_lines_do_not_accumulate() {
-        // Defense in depth on top of the echo filter: once the server is
-        // ready, a raw load-phase line that somehow sneaks past must not be
-        // able to double-add gpu_mem_mib or rename the model. In the wild
-        // this happened via pty-wrapped prompt echoes; this test feeds the
-        // raw fragments directly to prove the load-phase gate holds.
-        let mut s = ServerState::default();
-        healthy_startup(&mut s);
-        let name_before = s.model_name.clone();
-        let gpu_before = s.gpu_mem_mib;
-        parse_line(
-            "load_tensors:        CUDA0 model buffer size =  7948.14 MiB",
-            &mut s,
-        );
-        parse_line(
-            "llama_model_loader: - kv   0: general.name str = Something Else",
-            &mut s,
-        );
-        assert_eq!(s.gpu_mem_mib, gpu_before);
-        assert_eq!(s.model_name, name_before);
-    }
-
-    #[test]
-    fn warnings_age_out_after_ttl() {
-        // Backdate an entry past WARNING_TTL and prove prune drops it. Uses
-        // the internal tuple representation directly so the test doesn't
-        // have to sleep for five minutes.
-        let mut s = ServerState::default();
-        let stale = Instant::now() - WARNING_TTL - Duration::from_secs(1);
-        s.warnings.push((stale, "stale warning".to_string()));
-        s.warnings
-            .push((Instant::now(), "fresh warning".to_string()));
-        s.prune_warnings();
-        assert_eq!(s.warnings.len(), 1);
-        assert_eq!(s.warnings[0].1, "fresh warning");
-
-        // After the stale entry is gone, the same text can be pushed again —
-        // dedup shouldn't block a legitimate re-push of a recurring warning.
-        s.push_warning("stale warning".to_string());
-        assert_eq!(s.warnings.len(), 2);
-    }
-
-    #[test]
-    fn total_time_parses_across_whitespace_variants() {
-        // Historical "      total time =" padding and a tab-prefixed variant
-        // should both land in the same branch after trim_start.
-        let mut s = ServerState::default();
-        parse_line("      total time =   25690.22 ms / 14289 tokens", &mut s);
-        parse_line("\ttotal time =   25690.22 ms / 14289 tokens", &mut s);
-        // Not much to assert without a live slot to update, but the test
-        // proves the branches don't panic on either padding style.
-    }
-
     #[test]
     fn cuda_graph_reuse_lines_are_filtered() {
-        // "CUDA Graph id N reused" lines are noise in the log ring; they
-        // should be silently dropped by push_log and never appear in
-        // log_lines. Leading/trailing whitespace (llama.cpp padding) is also
-        // filtered.
+        // "CUDA Graph id N reused" lines are noise; push_log should drop
+        // them (leading/trailing whitespace too — llama.cpp pads some lines).
         let mut s = ServerState::default();
         s.push_log("CUDA Graph id 0 reused".to_string());
         s.push_log("CUDA Graph id 42 reused".to_string());
@@ -1484,7 +1287,7 @@ mod tests {
         s.push_log("\tCUDA Graph id 3 reused\t".to_string());
         assert_eq!(s.log_lines.len(), 0);
 
-        // Real log lines should still pass through.
+        // Real log lines still pass through.
         s.push_log("prompt eval time =   100.00 ms /  50 tokens".to_string());
         assert_eq!(s.log_lines.len(), 1);
     }

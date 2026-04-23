@@ -69,6 +69,10 @@ struct AppState {
     /// struct into each snapshot is a handful of `String::clone`s, which
     /// is trivial even at 4 Hz.
     config_summary: ConfigSummary,
+    /// Pre-built per-setting UI rows. Registry-walk is cheap but we still
+    /// only need to run it once — the effective server config is fixed for
+    /// the lifetime of the process.
+    setting_entries: Vec<crate::server::SettingEntry>,
 }
 
 /// JSON returned by `GET /config`. Used by `lui --ssh` on a client to
@@ -89,7 +93,7 @@ pub struct LuiConfigResponse {
     pub version: u32,
     pub llama_port: u16,
     pub web_port: u16,
-    pub websearch_disabled: bool,
+    pub websearch: bool,
     pub model_name: String,
     pub ctx_size: u32,
 }
@@ -122,8 +126,8 @@ fn next_bsearch_id() -> String {
 /// instances (specifically `--ssh`) to discover this server's shape
 /// regardless of whether browser-mediated search is enabled. The search
 /// routes (`/bsearch`, `/results`, `/setup`) only mount when
-/// `config_info.websearch_disabled` is false, so `--no-websearch`
-/// genuinely withdraws that capability.
+/// `config_info.websearch` is true, so `--no-websearch` genuinely
+/// withdraws that capability.
 pub fn spawn(
     bind_host: &str,
     port: u16,
@@ -131,8 +135,9 @@ pub fn spawn(
     config_info: LuiConfigResponse,
     start_time: Instant,
     config_summary: ConfigSummary,
+    setting_entries: Vec<crate::server::SettingEntry>,
 ) {
-    let websearch_enabled = !config_info.websearch_disabled;
+    let websearch_enabled = config_info.websearch;
     let state = AppState {
         server_state,
         pending: Arc::new(Mutex::new(HashMap::new())),
@@ -140,6 +145,7 @@ pub fn spawn(
         config_info,
         start_time,
         config_summary,
+        setting_entries,
     };
 
     let mut app: Router<AppState> = Router::new()
@@ -274,7 +280,7 @@ async fn handle_data(State(state): State<AppState>) -> Json<UiSnapshot> {
     let uptime = state.start_time.elapsed();
     let snapshot = {
         let mut st = state.server_state.lock().unwrap();
-        st.to_snapshot(uptime, &state.config_summary)
+        st.to_snapshot(uptime, &state.config_summary, &state.setting_entries)
     };
     Json(snapshot)
 }
