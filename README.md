@@ -14,7 +14,7 @@ A friendly TUI wrapper for [llama.cpp](https://github.com/ggml-org/llama.cpp)'s 
 
 ## Run
 
-Example first runs:
+Example first runs (use `lui -h` to see what these settings mean and tune them for your machine):
 
 ```
 # This runs on *anything* and is pretty good
