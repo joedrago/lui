@@ -301,18 +301,11 @@ pub fn render_websearch_skill(port: u16) -> String {
     format!(
         r#"---
 name: lui-web-search
-description: Browser-mediated web search for local/self-hosted models that have no native web-search tool. If you already have a native search tool (e.g. web_search, browse), use that instead — this skill requires the user to click a browser bookmarklet and blocks on their interaction. Returns JSON results with title, url, and snippet.
+description: Web search via browser bookmarklet. Extracts live search results from Google to answer questions requiring up-to-date information. Use when the user asks to search the web, look something up, find recent information, or you need data past your training cutoff. Returns JSON results with title, url, and snippet.
 license: BSD-2-Clause
 ---
 
 # lui-web-search
-
-> **When to use this skill.** Only when you have no native web-search tool
-> available. If you have one (Anthropic's `web_search`, OpenAI's browse, a
-> native `search` tool, etc.), prefer that — it's faster, doesn't require a
-> browser tab, and doesn't block on user interaction. This skill is the
-> fallback for local/self-hosted models (llama.cpp, etc.) whose provider
-> doesn't expose web search.
 
 lui's search endpoint opens a Google search tab in the user's real
 browser. The user clicks a one-time-installed `lui-grab` bookmarklet on
