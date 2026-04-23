@@ -17,13 +17,19 @@ A friendly TUI wrapper for [llama.cpp](https://github.com/ggml-org/llama.cpp)'s 
 Example first runs:
 
 ```
-lui --hf unsloth/GLM-4.7-Flash-GGUF:Q4_K_M
-lui --hf unsloth/GLM-4.7-Flash-GGUF:Q4_K_M --alias glm --this -c 131072 --ctk q8_0 --ctv q8_0
-
+# This runs on *anything* and is pretty good
 lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
 lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --this -c 262144
 lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --alias qwen --this -c 262144 --ctk q8_0 --ctv q8_0 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
 
+# This runs on fewer things but seems great so far, maybe my fave
+lui --hf unsloth/Qwen3.6-27B-GGUF:Q4_K_M --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0
+
+# GLM 4.7 is fun
+lui --hf unsloth/GLM-4.7-Flash-GGUF:Q4_K_M
+lui --hf unsloth/GLM-4.7-Flash-GGUF:Q4_K_M --alias glm --this -c 131072 --ctk q8_0 --ctv q8_0
+
+# Gemma is also neat
 lui --hf "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M" --alias gemma --this --ctk q8_0 --ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 64
 ```
 
