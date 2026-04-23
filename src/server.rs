@@ -165,6 +165,13 @@ impl ServerState {
         if re.is_match(&line) {
             return;
         }
+        // Suppress CUDA graph warmup messages — transient progress noise.
+        static CUDA_WARMUP_RE: OnceLock<Regex> = OnceLock::new();
+        let re =
+            CUDA_WARMUP_RE.get_or_init(|| Regex::new(r"^\s*ggml_backend_cuda_graph_compute: CUDA graph warmup (reset|complete)\s*$").unwrap());
+        if re.is_match(&line) {
+            return;
+        }
         if self.log_lines.len() >= LOG_RING_SIZE {
             self.log_lines.pop_front();
         }
