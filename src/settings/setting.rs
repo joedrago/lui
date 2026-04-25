@@ -247,22 +247,16 @@ impl Setting {
         self
     }
 
-    /// Derived label — prefer the explicit `ui_label`, else derive from
-    /// the long flag with `-` → space and first-letter uppercase. Falls
-    /// back to the setting's canonical name for entries without a long
+    /// Derived label — prefer the explicit `ui_label`, else fall back to
+    /// the setting's canonical name (lowercased) for entries without a long
     /// flag (storage-only settings that still show up in the per-model
     /// override view).
     pub fn derived_ui_label(&self) -> String {
         if let Some(l) = self.ui_label {
             return l.to_string();
         }
-        let source = self.long.unwrap_or(self.name);
-        let spaced = source.replace(['-', '_'], " ");
-        let mut chars = spaced.chars();
-        match chars.next() {
-            Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-            None => String::new(),
-        }
+        let source = self.long.as_ref().unwrap_or(&self.name);
+        source.to_lowercase()
     }
 
     /// Does this setting take a value on the command line? Bool flags and

@@ -350,7 +350,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             // No `group` — ctx_size renders in its own "N token context
             // window" row, not the aggregated tuning line. Same for
             // gpu_layers.
-            .ui_label("Context")
             .ui_format(super::setting::format_nonzero_int)
             .ui_unset("model default")
             .help(&["Context window (0 = model default)"]),
@@ -381,7 +380,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--temp")
             .section("SETTINGS")
             .group("sampling")
-            .ui_label("Temperature")
             .ui_unset("model default")
             .help(&["Sampling temperature"]),
     );
@@ -395,7 +393,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--top-p")
             .section("SETTINGS")
             .group("sampling")
-            .ui_label("Top-p")
             .ui_unset("model default")
             .help(&["Top-p (nucleus)"]),
     );
@@ -409,7 +406,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--top-k")
             .section("SETTINGS")
             .group("sampling")
-            .ui_label("Top-k")
             .ui_unset("model default")
             .help(&["Top-k"]),
     );
@@ -423,7 +419,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--min-p")
             .section("SETTINGS")
             .group("sampling")
-            .ui_label("Min-p")
             .ui_unset("model default")
             .help(&["Min-p"]),
     );
@@ -437,7 +432,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--presence-penalty")
             .section("SETTINGS")
             .group("sampling")
-            .ui_label("Presence penalty")
             .ui_unset("model default")
             .help(&["Presence penalty (0.0 = disabled)"]),
     );
@@ -451,7 +445,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--dry-multiplier")
             .section("SETTINGS")
             .group("sampling")
-            .ui_label("DRY multiplier")
             .ui_unset("model default")
             .help(&["DRY sampling multiplier (0.0 = disabled)"]),
     );
@@ -465,7 +458,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--dry-base")
             .section("SETTINGS")
             .group("sampling")
-            .ui_label("DRY base")
             .ui_unset("model default")
             .help(&["DRY sampling base value"]),
     );
@@ -480,7 +472,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--dry-allowed-length")
             .section("SETTINGS")
             .group("sampling")
-            .ui_label("DRY allowed length")
             .ui_unset("model default")
             .help(&["Allowed length for DRY sampling"]),
     );
@@ -494,7 +485,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--frequency-penalty")
             .section("SETTINGS")
             .group("sampling")
-            .ui_label("Frequency penalty")
             .ui_unset("model default")
             .help(&["Frequency penalty (0.0 = disabled)"]),
     );
@@ -509,7 +499,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--reasoning-budget")
             .section("SETTINGS")
             .group("sampling")
-            .ui_label("Reasoning budget")
             .ui_unset("unrestricted")
             .help(&["Token budget for thinking (-1 = unrestricted, 0 = immediate end)"]),
     );
@@ -526,7 +515,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("-np")
             .section("SETTINGS")
             .group("tuning")
-            .ui_label("np")
             .help(&["Server slots (llama-server -np)"]),
     );
     reg.push(
@@ -725,7 +713,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .llama_flag("--reasoning")
             .section("SETTINGS")
             .group("tuning")
-            .ui_label("Reasoning")
             .ui_unset("auto")
             .help(&[
                 "Reasoning/thinking in chat: on, off, or auto",

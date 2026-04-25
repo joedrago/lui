@@ -1043,16 +1043,16 @@ async fn main() {
         if !extra.is_empty() {
             let _ = crossterm::execute!(
                 handle,
-                SetForegroundColor(Color::Rgb { r: 255, g: 255, b: 100 }),
+                SetForegroundColor(Color::Rgb {
+                    r: 255,
+                    g: 255,
+                    b: 100
+                }),
                 SetAttribute(Attribute::Dim),
                 Print(" --")
             );
             for a in &extra {
-                let _ = crossterm::execute!(
-                    handle,
-                    Print(" "),
-                    Print(&shell_quote(a))
-                );
+                let _ = crossterm::execute!(handle, Print(" "), Print(&shell_quote(a)));
             }
         }
         let _ = crossterm::execute!(handle, ResetColor, Print("\n"));
