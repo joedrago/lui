@@ -162,40 +162,35 @@ impl Config {
             _ => return segments,
         };
 
-        // Check aliases first
-        let mut has_alias = false;
+        // Infer type from per-model store or key shape
+        let is_local = self
+            .per_model
+            .get(&active)
+            .and_then(|s| s.get("type"))
+            .and_then(Value::as_str)
+            .map(|t| t == "local")
+            .unwrap_or_else(|| {
+                active.contains('/')
+                    && (active.starts_with('/')
+                        || active.starts_with("./")
+                        || active.starts_with('~')
+                        || active.ends_with(".gguf"))
+            });
+        let prefix = if is_local { "-m " } else { "--hf " };
+        segments.push(CliSegment::Model(format!(
+            "{}{}",
+            prefix,
+            shell_quote(&active)
+        )));
+
+        // Append all aliases that map to this active model
         for (alias_name, alias_target) in &self.aliases {
             if alias_target == &active {
                 segments.push(CliSegment::Model(format!(
                     "--alias {}",
                     shell_quote(alias_name)
                 )));
-                has_alias = true;
-                break;
             }
-        }
-
-        if !has_alias {
-            // Infer type from per-model store or key shape
-            let is_local = self
-                .per_model
-                .get(&active)
-                .and_then(|s| s.get("type"))
-                .and_then(Value::as_str)
-                .map(|t| t == "local")
-                .unwrap_or_else(|| {
-                    active.contains('/')
-                        && (active.starts_with('/')
-                            || active.starts_with("./")
-                            || active.starts_with('~')
-                            || active.ends_with(".gguf"))
-                });
-            let prefix = if is_local { "-m " } else { "--hf " };
-            segments.push(CliSegment::Model(format!(
-                "{}{}",
-                prefix,
-                shell_quote(&active)
-            )));
         }
 
         // Collect per-model keys to avoid emitting them from global
