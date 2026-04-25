@@ -38,11 +38,21 @@ const COLOR_NUMBER: Color = Color::Rgb {
     g: 150,
     b: 255,
 };
+const COLOR_ALIASES: Color = Color::Rgb {
+    r: 220,
+    g: 215,
+    b: 230,
+};
 const WARNING_AMBER: Color = Color::Rgb {
     r: 230,
     g: 180,
     b: 80,
 };
+
+/// How long the setup URL stays bright cyan before switching to dark grey.
+const SETUP_URL_START_MS: u64 = 1_500;
+// Reuse COLOR_NUMBER (lavender-purple) for the remote indicator so it
+// visually groups with the other numeric/key-value elements on screen.
 
 pub struct Display {
     /// Host to poll `/data` on. `"127.0.0.1"` locally; a server's hostname
@@ -70,6 +80,10 @@ pub struct Display {
     /// `UiSnapshot::uptime_seconds` instead, so a client renderer agrees
     /// with the server on actual lifetime.
     start_time: Instant,
+    /// The remote server host when running in `--remote` mode. Rendered as
+    /// `[Remote: HOST]` in the header so the user always knows whether they
+    /// are looking at a local server or a remote one.
+    remote_host: Option<String>,
 }
 
 /// A buffered line writer that tracks the current row and pads/clears each line.
@@ -147,6 +161,7 @@ impl Display {
         snapshot_port: u16,
         local_state: Option<Arc<Mutex<ServerState>>>,
         local_setup_url: Option<String>,
+        remote_host: Option<String>,
     ) -> Self {
         Display {
             snapshot_host,
@@ -154,6 +169,7 @@ impl Display {
             local_state,
             local_setup_url,
             start_time: Instant::now(),
+            remote_host,
         }
     }
 
@@ -302,6 +318,17 @@ impl Display {
             Print("  ── lui ── llama.cpp ui "),
             ResetColor
         );
+        if let Some(ref host) = self.remote_host {
+            let _ = queue!(
+                t.stdout,
+                SetForegroundColor(COLOR_NUMBER),
+                SetAttribute(Attribute::Bold),
+                Print("  ["),
+                Print(host),
+                Print("]"),
+                ResetColor
+            );
+        }
         t.newline();
         t.newline();
         let _ = queue!(
@@ -353,7 +380,11 @@ impl Display {
         let right_text = " ── llama.cpp ui ";
         let prefix_cols =
             left.chars().count() + mid_text.chars().count() + right_text.chars().count();
-        let right_fill = width.saturating_sub(prefix_cols);
+        let remote_cols = self
+            .remote_host
+            .as_deref()
+            .map_or(0, |h| 1 + 2 + h.chars().count());
+        let right_fill = width.saturating_sub(prefix_cols + remote_cols);
         let _ = queue!(
             t.stdout,
             SetForegroundColor(MUTED_PURPLE),
@@ -367,6 +398,16 @@ impl Display {
             Print("─".repeat(right_fill)),
             ResetColor
         );
+        if let Some(ref host) = self.remote_host {
+            let _ = queue!(
+                t.stdout,
+                SetForegroundColor(MUTED_PURPLE),
+                Print(" ["),
+                Print(host),
+                Print("]"),
+                ResetColor
+            );
+        }
         t.newline();
 
         if !st.ready {
@@ -420,20 +461,26 @@ impl Display {
             return;
         }
 
-        // Blank line below the header doubles as the always-visible home of
-        // the websearch setup URL, right-aligned in gray. This is always
-        // *our* local bsearch URL (set at construction), not the server's —
-        // the bookmarklet needs to live in the browser the user is sitting
-        // in front of.
+         // Blank line below the header doubles as the always-visible home of
+        // the websearch setup URL, right-aligned. Starts bold lavender and
+        // fades to dark grey over the first 7 seconds.
         if let Some(ref url) = self.local_setup_url {
             let pad = width.saturating_sub(url.chars().count());
+            let url_color = self.setup_url_color();
+            let bold = url_color == Color::Cyan;
             let _ = queue!(
                 t.stdout,
                 Print(" ".repeat(pad)),
-                SetForegroundColor(Color::DarkGrey),
-                Print(url),
-                ResetColor
+                SetForegroundColor(url_color),
             );
+            if bold {
+                let _ = queue!(t.stdout, SetAttribute(Attribute::Bold));
+            }
+            let _ = queue!(t.stdout, Print(url));
+            if bold {
+                let _ = queue!(t.stdout, SetAttribute(Attribute::Reset));
+            }
+            let _ = queue!(t.stdout, ResetColor);
         }
         t.newline();
 
@@ -579,20 +626,28 @@ impl Display {
             format!("{} ({})", st.model_name, st.quantization)
         };
         let has_aliases = !st.config.model_aliases.is_empty();
-        self.print_kv(&mut t, "Model   ", &model_display, Color::White);
+        let prefix_len = 2 + "Model   ".len() + 3;
+        let max_val = t.width.saturating_sub(prefix_len);
+        let _ = queue!(
+            t.stdout,
+            Print("  "),
+            SetForegroundColor(MUTED_PURPLE),
+            Print("Model    : "),
+            SetForegroundColor(Color::White),
+            Print(truncate(&model_display, max_val)),
+        );
         if has_aliases {
             let _ = queue!(
                 t.stdout,
-                Print("                 "),
                 SetForegroundColor(MUTED_PURPLE),
                 Print(" — "),
-                SetAttribute(Attribute::Dim),
+                SetForegroundColor(COLOR_ALIASES),
                 Print(&st.config.model_aliases),
                 SetAttribute(Attribute::Reset),
                 ResetColor
             );
-            t.newline();
         }
+        t.newline();
 
         // Source (grey sub of Model)
         self.render_source(&mut t, snap);
@@ -1005,22 +1060,6 @@ impl Display {
         t.newline();
     }
 
-    fn print_kv(&self, t: &mut TermBuf, label: &str, value: &str, color: Color) {
-        let prefix_len = 2 + label.len() + 3;
-        let max_val = t.width.saturating_sub(prefix_len);
-        let _ = queue!(
-            t.stdout,
-            Print("  "),
-            SetForegroundColor(MUTED_PURPLE),
-            Print(label),
-            Print(" : "),
-            SetForegroundColor(color),
-            Print(truncate(value, max_val)),
-            ResetColor
-        );
-        t.newline();
-    }
-
     fn render_log(snap: &UiSnapshot, t: &mut TermBuf) {
         let log_prefix = "  ── Server Log ";
         let log_header = format!(
@@ -1061,6 +1100,16 @@ impl Display {
                 ResetColor
             );
             t.newline();
+        }
+    }
+
+   /// Compute the setup URL color based on how long the UI has been running.
+    /// Bright cyan for the first 3 seconds, then dark grey.
+    fn setup_url_color(&self) -> Color {
+        if (self.start_time.elapsed().as_millis() as u64) < SETUP_URL_START_MS {
+            Color::Cyan
+        } else {
+            Color::DarkGrey
         }
     }
 

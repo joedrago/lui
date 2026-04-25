@@ -521,15 +521,19 @@ pub async fn setup_use(
     // and `active_searches` reflect the user's opencode-driven searches
     // through *our* bsearch, which is what they care about. The server's
     // log lines now come via `/data` so the Server Log panel works in
-    // remote mode too. The bookmarklet URL is
-    // this client's own bsearch (8081 by convention), not the server's —
-    // bookmarklets live in the browser the user is sitting at.
-    let local_setup_url = Some(format!("http://127.0.0.1:{}/setup", local_web));
+    // remote mode too. The bookmarklet URL is shown based on the *local*
+    // websearch setting (the client always runs its own bsearch; the
+    // server's websearch config is irrelevant for this URL).
+    let local_setup_url = effective
+        .get_bool("websearch")
+        .unwrap_or(true)
+        .then(|| format!("http://127.0.0.1:{}/setup", local_web));
     let display = Display::new(
         target.host.clone(),
         target.http_port,
         Some(state.clone()),
         local_setup_url,
+        Some(target.host.clone()),
     );
 
     // Display.run owns the screen and exits on Ctrl-C / 'q' / the server
