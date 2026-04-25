@@ -428,6 +428,92 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .help(&["Min-p"]),
     );
     reg.push(
+        Setting::new("presence_penalty")
+            .long("presence-penalty")
+            .placeholder("F")
+            .kind(Float)
+            .scope(Both)
+            .passthrough(FlagValue)
+            .llama_flag("--presence-penalty")
+            .section("SETTINGS")
+            .group("sampling")
+            .ui_label("Presence penalty")
+            .ui_unset("model default")
+            .help(&["Presence penalty (0.0 = disabled)"]),
+    );
+    reg.push(
+        Setting::new("dry_multiplier")
+            .long("dry-multiplier")
+            .placeholder("F")
+            .kind(Float)
+            .scope(Both)
+            .passthrough(FlagValue)
+            .llama_flag("--dry-multiplier")
+            .section("SETTINGS")
+            .group("sampling")
+            .ui_label("DRY multiplier")
+            .ui_unset("model default")
+            .help(&["DRY sampling multiplier (0.0 = disabled)"]),
+    );
+    reg.push(
+        Setting::new("dry_base")
+            .long("dry-base")
+            .placeholder("F")
+            .kind(Float)
+            .scope(Both)
+            .passthrough(FlagValue)
+            .llama_flag("--dry-base")
+            .section("SETTINGS")
+            .group("sampling")
+            .ui_label("DRY base")
+            .ui_unset("model default")
+            .help(&["DRY sampling base value"]),
+    );
+    reg.push(
+        Setting::new("dry_allowed_length")
+            .long("dry-allowed-length")
+            .placeholder("N")
+            .kind(Integer)
+            .min(0)
+            .scope(Both)
+            .passthrough(FlagValue)
+            .llama_flag("--dry-allowed-length")
+            .section("SETTINGS")
+            .group("sampling")
+            .ui_label("DRY allowed length")
+            .ui_unset("model default")
+            .help(&["Allowed length for DRY sampling"]),
+    );
+    reg.push(
+        Setting::new("frequency_penalty")
+            .long("frequency-penalty")
+            .placeholder("F")
+            .kind(Float)
+            .scope(Both)
+            .passthrough(FlagValue)
+            .llama_flag("--frequency-penalty")
+            .section("SETTINGS")
+            .group("sampling")
+            .ui_label("Frequency penalty")
+            .ui_unset("model default")
+            .help(&["Frequency penalty (0.0 = disabled)"]),
+    );
+    reg.push(
+        Setting::new("reasoning_budget")
+            .long("reasoning-budget")
+            .placeholder("N")
+            .kind(Integer)
+            .min(-1)
+            .scope(Both)
+            .passthrough(FlagValue)
+            .llama_flag("--reasoning-budget")
+            .section("SETTINGS")
+            .group("sampling")
+            .ui_label("Reasoning budget")
+            .ui_unset("unrestricted")
+            .help(&["Token budget for thinking (-1 = unrestricted, 0 = immediate end)"]),
+    );
+    reg.push(
         Setting::new("parallel")
             .long("np")
             .long_aliases(&["parallel"])
