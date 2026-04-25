@@ -498,6 +498,7 @@ pub async fn setup_use(
         web_port: local_web,
         websearch: true,
         model_source: "none".to_string(),
+        model_aliases: String::new(),
     };
     websearch::spawn(
         "127.0.0.1",

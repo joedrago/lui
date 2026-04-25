@@ -24,7 +24,7 @@ const WARNING_TTL: Duration = Duration::from_secs(5 * 60);
 /// Wire-format version for `/data`. Bump on breaking changes; additive
 /// fields (with `#[serde(default)]` on the reader side) don't require a
 /// bump. Kept so a client renderer can refuse an incompatible server.
-pub const UI_SNAPSHOT_VERSION: u32 = 4;
+pub const UI_SNAPSHOT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone)]
 pub struct SlotInfo {
@@ -167,8 +167,12 @@ impl ServerState {
         }
         // Suppress CUDA graph warmup messages — transient progress noise.
         static CUDA_WARMUP_RE: OnceLock<Regex> = OnceLock::new();
-        let re =
-            CUDA_WARMUP_RE.get_or_init(|| Regex::new(r"^\s*ggml_backend_cuda_graph_compute: CUDA graph warmup (reset|complete)\s*$").unwrap());
+        let re = CUDA_WARMUP_RE.get_or_init(|| {
+            Regex::new(
+                r"^\s*ggml_backend_cuda_graph_compute: CUDA graph warmup (reset|complete)\s*$",
+            )
+            .unwrap()
+        });
         if re.is_match(&line) {
             return;
         }
@@ -353,17 +357,39 @@ pub struct ConfigSummary {
     pub websearch: bool,
     /// "--hf org/repo" or "-m /path" or "none".
     pub model_source: String,
+    /// Comma-separated alias names that resolve to the active model, e.g.
+    /// "foo,bar". Empty when the active model has no aliases. Rendered
+    /// in the UI on the Model line after the model name.
+    #[serde(default)]
+    pub model_aliases: String,
 }
 
 impl ConfigSummary {
-    pub fn from_effective(eff: &Effective) -> Self {
+    pub fn from_effective(
+        eff: &Effective,
+        aliases: &std::collections::BTreeMap<String, String>,
+    ) -> Self {
         let host = eff.get_string("host").unwrap_or("127.0.0.1").to_string();
         let port = eff.get_i64("port").unwrap_or(8080) as u16;
+
+        // Collect alias names that resolve to the active model key.
+        let model_aliases = if let Some(active) = eff.get_string("active_model") {
+            aliases
+                .iter()
+                .filter(|(_, target)| target.as_str() == active)
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<&str>>()
+                .join(",")
+        } else {
+            String::new()
+        };
+
         ConfigSummary {
             bind_addr: format!("{}:{}", host, port),
             web_port: websearch_port(eff),
             websearch: eff.get_bool("websearch").unwrap_or(true),
             model_source: format_source(eff),
+            model_aliases,
         }
     }
 }

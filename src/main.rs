@@ -1004,7 +1004,7 @@ async fn main() {
     // via `/data`, and the Display uses the same `start_time` so the local
     // renderer and any future client renderer agree on server lifetime.
     let start_time = std::time::Instant::now();
-    let config_summary = ConfigSummary::from_effective(&effective);
+    let config_summary = ConfigSummary::from_effective(&effective, &config.aliases);
     let setting_entries = server::build_setting_entries(&effective);
     websearch::spawn(
         &host_for_spawn,

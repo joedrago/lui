@@ -125,6 +125,22 @@ impl<'a> TermBuf<'a> {
     }
 }
 
+/// Result of a `/data` poll.
+///
+/// `Retry` means no response was received (connection timeout, parse
+/// failure, etc.) — the caller should keep polling.
+///
+/// `Ok(snap)` means a valid snapshot arrived.
+///
+/// `VersionMismatch(msg)` means we got a response but the schema is
+/// incompatible. This is a permanent error — the caller should bail
+/// out with the message rather than retrying forever.
+enum FetchResult {
+    Retry,
+    Ok(Box<UiSnapshot>),
+    VersionMismatch(String),
+}
+
 impl Display {
     pub fn new(
         snapshot_host: String,
@@ -161,10 +177,21 @@ impl Display {
         // transient error) leave this unchanged so the UI stays on the
         // last-good frame instead of flickering to empty.
         let mut last: Option<UiSnapshot> = None;
+        // Error message from a fatal condition (e.g. version mismatch).
+        // Rendered on-screen before exiting so the user doesn't have to
+        // scroll up to find it.
+        let mut fatal_error: Option<String> = None;
 
         loop {
-            if let Some(snap) = self.fetch_snapshot().await {
-                last = Some(snap);
+            match self.fetch_snapshot().await {
+                FetchResult::Retry => {}
+                FetchResult::Ok(snap) => last = Some(*snap),
+                FetchResult::VersionMismatch(msg) => {
+                    // Permanent incompatibility — print a clear error and
+                    // exit rather than spinning on "Starting..." forever.
+                    fatal_error = Some(msg);
+                    break;
+                }
             }
 
             match &last {
@@ -192,37 +219,73 @@ impl Display {
             EnableLineWrap,
             Show
         );
+
+        // Render any fatal error after giving back the terminal so the
+        // message is visible without scrolling.
+        if let Some(ref msg) = fatal_error {
+            eprintln!("lui: {}", msg);
+        }
     }
 
-    async fn fetch_snapshot(&self) -> Option<UiSnapshot> {
+    async fn fetch_snapshot(&self) -> FetchResult {
         let t = Duration::from_millis(FETCH_TIMEOUT_MS);
         let addr = format!("{}:{}", self.snapshot_host, self.snapshot_port);
 
-        let mut stream = timeout(t, TcpStream::connect(&addr)).await.ok()?.ok()?;
-        let req = "GET /data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept: application/json\r\n\r\n";
-        timeout(t, stream.write_all(req.as_bytes()))
+        let mut stream = match timeout(t, TcpStream::connect(&addr))
             .await
-            .ok()?
-            .ok()?;
+            .ok()
+            .and_then(|r| r.ok())
+        {
+            Some(s) => s,
+            None => return FetchResult::Retry,
+        };
+        let req = "GET /data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept: application/json\r\n\r\n";
+        if timeout(t, stream.write_all(req.as_bytes()))
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .is_none()
+        {
+            return FetchResult::Retry;
+        }
 
         let mut buf = Vec::new();
-        timeout(t, stream.read_to_end(&mut buf)).await.ok()?.ok()?;
+        if timeout(t, stream.read_to_end(&mut buf))
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .is_none()
+        {
+            return FetchResult::Retry;
+        }
 
-        let text = String::from_utf8(buf).ok()?;
-        let body_start = text.find("\r\n\r\n")? + 4;
+        let text = match String::from_utf8(buf) {
+            Ok(s) => s,
+            Err(_) => return FetchResult::Retry,
+        };
+        let body_start = match text.find("\r\n\r\n") {
+            Some(p) => p + 4,
+            None => return FetchResult::Retry,
+        };
         let body_section = &text[body_start..];
         // Axum emits Content-Length (no chunked) for Json<T>, and we set
         // Connection: close, so the body is a plain byte slice with no
         // dechunking needed. But in case a proxy ever intervenes, tolerate
         // stray trailing whitespace by trimming.
-        let snap: UiSnapshot = serde_json::from_str(body_section.trim()).ok()?;
+        let snap: UiSnapshot = match serde_json::from_str(body_section.trim()) {
+            Ok(s) => s,
+            Err(_) => return FetchResult::Retry,
+        };
         if snap.version != UI_SNAPSHOT_VERSION {
             // Version mismatch means the server's /data schema is newer
-            // (or older) than what we can parse. Treat as a fetch failure
-            // rather than rendering something half-understood.
-            return None;
+            // (or older) than what we can parse. This is a permanent
+            // incompatibility — bail out instead of retrying forever.
+            return FetchResult::VersionMismatch(format!(
+                "server /data version is incompatible (expected {}, got {}). Upgrade the older side.",
+                UI_SNAPSHOT_VERSION, snap.version
+            ));
         }
-        Some(snap)
+        FetchResult::Ok(Box::new(snap))
     }
 
     /// Frame shown only during the brief window before the first successful
@@ -515,7 +578,21 @@ impl Display {
         } else {
             format!("{} ({})", st.model_name, st.quantization)
         };
+        let has_aliases = !st.config.model_aliases.is_empty();
         self.print_kv(&mut t, "Model   ", &model_display, Color::White);
+        if has_aliases {
+            let _ = queue!(
+                t.stdout,
+                Print("                 "),
+                SetForegroundColor(MUTED_PURPLE),
+                Print(" — "),
+                SetAttribute(Attribute::Dim),
+                Print(&st.config.model_aliases),
+                SetAttribute(Attribute::Reset),
+                ResetColor
+            );
+            t.newline();
+        }
 
         // Source (grey sub of Model)
         self.render_source(&mut t, snap);
