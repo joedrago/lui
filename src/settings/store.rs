@@ -204,13 +204,16 @@ impl Config {
             !per_model_keys.is_empty()
         });
 
-        // Emit global settings first (skip those overridden per-model)
-        for (name, value) in self.global.iter() {
-            if per_model_keys.contains(name.as_str()) {
+        // Emit global settings first (skip those overridden per-model), in registry order
+        for setting in registry.settings() {
+            let Some(value) = self.global.get(setting.name) else {
+                continue;
+            };
+            if per_model_keys.contains(setting.name) {
                 continue;
             }
             // Special case: host => --public for 0.0.0.0, --host <val> otherwise
-            if name.as_str() == "host" {
+            if setting.name == "host" {
                 if value.as_str() == Some("0.0.0.0") {
                     segments.push(CliSegment::Global("--public".to_string()));
                 } else {
@@ -221,25 +224,36 @@ impl Config {
                 }
                 continue;
             }
-            if let Some(setting) = registry.get(name) {
-                if let Some(flag) = format_flag(setting, value) {
-                    segments.push(CliSegment::Global(flag));
-                }
+            if let Some(flag) = format_flag(setting, value) {
+                segments.push(CliSegment::Global(flag));
             }
         }
 
-        // Emit --this + per-model settings if there are overrides
+        // Emit --this + per-model settings if there are overrides, in registry order
         if has_per_model_overrides {
             segments.push(CliSegment::This);
             if let Some(pm) = self.per_model.get(&active) {
-                for (name, value) in pm.iter() {
-                    if name.as_str() == "type" {
+                let name_to_idx: HashMap<&str, usize> = registry
+                    .settings()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (s.name, i))
+                    .collect();
+                let mut pm_names: Vec<&str> = pm
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "type")
+                    .map(|(k, _)| k.as_str())
+                    .collect();
+                pm_names.sort_by_key(|name| name_to_idx.get(name).copied().unwrap_or(usize::MAX));
+                for name in pm_names {
+                    let Some(value) = pm.get(name) else {
                         continue;
-                    }
-                    if let Some(setting) = registry.get(name) {
-                        if let Some(flag) = format_flag(setting, value) {
-                            segments.push(CliSegment::PerModel(flag));
-                        }
+                    };
+                    let Some(setting) = registry.get(name) else {
+                        continue;
+                    };
+                    if let Some(flag) = format_flag(setting, value) {
+                        segments.push(CliSegment::PerModel(flag));
                     }
                 }
             }
