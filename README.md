@@ -19,11 +19,11 @@ Example first runs (use `lui -h` to see what these settings mean and tune them f
 ```
 # This runs on *anything* and is pretty good. the UD-Q6_K might be even better if you turn down -c a bit
 lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
-lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --this -c 262144
-lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --alias qwenmoe --this -c 262144 --ctk q8_0 --ctv q8_0 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
+lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --this -c 262144 --presence-penalty 1.5
+lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --alias qwenmoe --this -c 262144 --ctk q8_0 --ctv q8_0 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00 --presence-penalty 1.5
 
 # This runs on fewer things but seems great so far
-lui --hf unsloth/Qwen3.6-27B-GGUF:Q4_K_M --alias qwendense --this -c 131072 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --reasoning on
+lui --hf unsloth/Qwen3.6-27B-GGUF:Q4_K_M --alias qwendense --this -c 131072 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --reasoning on --presence-penalty 1.5
 
 # GLM 4.7 is fun
 lui --hf unsloth/GLM-4.7-Flash-GGUF:Q4_K_M
