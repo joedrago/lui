@@ -18,6 +18,7 @@ use display::Display;
 use server::{spawn_server, ConfigSummary};
 use settings::registry::Registry;
 use settings::setting::{Scope as RegScope, Setting};
+use settings::store::CliSegment;
 use settings::store::{validate_integer, Config};
 use settings::value::{Value as SettingValue, ValueKind};
 
@@ -962,13 +963,102 @@ async fn main() {
     // websearch skill, brew check, spawning) — a dry run shouldn't mutate
     // anything outside lui.toml (which save_config already handled above).
     if opts.cmd {
+        use crossterm::style::{
+            Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor,
+        };
+
         let args = server::build_args(&effective);
+
+        // Colors
+        let amber = Color::Rgb {
+            r: 230,
+            g: 180,
+            b: 80,
+        };
+        let pink = Color::Rgb {
+            r: 255,
+            g: 130,
+            b: 180,
+        };
+        let cyan = Color::Cyan;
+        let blue = Color::Blue;
+        let green = Color::Green;
+        let lavender = Color::Rgb {
+            r: 180,
+            g: 150,
+            b: 255,
+        };
+
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+
+        // --- lui line ---
+        let _ = crossterm::execute!(
+            handle,
+            SetForegroundColor(amber),
+            Print("lui command line for the current settings:\n")
+        );
+        let _ = crossterm::execute!(handle, SetForegroundColor(pink), Print("    lui"));
+        let segments = config.reconstruct_cli_segments(&reg);
+        for seg in segments {
+            match seg {
+                CliSegment::Model(s) => {
+                    let _ = crossterm::execute!(
+                        handle,
+                        SetForegroundColor(cyan),
+                        Print(" "),
+                        Print(&s)
+                    );
+                }
+                CliSegment::Global(s) => {
+                    let _ = crossterm::execute!(
+                        handle,
+                        SetForegroundColor(blue),
+                        Print(" "),
+                        Print(&s)
+                    );
+                }
+                CliSegment::This => {
+                    let _ = crossterm::execute!(
+                        handle,
+                        SetForegroundColor(green),
+                        Print(" --this"),
+                        ResetColor
+                    );
+                }
+                CliSegment::PerModel(s) => {
+                    let _ = crossterm::execute!(
+                        handle,
+                        SetForegroundColor(green),
+                        SetAttribute(Attribute::Dim),
+                        Print(" "),
+                        Print(&s)
+                    );
+                }
+            }
+        }
+        let _ = crossterm::execute!(handle, ResetColor, Print("\n"));
+
+        // --- llama-server line ---
         let mut line = String::from("llama-server");
         for a in &args {
             line.push(' ');
             line.push_str(&shell_quote(a));
         }
-        println!("{}", line);
+        let _ = crossterm::execute!(
+            handle,
+            SetForegroundColor(amber),
+            Print("\nderived llama-server commandline:\n")
+        );
+        let _ = crossterm::execute!(handle, SetForegroundColor(pink), Print("    llama-server"));
+        let _ = crossterm::execute!(
+            handle,
+            SetForegroundColor(lavender),
+            SetAttribute(Attribute::Dim),
+            Print(&line["llama-server".len()..])
+        );
+        let _ = crossterm::execute!(handle, ResetColor, Print("\n"));
+
         return;
     }
 

@@ -9,7 +9,21 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+/// A segment of a reconstructed CLI command, for colored rendering.
+#[derive(Debug, Clone)]
+pub enum CliSegment {
+    /// The model specification (`--hf ...` or `-m ...` or `--alias ...`).
+    Model(String),
+    /// A global setting flag (blue).
+    Global(String),
+    /// The `--this` scope switch (dim green).
+    This,
+    /// A per-model setting flag after `--this` (green).
+    PerModel(String),
+}
+
 use super::registry::Registry;
+use super::setting::Setting;
 use super::value::{self, Value, ValueKind};
 
 /// A bag of setting values keyed by `Setting::name`. Unset settings are
@@ -130,6 +144,185 @@ impl Config {
             per_model,
         }
     }
+
+    /// Reconstruct a `lui` command-line that would recreate the current
+    /// effective config. Returns typed segments for colored rendering.
+    /// Emits: `lui <model-spec> [global-flags] [--this per-model-flags]`.
+    /// Only explicitly-set settings are emitted (not effective defaults).
+    /// Skips the per-model `type` tag (not a CLI flag).
+    pub fn reconstruct_cli_segments(&self, registry: &Registry) -> Vec<CliSegment> {
+        let mut segments = Vec::new();
+
+        // Model specification
+        let Some(active) = self.global.get("active_model") else {
+            return segments;
+        };
+        let active = match active {
+            Value::String(s) if !s.is_empty() => s.clone(),
+            _ => return segments,
+        };
+
+        // Check aliases first
+        let mut has_alias = false;
+        for (alias_name, alias_target) in &self.aliases {
+            if alias_target == &active {
+                segments.push(CliSegment::Model(format!(
+                    "--alias {}",
+                    shell_quote(alias_name)
+                )));
+                has_alias = true;
+                break;
+            }
+        }
+
+        if !has_alias {
+            // Infer type from per-model store or key shape
+            let is_local = self
+                .per_model
+                .get(&active)
+                .and_then(|s| s.get("type"))
+                .and_then(Value::as_str)
+                .map(|t| t == "local")
+                .unwrap_or_else(|| {
+                    active.contains('/')
+                        && (active.starts_with('/')
+                            || active.starts_with("./")
+                            || active.starts_with('~')
+                            || active.ends_with(".gguf"))
+                });
+            let prefix = if is_local { "-m " } else { "--hf " };
+            segments.push(CliSegment::Model(format!(
+                "{}{}",
+                prefix,
+                shell_quote(&active)
+            )));
+        }
+
+        // Collect per-model keys to avoid emitting them from global
+        let mut per_model_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let has_per_model_overrides = self.per_model.get(&active).is_some_and(|pm| {
+            for (name, _) in pm.iter() {
+                if name.as_str() != "type" {
+                    per_model_keys.insert(name.as_str());
+                }
+            }
+            !per_model_keys.is_empty()
+        });
+
+        // Emit global settings first (skip those overridden per-model)
+        for (name, value) in self.global.iter() {
+            if per_model_keys.contains(name.as_str()) {
+                continue;
+            }
+            if let Some(setting) = registry.get(name) {
+                if let Some(flag) = format_flag(setting, value) {
+                    segments.push(CliSegment::Global(flag));
+                }
+            }
+        }
+
+        // Emit --this + per-model settings if there are overrides
+        if has_per_model_overrides {
+            segments.push(CliSegment::This);
+            if let Some(pm) = self.per_model.get(&active) {
+                for (name, value) in pm.iter() {
+                    if name.as_str() == "type" {
+                        continue;
+                    }
+                    if let Some(setting) = registry.get(name) {
+                        if let Some(flag) = format_flag(setting, value) {
+                            segments.push(CliSegment::PerModel(flag));
+                        }
+                    }
+                }
+            }
+        }
+
+        segments
+    }
+}
+
+/// Format a single CLI flag from a setting+value pair. Returns `None` for
+/// settings that shouldn't appear on the CLI (storage-only, ephemeral).
+fn format_flag(setting: &Setting, value: &Value) -> Option<String> {
+    let long = setting.long?;
+    if matches!(setting.scope, super::setting::Scope::Ephemeral) {
+        return None;
+    }
+    match value {
+        Value::Bool(true) => Some(format!("--{}", long)),
+        Value::Bool(false) => {
+            if setting.has_no_form() {
+                Some(format!("--no-{}", long))
+            } else {
+                None
+            }
+        }
+        Value::Integer(n) => Some(format!("--{} {}", long, n)),
+        Value::Float(f) => Some(format!("--{} {}", long, crate::server::format_float(*f))),
+        Value::String(s) => Some(format!("--{} {}", long, s)),
+        Value::StringArray(v) => {
+            let mut flags = Vec::new();
+            for token in v {
+                flags.push(format!("--{} {}", long, shell_quote(token)));
+            }
+            Some(flags.join(" "))
+        }
+        Value::Map(m) => {
+            let json = crate::server::toml_map_to_json_object(m);
+            let json_str = serde_json::to_string(&json).unwrap_or_default();
+            Some(format!("--{} {}", long, shell_quote(&json_str)))
+        }
+    }
+}
+
+/// Shell-quote an argument for safe embedding in a reconstructed command.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    // Check if quoting is needed
+    let needs_quote = s.chars().any(|c| {
+        matches!(
+            c,
+            ' ' | '\t'
+                | '\n'
+                | '\''
+                | '"'
+                | '\\'
+                | '$'
+                | '`'
+                | ';'
+                | '&'
+                | '|'
+                | '('
+                | ')'
+                | '<'
+                | '>'
+                | '*'
+                | '?'
+                | '#'
+                | '~'
+                | '%'
+        )
+    });
+    if !needs_quote {
+        return s.to_string();
+    }
+    // Double-quote and escape internal double-quotes and backslashes
+    let mut quoted = String::with_capacity(s.len() + 2);
+    quoted.push('"');
+    for c in s.chars() {
+        match c {
+            '"' | '\\' => {
+                quoted.push('\\');
+                quoted.push(c);
+            }
+            _ => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// Precedence-resolved view over the three layers. Read-only.

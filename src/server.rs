@@ -436,7 +436,7 @@ fn render_value(
 }
 
 /// Format an f64 to 3 significant figures, trimming trailing zeros.
-fn format_float(f: f64) -> String {
+pub fn format_float(f: f64) -> String {
     if f == 0.0 {
         return "0".to_string();
     }
