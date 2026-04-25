@@ -209,6 +209,18 @@ impl Config {
             if per_model_keys.contains(name.as_str()) {
                 continue;
             }
+            // Special case: host => --public for 0.0.0.0, --host <val> otherwise
+            if name.as_str() == "host" {
+                if value.as_str() == Some("0.0.0.0") {
+                    segments.push(CliSegment::Global("--public".to_string()));
+                } else {
+                    segments.push(CliSegment::Global(format!(
+                        "--host {}",
+                        value.as_str().unwrap_or("")
+                    )));
+                }
+                continue;
+            }
             if let Some(setting) = registry.get(name) {
                 if let Some(flag) = format_flag(setting, value) {
                     segments.push(CliSegment::Global(flag));
