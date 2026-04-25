@@ -346,7 +346,6 @@ args.push("-v".to_string());
 args.push("-fa".to_string());  args.push("on".to_string());
 args.push("--cache-reuse".to_string());  args.push("256".to_string());
 args.push("-kvu".to_string());
-args.push("--no-mmproj".to_string());
 ```
 
 These are lui policy, not user settings:
@@ -362,7 +361,6 @@ These are lui policy, not user settings:
 - `-fa on` — flash attention always on.
 - `--cache-reuse 256` + `-kvu` — prompt-cache reuse tuned for
   agentic workloads (opencode re-sends similar prompts turn-to-turn).
-- `--no-mmproj` — no multimodal projection (lui is text-only).
 
 **When to add to this list vs. the registry:** if the flag is a
 universal lui opinion that no user should ever disable, hard-code it

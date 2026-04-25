@@ -1037,6 +1037,24 @@ async fn main() {
                 }
             }
         }
+
+        // Append extra_args (post-`--` passthrough) in dim yellow.
+        let extra = effective.merged_string_array("extra_args");
+        if !extra.is_empty() {
+            let _ = crossterm::execute!(
+                handle,
+                SetForegroundColor(Color::Rgb { r: 255, g: 255, b: 100 }),
+                SetAttribute(Attribute::Dim),
+                Print(" --")
+            );
+            for a in &extra {
+                let _ = crossterm::execute!(
+                    handle,
+                    Print(" "),
+                    Print(&shell_quote(a))
+                );
+            }
+        }
         let _ = crossterm::execute!(handle, ResetColor, Print("\n"));
 
         // --- llama-server line ---

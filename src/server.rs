@@ -694,7 +694,6 @@ pub fn build_args(eff: &Effective) -> Vec<String> {
     args.push("--cache-reuse".to_string());
     args.push("256".to_string());
     args.push("-kvu".to_string());
-    args.push("--no-mmproj".to_string());
 
     // Model identity: `[server].active_model` names a per-model entry
     // whose `type` field decides between `-hf` and `-m`. Fallback path
