@@ -274,6 +274,18 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .help(&["Alias the active model as NAME"]),
     );
     reg.push(
+        Setting::new("clone")
+            .long("clone")
+            .placeholder("SOURCE")
+            .kind(String)
+            .scope(Ephemeral)
+            .section("MODEL")
+            .help(&[
+                "Clone per-model settings from SOURCE to the active model",
+                "(also sets --this for subsequent flags)",
+            ]),
+    );
+    reg.push(
         Setting::new("active_model")
             .kind(String)
             .scope(Global)

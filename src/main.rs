@@ -151,6 +151,29 @@ fn parse_args(config: &mut Config) -> RunOpts {
                 });
                 config.aliases.insert(name, target);
             }
+            Long("clone") => {
+                let source = take_string(&mut parser, "--clone");
+                let source = config
+                    .aliases
+                    .get(&source)
+                    .cloned()
+                    .unwrap_or_else(|| source.clone());
+                let dest = active_key.clone().unwrap_or_else(|| {
+                    die("--clone requires an active model; pass --hf or -m first")
+                });
+                let source_store = config.per_model.get(&source).unwrap_or_else(|| {
+                    die(&format!(
+                        "cannot clone '{}': no per-model settings found (is it a known model key or alias?)",
+                        source
+                    ))
+                });
+                let pairs: Vec<(String, SettingValue)> = source_store.iter().filter(|(k, _)| *k != "type").map(|(k, v)| (k.clone(), v.clone())).collect();
+                let dest_store = config.per_model.entry(dest).or_default();
+                for (k, v) in pairs {
+                    dest_store.set(k, v);
+                }
+                scope_is_this = true;
+            }
             Long("public") => {
                 require_global(scope_is_this, "--public");
                 config
