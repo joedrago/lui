@@ -461,7 +461,7 @@ impl Display {
             return;
         }
 
-         // Blank line below the header doubles as the always-visible home of
+        // Blank line below the header doubles as the always-visible home of
         // the websearch setup URL, right-aligned. Starts bold lavender and
         // fades to dark grey over the first 7 seconds.
         if let Some(ref url) = self.local_setup_url {
@@ -553,7 +553,7 @@ impl Display {
                     cpu_parts.join(" + ")
                 )
             };
-            self.print_sub(&mut t, &breakdown);
+            self.print_wrapped(&mut t, &breakdown);
 
             // GPU offload as second grey line under Memory.
             //
@@ -615,7 +615,7 @@ impl Display {
                         st.gpu_layers_loaded, st.total_layers
                     )
                 };
-                self.print_sub(&mut t, &gpu_line);
+                self.print_wrapped(&mut t, &gpu_line);
             }
         }
 
@@ -671,7 +671,7 @@ impl Display {
                     st.file_bpw
                 )
             };
-            self.print_sub(&mut t, &params_display);
+            self.print_wrapped(&mut t, &params_display);
         }
 
         // Context (grey sub of Model)
@@ -684,7 +684,7 @@ impl Display {
         } else {
             format!("{} token context window", format_number(st.ctx_size as u64))
         };
-        self.print_sub(&mut t, &ctx_display);
+        self.print_wrapped(&mut t, &ctx_display);
 
         // Sampling (grey sub of Model) — only if any sampler was explicitly
         // set. The renderer doesn't know which setting names belong to this
@@ -697,7 +697,7 @@ impl Display {
             .map(format_setting_entry)
             .collect();
         if !sampling_parts.is_empty() {
-            self.print_sub(&mut t, &format!("sampling: {}", sampling_parts.join(" · ")));
+            self.print_wrapped(&mut t, &format!("sampling: {}", sampling_parts.join(" · ")));
         }
 
         // llamacpp + status
@@ -736,7 +736,7 @@ impl Display {
         t.newline();
 
         // Bind (grey sub-line under llamacpp)
-        self.print_sub(&mut t, &snap.config.bind_addr);
+        self.print_wrapped(&mut t, &snap.config.bind_addr);
 
         // Tuning (grey sub-line under llamacpp) — effective performance
         // knobs. Every `tuning`-group entry lands here regardless of
@@ -749,7 +749,7 @@ impl Display {
             .map(format_setting_entry)
             .collect();
         if !tuning_parts.is_empty() {
-            self.print_sub(&mut t, &tuning_parts.join(" · "));
+            self.print_wrapped(&mut t, &tuning_parts.join(" · "));
         }
 
         // Performance section
@@ -943,7 +943,7 @@ impl Display {
     }
 
     fn render_source(&self, t: &mut TermBuf, snap: &UiSnapshot) {
-        self.print_sub(t, &snap.config.model_source);
+        self.print_wrapped(t, &snap.config.model_source);
     }
 
     fn print_tps(&self, t: &mut TermBuf, label: &str, last: f64, avg: f64) {
@@ -1047,17 +1047,28 @@ impl Display {
         t.newline();
     }
 
-    fn print_sub(&self, t: &mut TermBuf, value: &str) {
-        let prefix_len = 17;
+    fn print_wrapped(&self, t: &mut TermBuf, value: &str) {
+        let prefix = "                 ";
+        let prefix_len = prefix.chars().count();
         let max_val = t.width.saturating_sub(prefix_len);
-        let _ = queue!(
-            t.stdout,
-            Print("                 "),
-            SetForegroundColor(Color::DarkGrey),
-            Print(truncate(value, max_val)),
-            ResetColor
-        );
-        t.newline();
+
+        if max_val == 0 {
+            return;
+        }
+
+        let wrapped = wrap_text(value, max_val);
+        let lines: Vec<&str> = wrapped.split('\n').collect();
+
+        for line in lines {
+            let _ = queue!(
+                t.stdout,
+                Print(prefix),
+                SetForegroundColor(Color::DarkGrey),
+                Print(truncate(line, max_val)),
+                ResetColor
+            );
+            t.newline();
+        }
     }
 
     fn render_log(snap: &UiSnapshot, t: &mut TermBuf) {
@@ -1103,7 +1114,7 @@ impl Display {
         }
     }
 
-   /// Compute the setup URL color based on how long the UI has been running.
+    /// Compute the setup URL color based on how long the UI has been running.
     /// Bright cyan for the first 3 seconds, then dark grey.
     fn setup_url_color(&self) -> Color {
         if (self.start_time.elapsed().as_millis() as u64) < SETUP_URL_START_MS {
@@ -1273,6 +1284,35 @@ fn format_setting_entry(s: &crate::server::SettingEntry) -> String {
     } else {
         format!("{}={}", s.display_label, s.value)
     }
+}
+
+/// Word-wrap text to the given max width. Splits on whitespace and
+/// returns a single string with `\n` between wrapped lines.
+fn wrap_text(text: &str, max_width: usize) -> String {
+    if text.is_empty() || max_width == 0 {
+        return String::new();
+    }
+
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+
+    for word in text.split_whitespace() {
+        if current_line.is_empty() {
+            current_line = word.to_string();
+        } else if current_line.chars().count() + 1 + word.chars().count() <= max_width {
+            current_line.push(' ');
+            current_line.push_str(word);
+        } else {
+            lines.push(current_line);
+            current_line = word.to_string();
+        }
+    }
+
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    lines.join("\n")
 }
 
 fn truncate(s: &str, max_len: usize) -> String {

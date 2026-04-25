@@ -435,6 +435,35 @@ fn render_value(
     generic_value_display(value)
 }
 
+/// Format an f64 to 3 significant figures, trimming trailing zeros.
+fn format_float(f: f64) -> String {
+    if f == 0.0 {
+        return "0".to_string();
+    }
+
+    let abs = f.abs();
+    let decimal_places = if abs >= 100.0 {
+        0
+    } else if abs >= 10.0 {
+        1
+    } else if abs >= 1.0 {
+        2
+    } else if abs >= 0.1 {
+        3
+    } else if abs >= 0.01 {
+        4
+    } else if abs >= 0.001 {
+        5
+    } else {
+        return format!("{:.3e}", f);
+    };
+
+    format!("{:.*}", decimal_places, f)
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
 /// Default renderer for scalar values. Composite kinds (`Map`,
 /// `StringArray`) don't have a sensible single-row form here — settings
 /// that need one provide a `ui_format`.
@@ -443,7 +472,7 @@ fn generic_value_display(value: Option<&crate::settings::value::Value>) -> Optio
     match value? {
         Value::Bool(b) => Some(b.to_string()),
         Value::Integer(n) => Some(n.to_string()),
-        Value::Float(f) => Some(format!("{}", f)),
+        Value::Float(f) => Some(format_float(*f)),
         Value::String(s) => Some(s.clone()),
         Value::StringArray(_) | Value::Map(_) => None,
     }
@@ -753,7 +782,7 @@ pub fn build_args(eff: &Effective) -> Vec<String> {
 fn format_passthrough_value(v: &Value) -> String {
     match v {
         Value::Integer(n) => n.to_string(),
-        Value::Float(f) => format!("{}", f),
+        Value::Float(f) => format_float(*f),
         Value::String(s) => s.clone(),
         Value::Map(m) => toml_map_to_json_object(m).to_string(),
         Value::Bool(_) | Value::StringArray(_) => String::new(),

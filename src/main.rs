@@ -167,7 +167,11 @@ fn parse_args(config: &mut Config) -> RunOpts {
                         source
                     ))
                 });
-                let pairs: Vec<(String, SettingValue)> = source_store.iter().filter(|(k, _)| *k != "type").map(|(k, v)| (k.clone(), v.clone())).collect();
+                let pairs: Vec<(String, SettingValue)> = source_store
+                    .iter()
+                    .filter(|(k, _)| *k != "type")
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 let dest_store = config.per_model.entry(dest).or_default();
                 for (k, v) in pairs {
                     dest_store.set(k, v);
