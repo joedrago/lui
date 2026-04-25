@@ -17,12 +17,12 @@ A friendly TUI wrapper for [llama.cpp](https://github.com/ggml-org/llama.cpp)'s 
 Example first runs (use `lui -h` to see what these settings mean and tune them for your machine):
 
 ```
-# This runs on *anything* and is pretty good
+# This runs on *anything* and is pretty good. the UD-Q6_K might be even better if you turn down -c a bit
 lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
 lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --this -c 262144
 lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --alias qwenmoe --this -c 262144 --ctk q8_0 --ctv q8_0 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
 
-# This runs on fewer things but seems great so far, maybe my fave
+# This runs on fewer things but seems great so far
 lui --hf unsloth/Qwen3.6-27B-GGUF:Q4_K_M --alias qwendense --this -c 131072 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --reasoning on
 
 # GLM 4.7 is fun
