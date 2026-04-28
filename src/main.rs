@@ -1080,17 +1080,15 @@ async fn main() {
         return;
     }
 
-    // First harness pass: every enabled harness writes its config + skill
-    // with whatever ctx_size the user has configured (may be 0 for
-    // "model default" — llama-server will tell us the real value once it
-    // starts; the post-ready task below rewrites with that).
+    // First harness pass: every enabled harness writes its config, and
+    // every harness (enabled or not) gets its lui-web-search skill written
+    // or removed so disabled-now-but-once-enabled harnesses don't keep a
+    // stale SKILL.md around. ctx_size may be 0 here ("model default") —
+    // llama-server will tell us the real value once it starts and the
+    // post-ready task below rewrites with that.
     let initial_ctx_size = effective.get_i64("ctx_size").unwrap_or(0) as u32;
     let inputs_pre = build_harness_inputs(&effective, initial_ctx_size);
-    for h in harness::HARNESSES {
-        if effective.get_bool(h.setting_name).unwrap_or(h.default_on) {
-            harness::apply_local(h, &effective, &inputs_pre);
-        }
-    }
+    harness::update_all_local(&effective, &inputs_pre);
 
     // Get llama-server version
     let llama_version = match std::process::Command::new("llama-server")
@@ -1198,11 +1196,7 @@ async fn main() {
                 let reg = Registry::build();
                 let eff = config_for_harness.effective(&reg, active_key_for_harness.as_deref());
                 let inputs = build_harness_inputs(&eff, actual_per_slot);
-                for h in harness::HARNESSES {
-                    if eff.get_bool(h.setting_name).unwrap_or(h.default_on) {
-                        harness::apply_local(h, &eff, &inputs);
-                    }
-                }
+                harness::update_all_local(&eff, &inputs);
                 break;
             }
             if st.exited {

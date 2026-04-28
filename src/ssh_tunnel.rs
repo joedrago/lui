@@ -280,12 +280,7 @@ pub fn setup_share(
         websearch: effective.get_bool("websearch").unwrap_or(true),
     };
 
-    for h in harness::HARNESSES {
-        if !effective.get_bool(h.setting_name).unwrap_or(h.default_on) {
-            continue;
-        }
-        harness::apply_remote(h, target, remote_web, &inputs, effective)?;
-    }
+    harness::update_all_remote(target, effective, &inputs, remote_web)?;
 
     print_share_success(target, effective, remote_llama, remote_web);
     Ok(())
@@ -392,6 +387,7 @@ fn print_use_banner(
     lui_cfg: &LuiConfigResponse,
     llama_base_url: &str,
     local_web: u16,
+    websearch: bool,
 ) {
     let mut stdout = std::io::stdout();
     let lavender = Color::Rgb {
@@ -418,28 +414,49 @@ fn print_use_banner(
         SetAttribute(Attribute::Reset),
         ResetColor,
         Print("\n"),
-        SetForegroundColor(muted),
-        Print(format!(
+    );
+    let info = if websearch {
+        format!(
             "    model:            {}\n    llama (direct):   {}\n    bsearch (local):  http://127.0.0.1:{}/bsearch\n    bookmarklet:      http://127.0.0.1:{}/setup\n",
             lui_cfg.model_name, llama_base_url, local_web, local_web
-        )),
+        )
+    } else {
+        format!(
+            "    model:            {}\n    llama (direct):   {}\n",
+            lui_cfg.model_name, llama_base_url
+        )
+    };
+    let _ = crossterm::execute!(
+        stdout,
+        SetForegroundColor(muted),
+        Print(info),
         ResetColor,
         Print("\n"),
         SetForegroundColor(muted),
         Print("  opencode config written. Run `opencode` in another terminal.\n"),
-        Print("  Open the bookmarklet URL once to install/update the search bookmark;\n"),
-        Print("  /bsearch stays broken until that bookmarklet fires in a browser.\n"),
-        Print("  Ctrl-C here to shut down the local bsearch server.\n\n"),
-        ResetColor,
     );
+    if websearch {
+        let _ = crossterm::execute!(
+            stdout,
+            Print("  Open the bookmarklet URL once to install/update the search bookmark;\n"),
+            Print("  /bsearch stays broken until that bookmarklet fires in a browser.\n"),
+            Print("  Ctrl-C here to shut down the local bsearch server.\n\n"),
+            ResetColor,
+        );
+    } else {
+        let _ = crossterm::execute!(stdout, Print("  Ctrl-C here to exit.\n\n"), ResetColor);
+    }
 }
 
 /// `--remote`: entry point on a client. Fetches the server's `/config`
 /// over plain HTTP, writes each enabled harness's config locally pointing
-/// at the server, spawns an in-process bsearch HTTP server, and blocks on
-/// Ctrl-C so bsearch stays alive for the life of the opencode session. No
-/// SSH anywhere — `--public` on the server is the only prerequisite, and
-/// if `/config` is reachable so is llama-server on the same interface.
+/// at the server, optionally spawns an in-process bsearch HTTP server, and
+/// blocks on Ctrl-C so bsearch stays alive for the life of the opencode
+/// session. No SSH anywhere — `--public` on the server is the only
+/// prerequisite, and if `/config` is reachable so is llama-server on the
+/// same interface. `--no-websearch` here genuinely disables web search:
+/// no skill is written, no bsearch endpoint runs, and any stale skill
+/// from a previous run is removed.
 pub async fn setup_use(
     target: &UseTarget,
     effective: &crate::settings::store::Effective<'_>,
@@ -458,80 +475,80 @@ pub async fn setup_use(
     // so the URL matches what they'd see in `lui --public`'s banner.
     let llama_base_url = format!("http://{}:{}/v1", target.host, lui_cfg.llama_port);
 
-    // Apply every enabled harness locally, pointed at the remote server.
-    // Websearch is always on here — the client always spins up the local
-    // bsearch server that the skill talks to.
+    // Honor the *client's* --websearch / --no-websearch on this side.
+    // Whether the server it's pointing at has websearch on is irrelevant —
+    // browser-mediated search needs the user at a real browser, which is
+    // wherever this client is running.
+    let websearch = effective.get_bool("websearch").unwrap_or(true);
+
+    // Apply every harness locally: enabled ones get config writes pointed
+    // at the remote server, and every harness's lui-web-search skill is
+    // written or removed so disabled harnesses can't keep stale skills.
     let inputs = harness::HarnessInputs {
         model_name: lui_cfg.model_name.clone(),
         base_url: llama_base_url.clone(),
         ctx_size: lui_cfg.ctx_size,
         web_port: local_web,
-        websearch: true,
+        websearch,
     };
-    for h in harness::HARNESSES {
-        if !effective.get_bool(h.setting_name).unwrap_or(h.default_on) {
-            continue;
-        }
-        harness::apply_local(h, effective, &inputs);
-    }
+    harness::update_all_local(effective, &inputs);
 
-    // In-process bsearch server. We synthesize a minimal ServerState just
-    // to satisfy the API; only `websearch_total` / `active_searches` get
-    // touched by bsearch handlers, so defaults are fine. The `/config`
-    // payload we hand it reflects this client's view — mostly there so a
-    // future tool introspecting *this* instance sees something coherent.
-    let state = Arc::new(Mutex::new(ServerState::default()));
-    let config_info = LuiConfigResponse {
-        version: CONFIG_VERSION,
-        llama_port: lui_cfg.llama_port,
-        web_port: local_web,
-        websearch: true,
-        model_name: lui_cfg.model_name.clone(),
-        ctx_size: lui_cfg.ctx_size,
+    // In-process bsearch server, only when websearch is on. We synthesize a
+    // minimal ServerState just to satisfy the API; only `websearch_total` /
+    // `active_searches` get touched by bsearch handlers, so defaults are
+    // fine. With websearch off there's nothing for this server to do — the
+    // client's own /data is never polled (the Display points at the server's
+    // /data) and skill-relevant routes aren't mounted — so we skip it
+    // entirely.
+    let local_state = if websearch {
+        let state = Arc::new(Mutex::new(ServerState::default()));
+        let config_info = LuiConfigResponse {
+            version: CONFIG_VERSION,
+            llama_port: lui_cfg.llama_port,
+            web_port: local_web,
+            websearch: true,
+            model_name: lui_cfg.model_name.clone(),
+            ctx_size: lui_cfg.ctx_size,
+        };
+        let dummy_summary = ConfigSummary {
+            bind_addr: format!("127.0.0.1:{}", local_web),
+            web_port: local_web,
+            websearch: true,
+            model_source: "none".to_string(),
+            model_aliases: String::new(),
+        };
+        websearch::spawn(
+            "127.0.0.1",
+            local_web,
+            state.clone(),
+            config_info,
+            std::time::Instant::now(),
+            dummy_summary,
+            Vec::new(),
+        );
+        Some(state)
+    } else {
+        None
     };
-    // Minimal ConfigSummary for the client's in-process HTTP server. Nothing
-    // ever polls this client's /data (the renderer points at the *server's*
-    // /data, not ours), so fields here are placeholders — but we keep the
-    // shape coherent in case something future introspects it.
-    let dummy_summary = ConfigSummary {
-        bind_addr: format!("127.0.0.1:{}", local_web),
-        web_port: local_web,
-        websearch: true,
-        model_source: "none".to_string(),
-        model_aliases: String::new(),
-    };
-    websearch::spawn(
-        "127.0.0.1",
-        local_web,
-        state.clone(),
-        config_info,
-        std::time::Instant::now(),
-        dummy_summary,
-        Vec::new(),
-    );
 
     // Print the setup banner before the Display starts. Display doesn't
     // Purge scrollback, so this stays scrollable during the session —
     // useful for recovering the bookmarklet URL or confirming what
     // opencode was pointed at without having to exit.
-    print_use_banner(target, &lui_cfg, &llama_base_url, local_web);
+    print_use_banner(target, &lui_cfg, &llama_base_url, local_web, websearch);
 
     // Render the server's UI by polling its `/data`. We pass `Some(state)`
-    // for the client's in-process bsearch ServerState — `websearch_total`
-    // and `active_searches` reflect the user's opencode-driven searches
-    // through *our* bsearch, which is what they care about. The server's
-    // log lines now come via `/data` so the Server Log panel works in
-    // remote mode too. The bookmarklet URL is shown based on the *local*
-    // websearch setting (the client always runs its own bsearch; the
-    // server's websearch config is irrelevant for this URL).
-    let local_setup_url = effective
-        .get_bool("websearch")
-        .unwrap_or(true)
-        .then(|| format!("http://127.0.0.1:{}/setup", local_web));
+    // for the client's in-process bsearch ServerState (when websearch is
+    // on) so the renderer can show `websearch_total` / `active_searches`
+    // for the user's opencode-driven searches through *our* bsearch.
+    // The bookmarklet URL is shown based on the *local* websearch setting
+    // (the client always runs its own bsearch when on; the server's
+    // websearch config is irrelevant for this URL).
+    let local_setup_url = websearch.then(|| format!("http://127.0.0.1:{}/setup", local_web));
     let display = Display::new(
         target.host.clone(),
         target.http_port,
-        Some(state.clone()),
+        local_state,
         local_setup_url,
         Some(target.host.clone()),
     );

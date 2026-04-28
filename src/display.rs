@@ -267,9 +267,7 @@ impl Display {
                     addr, FETCH_TIMEOUT_MS
                 ))
             }
-            Ok(Err(e)) => {
-                return FetchResult::Retry(format!("connect to {} failed: {}", addr, e))
-            }
+            Ok(Err(e)) => return FetchResult::Retry(format!("connect to {} failed: {}", addr, e)),
             Ok(Ok(s)) => s,
         };
         let req = "GET /data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept: application/json\r\n\r\n";
@@ -280,9 +278,7 @@ impl Display {
                     addr, FETCH_TIMEOUT_MS
                 ))
             }
-            Ok(Err(e)) => {
-                return FetchResult::Retry(format!("write to {} failed: {}", addr, e))
-            }
+            Ok(Err(e)) => return FetchResult::Retry(format!("write to {} failed: {}", addr, e)),
             Ok(Ok(())) => {}
         }
 
@@ -294,17 +290,13 @@ impl Display {
                     addr, FETCH_TIMEOUT_MS
                 ))
             }
-            Ok(Err(e)) => {
-                return FetchResult::Retry(format!("read from {} failed: {}", addr, e))
-            }
+            Ok(Err(e)) => return FetchResult::Retry(format!("read from {} failed: {}", addr, e)),
             Ok(Ok(_)) => {}
         }
 
         let text = match String::from_utf8(buf) {
             Ok(s) => s,
-            Err(_) => {
-                return FetchResult::Retry(format!("non-UTF8 response from {}", addr))
-            }
+            Err(_) => return FetchResult::Retry(format!("non-UTF8 response from {}", addr)),
         };
 
         // Status line: "HTTP/1.1 NNN ...\r\n". Surface non-2xx statuses as
@@ -320,9 +312,7 @@ impl Display {
             .and_then(|s| s.parse::<u16>().ok())
         {
             Some(c) if (200..300).contains(&c) => {}
-            Some(c) => {
-                return FetchResult::Retry(format!("HTTP {} from {}/data", c, addr))
-            }
+            Some(c) => return FetchResult::Retry(format!("HTTP {} from {}/data", c, addr)),
             None => {
                 return FetchResult::Retry(format!(
                     "malformed status line from {}: {}",
@@ -348,12 +338,7 @@ impl Display {
         // stray trailing whitespace by trimming.
         let snap: UiSnapshot = match serde_json::from_str(body_section.trim()) {
             Ok(s) => s,
-            Err(e) => {
-                return FetchResult::Retry(format!(
-                    "JSON parse from {}/data: {}",
-                    addr, e
-                ))
-            }
+            Err(e) => return FetchResult::Retry(format!("JSON parse from {}/data: {}", addr, e)),
         };
         if snap.version != UI_SNAPSHOT_VERSION {
             // Version mismatch means the server's /data schema is newer
@@ -408,10 +393,7 @@ impl Display {
         t.newline();
         t.newline();
 
-        let url = format!(
-            "http://{}:{}/data",
-            self.snapshot_host, self.snapshot_port
-        );
+        let url = format!("http://{}:{}/data", self.snapshot_host, self.snapshot_port);
         let _ = queue!(
             t.stdout,
             Print("  Polling "),

@@ -118,8 +118,9 @@ pub fn local_skill_dir(cf: &ConfigFile) -> PathBuf {
 }
 
 /// Apply a harness locally: parse its config, let the harness edit the
-/// CST, serialize, atomic-write with first-touch backup, then write (or
-/// remove) the websearch SKILL.md.
+/// CST, serialize, atomic-write with first-touch backup. Skill management
+/// is handled separately so disabled harnesses can have stale skills
+/// cleaned up too — see `update_all_local`.
 pub fn apply_local(harness: &Harness, eff: &Effective, inputs: &HarnessInputs) {
     let path = local_config_path(&harness.config);
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -137,55 +138,72 @@ pub fn apply_local(harness: &Harness, eff: &Effective, inputs: &HarnessInputs) {
         }
     };
 
-    if new_text != existing {
-        if should_backup {
-            let mut backup = path.as_os_str().to_os_string();
-            backup.push(".luibackup");
-            let backup = PathBuf::from(backup);
-            if !backup.exists() {
-                let _ = std::fs::write(&backup, &existing);
+    if new_text == existing {
+        return;
+    }
+    if should_backup {
+        let mut backup = path.as_os_str().to_os_string();
+        backup.push(".luibackup");
+        let backup = PathBuf::from(backup);
+        if !backup.exists() {
+            let _ = std::fs::write(&backup, &existing);
+        }
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Atomic write: temp file + rename. Rename is atomic on POSIX when
+    // source and dest share a filesystem, which they do (same dir).
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".luitmp");
+    let tmp_path = PathBuf::from(tmp);
+    if let Err(e) = std::fs::write(&tmp_path, &new_text) {
+        eprintln!("Warning: failed to write {}: {}", tmp_path.display(), e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &path) {
+        eprintln!(
+            "Warning: failed to rename {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            e
+        );
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+}
+
+/// Update every declared harness on the local machine. The skill is
+/// present iff the harness is enabled AND websearch is on; this runs for
+/// disabled harnesses too so a previously-enabled-now-disabled harness
+/// gets its stale skill cleaned up. Config writes only fire for enabled
+/// harnesses.
+pub fn update_all_local(eff: &Effective, inputs: &HarnessInputs) {
+    for h in HARNESSES {
+        let enabled = eff.get_bool(h.setting_name).unwrap_or(h.default_on);
+        let want_skill = enabled && inputs.websearch;
+
+        let dir = local_skill_dir(&h.config);
+        let skill_path = dir.join("SKILL.md");
+        if want_skill {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                eprintln!("Warning: failed to create {}: {}", dir.display(), e);
+            } else if let Err(e) =
+                std::fs::write(&skill_path, render_websearch_skill(inputs.web_port))
+            {
+                eprintln!("Warning: failed to write {}: {}", skill_path.display(), e);
+            }
+        } else {
+            if skill_path.exists() {
+                let _ = std::fs::remove_file(&skill_path);
+            }
+            if dir.exists() {
+                let _ = std::fs::remove_dir(&dir);
             }
         }
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        // Atomic write: temp file + rename. Rename is atomic on POSIX when
-        // source and dest share a filesystem, which they do (same dir).
-        let mut tmp = path.as_os_str().to_os_string();
-        tmp.push(".luitmp");
-        let tmp_path = PathBuf::from(tmp);
-        if let Err(e) = std::fs::write(&tmp_path, &new_text) {
-            eprintln!("Warning: failed to write {}: {}", tmp_path.display(), e);
-            return;
-        }
-        if let Err(e) = std::fs::rename(&tmp_path, &path) {
-            eprintln!(
-                "Warning: failed to rename {} -> {}: {}",
-                tmp_path.display(),
-                path.display(),
-                e
-            );
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-    }
 
-    let dir = local_skill_dir(&harness.config);
-    let skill_path = dir.join("SKILL.md");
-    if !inputs.websearch {
-        if skill_path.exists() {
-            let _ = std::fs::remove_file(&skill_path);
+        if enabled {
+            apply_local(h, eff, inputs);
         }
-        if dir.exists() {
-            let _ = std::fs::remove_dir(&dir);
-        }
-        return;
-    }
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("Warning: failed to create {}: {}", dir.display(), e);
-        return;
-    }
-    if let Err(e) = std::fs::write(&skill_path, render_websearch_skill(inputs.web_port)) {
-        eprintln!("Warning: failed to write {}: {}", skill_path.display(), e);
     }
 }
 
@@ -210,12 +228,13 @@ fn transform(
     Ok(root.to_string())
 }
 
-/// Apply a harness over SSH. Mirrors `apply_local` but every file op
-/// goes through `ssh_run`.
+/// Apply a harness over SSH: write its config to the remote machine.
+/// Mirrors `apply_local` but every file op goes through `ssh_run`.
+/// Skill management is handled in `update_all_remote` so disabled
+/// harnesses can have stale skills cleaned up too.
 pub fn apply_remote(
     harness: &Harness,
     target: &SshTarget,
-    remote_web_port: u16,
     inputs: &HarnessInputs,
     eff: &Effective,
 ) -> Result<(), String> {
@@ -242,27 +261,50 @@ pub fn apply_remote(
         base = basename
     );
     ssh_run(target, &[&write_cmd], Some(contents.as_bytes()))?;
+    Ok(())
+}
 
-    let skill_dir = format!("~/{}/skills/lui-web-search", harness.config.dir);
-    let skill_path = format!("{}/SKILL.md", skill_dir);
-    if !inputs.websearch {
-        let _ = ssh_run(
-            target,
-            &[&format!(
-                "rm -f {} && rmdir {} 2>/dev/null || true",
-                skill_path, skill_dir
-            )],
-            None,
-        );
-        return Ok(());
+/// Update every declared harness on a remote machine over SSH. Skill
+/// presence is `enabled && websearch_on` — runs for disabled harnesses
+/// too to clean up stale skills. Config writes only fire for enabled
+/// harnesses. `remote_web_port` is the port the skill's URLs reference;
+/// in --ssh flow it's a randomly-picked client-side port.
+pub fn update_all_remote(
+    target: &SshTarget,
+    eff: &Effective,
+    inputs: &HarnessInputs,
+    remote_web_port: u16,
+) -> Result<(), String> {
+    for h in HARNESSES {
+        let enabled = eff.get_bool(h.setting_name).unwrap_or(h.default_on);
+        let want_skill = enabled && inputs.websearch;
+
+        let skill_dir = format!("~/{}/skills/lui-web-search", h.config.dir);
+        let skill_path = format!("{}/SKILL.md", skill_dir);
+        if want_skill {
+            let body = render_websearch_skill(remote_web_port);
+            ssh_run(
+                target,
+                &[&format!("mkdir -p {} && cat > {}", skill_dir, skill_path)],
+                Some(body.as_bytes()),
+            )?;
+        } else {
+            // `rm -f` + `rmdir 2>/dev/null || true` no-ops cleanly when the
+            // skill never existed; SSH connectivity errors still surface.
+            let _ = ssh_run(
+                target,
+                &[&format!(
+                    "rm -f {} && rmdir {} 2>/dev/null || true",
+                    skill_path, skill_dir
+                )],
+                None,
+            );
+        }
+
+        if enabled {
+            apply_remote(h, target, inputs, eff)?;
+        }
     }
-    let body = render_websearch_skill(remote_web_port);
-    ssh_run(
-        target,
-        &[&format!("mkdir -p {} && cat > {}", skill_dir, skill_path)],
-        Some(body.as_bytes()),
-    )?;
-
     Ok(())
 }
 
