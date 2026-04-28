@@ -132,6 +132,10 @@ pub struct LuiConfigResponse {
     pub web_port: u16,
     pub websearch: bool,
     pub model_name: String,
+    /// Per-slot context window — the "ctx_size" the user typed, not the
+    /// total llama-server allocates across slots. A `--remote` client
+    /// uses this directly to configure its harnesses (opencode, pi),
+    /// which want to know how many tokens *one* sequence can use.
     pub ctx_size: u32,
 }
 

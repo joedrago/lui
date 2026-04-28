@@ -1187,11 +1187,17 @@ async fn main() {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let st = state_for_harness.lock().unwrap();
             if st.ready && st.ctx_size > 0 {
-                let actual_ctx_size = st.ctx_size;
+                // ServerState.ctx_size is the *total* llama-server reported
+                // (parsed from `n_ctx = ...`). Harnesses (opencode, pi) want
+                // the per-slot value the user thinks of as "context window",
+                // which is total / n_parallel.
+                let actual_total = st.ctx_size;
+                let n_par = st.n_parallel.max(1);
                 drop(st);
+                let actual_per_slot = actual_total / n_par;
                 let reg = Registry::build();
                 let eff = config_for_harness.effective(&reg, active_key_for_harness.as_deref());
-                let inputs = build_harness_inputs(&eff, actual_ctx_size);
+                let inputs = build_harness_inputs(&eff, actual_per_slot);
                 for h in harness::HARNESSES {
                     if eff.get_bool(h.setting_name).unwrap_or(h.default_on) {
                         harness::apply_local(h, &eff, &inputs);

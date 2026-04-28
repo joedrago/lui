@@ -674,8 +674,20 @@ impl Display {
             self.print_wrapped(&mut t, &params_display);
         }
 
-        // Context (grey sub of Model)
-        let ctx_display = if st.max_ctx_size > 0 && st.max_ctx_size != st.ctx_size {
+        // Context (grey sub of Model). `st.ctx_size` is per-slot (see the
+        // v6 `UI_SNAPSHOT_VERSION` note); when there's more than one slot
+        // we surface the total too so the user can see what llama-server
+        // actually allocated.
+        let n_par = st.n_parallel.max(1);
+        let ctx_display = if n_par > 1 {
+            let total = (st.ctx_size as u64) * (n_par as u64);
+            format!(
+                "{} token context per slot · {} total ({} slots)",
+                format_number(st.ctx_size as u64),
+                format_number(total),
+                n_par
+            )
+        } else if st.max_ctx_size > 0 && st.max_ctx_size != st.ctx_size {
             format!(
                 "{} token context window ({} max)",
                 format_number(st.ctx_size as u64),

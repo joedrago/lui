@@ -24,7 +24,14 @@ const WARNING_TTL: Duration = Duration::from_secs(5 * 60);
 /// Wire-format version for `/data`. Bump on breaking changes; additive
 /// fields (with `#[serde(default)]` on the reader side) don't require a
 /// bump. Kept so a client renderer can refuse an incompatible server.
-pub const UI_SNAPSHOT_VERSION: u32 = 5;
+///
+/// Version 6: `ctx_size` semantics changed from "total context window
+/// allocated by llama-server" to "per-slot context window" (= total /
+/// n_parallel). The new `n_parallel` field carries the slot count so a
+/// renderer can recompute the total. An older v5 client polling a v6
+/// server would interpret per-slot as total and underestimate the
+/// allocated KV; the version check at the client refuses the mismatch.
+pub const UI_SNAPSHOT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone)]
 pub struct SlotInfo {
@@ -83,8 +90,16 @@ pub struct ServerState {
     // weight spill.
     pub cpu_forced_count: u32,
     pub cpu_forced_primary: String,
+    /// Total context window as parsed from llama-server's `n_ctx = ...`
+    /// log line — i.e. the unified KV budget across all `-np` slots. The
+    /// per-slot value the user thinks of as "ctx_size" is this divided by
+    /// `n_parallel`; that conversion lives in `to_snapshot`.
     pub ctx_size: u32,
     pub max_ctx_size: u32,
+    /// Number of `-np` slots, captured from the registry at spawn time
+    /// so the parser and snapshot can reason about per-slot vs. total
+    /// context without plumbing an `Effective` reference. Always >= 1.
+    pub n_parallel: u32,
 
     // llama.cpp version
     pub llama_version: String,
@@ -229,8 +244,16 @@ pub struct UiSnapshot {
     pub file_bpw: String,
     pub model_params_n: String,
     pub model_params_unit: String,
+    /// Per-slot context window (total / n_parallel). The renderer can
+    /// recover the total as `ctx_size * n_parallel`. See the v6 note on
+    /// `UI_SNAPSHOT_VERSION`.
     pub ctx_size: u32,
     pub max_ctx_size: u32,
+    /// Number of `-np` slots. `#[serde(default)]` so a v5 reader
+    /// (shouldn't happen — the version check rejects first) parses to
+    /// 0 rather than panicking; renderer code clamps with `.max(1)`.
+    #[serde(default)]
+    pub n_parallel: u32,
 
     pub cpu_mem_mib: f64,
     #[serde(default)]
@@ -575,8 +598,13 @@ impl ServerState {
             file_bpw: self.file_bpw.clone(),
             model_params_n: self.model_params_n.clone(),
             model_params_unit: self.model_params_unit.clone(),
-            ctx_size: self.ctx_size,
+            // ServerState.ctx_size is the *total* parsed from llama-server's
+            // `n_ctx = ...` log line. Snapshot exposes the per-slot view
+            // (= total / n_parallel) — that's what the user typed and what
+            // the renderer should show as "the context window."
+            ctx_size: self.ctx_size / self.n_parallel.max(1),
             max_ctx_size: self.max_ctx_size,
+            n_parallel: self.n_parallel.max(1),
 
             cpu_mem_mib: self.cpu_mem_mib,
             cpu_repack_mib: self.cpu_repack_mib,
@@ -745,6 +773,14 @@ pub fn build_args(eff: &Effective) -> Vec<String> {
     // chat-template-kwargs, post-`--` extras — flows from walking the
     // SettingsRegistry. Adding a new passthrough flag is one declaration
     // in `src/settings/registry.rs`; this loop picks it up for free.
+    //
+    // Special case: `ctx_size` in lui's UX is the *per-slot* context
+    // window. llama-server's `-c` is the *total* unified KV budget shared
+    // across `-np` slots. So at emission we multiply by `parallel` —
+    // a user typing `-c 4096 -np 2` means "4096 per slot", which is
+    // `-c 8192 -np 2` to llama-server. Harnesses (opencode, pi) keep
+    // seeing the unmultiplied per-slot number.
+    let n_parallel_emit = eff.get_i64("parallel").unwrap_or(1).max(1);
     for s in eff.registry.settings() {
         match s.passthrough {
             PassthroughMode::None => {}
@@ -752,6 +788,12 @@ pub fn build_args(eff: &Effective) -> Vec<String> {
                 let Some(val) = eff.get(s.name) else { continue };
                 let Some(flag) = s.llama_flag else { continue };
                 args.push(flag.to_string());
+                if s.name == "ctx_size" {
+                    if let Value::Integer(c) = val {
+                        args.push((c * n_parallel_emit).to_string());
+                        continue;
+                    }
+                }
                 args.push(format_passthrough_value(val));
             }
             PassthroughMode::BoolFlagIfTrue => {
@@ -817,6 +859,11 @@ pub fn spawn_server(eff: &Effective, debug_log: Option<&str>) -> Result<ServerPr
 
     let state = Arc::new(Mutex::new(ServerState {
         allow_vram_oversubscription: eff.get_bool("allow_vram_oversubscription").unwrap_or(false),
+        // Captured at spawn so the parser/snapshot can convert llama-server's
+        // total `n_ctx` back into the per-slot view lui presents to the user.
+        // Clamp to 1 so a stray 0 in the registry can't divide-by-zero in
+        // `to_snapshot`.
+        n_parallel: (eff.get_i64("parallel").unwrap_or(1).max(1)) as u32,
         ..ServerState::default()
     }));
 

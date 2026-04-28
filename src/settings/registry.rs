@@ -352,7 +352,10 @@ pub fn declare_all_settings(reg: &mut Registry) {
             // gpu_layers.
             .ui_format(super::setting::format_nonzero_int)
             .ui_unset("model default")
-            .help(&["Context window (0 = model default)"]),
+            .help(&[
+                "Per-slot context window (0 = model default)",
+                "lui multiplies by --np when emitting llama-server's -c",
+            ]),
     );
     reg.push(
         Setting::new("gpu_layers")
