@@ -141,8 +141,10 @@ impl<'a> TermBuf<'a> {
 
 /// Result of a `/data` poll.
 ///
-/// `Retry` means no response was received (connection timeout, parse
-/// failure, etc.) — the caller should keep polling.
+/// `Retry(reason)` means no usable snapshot was produced — connect timeout,
+/// non-2xx HTTP status, parse failure, etc. The caller should keep polling.
+/// The reason string is surfaced on the "Starting..." screen so a stuck
+/// client tells the user *why* it's stuck instead of spinning silently.
 ///
 /// `Ok(snap)` means a valid snapshot arrived.
 ///
@@ -150,7 +152,7 @@ impl<'a> TermBuf<'a> {
 /// incompatible. This is a permanent error — the caller should bail
 /// out with the message rather than retrying forever.
 enum FetchResult {
-    Retry,
+    Retry(String),
     Ok(Box<UiSnapshot>),
     VersionMismatch(String),
 }
@@ -197,10 +199,21 @@ impl Display {
         // Rendered on-screen before exiting so the user doesn't have to
         // scroll up to find it.
         let mut fatal_error: Option<String> = None;
+        // Why the most recent /data poll failed, plus how many failures
+        // we've seen so far. Surfaced on the "Starting..." screen so a
+        // stuck client tells the user what's going wrong instead of
+        // spinning silently. Both are reset implicitly once `last` is
+        // Some — the success path renders `render(snap)`, never
+        // `render_starting`, so stale diagnostics never leak through.
+        let mut last_retry_reason: Option<String> = None;
+        let mut retry_count: u64 = 0;
 
         loop {
             match self.fetch_snapshot().await {
-                FetchResult::Retry => {}
+                FetchResult::Retry(reason) => {
+                    retry_count += 1;
+                    last_retry_reason = Some(reason);
+                }
                 FetchResult::Ok(snap) => last = Some(*snap),
                 FetchResult::VersionMismatch(msg) => {
                     // Permanent incompatibility — print a clear error and
@@ -212,7 +225,7 @@ impl Display {
 
             match &last {
                 Some(snap) => self.render(snap),
-                None => self.render_starting(),
+                None => self.render_starting(last_retry_reason.as_deref(), retry_count),
             }
 
             if Self::check_quit() {
@@ -247,41 +260,86 @@ impl Display {
         let t = Duration::from_millis(FETCH_TIMEOUT_MS);
         let addr = format!("{}:{}", self.snapshot_host, self.snapshot_port);
 
-        let mut stream = match timeout(t, TcpStream::connect(&addr))
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-        {
-            Some(s) => s,
-            None => return FetchResult::Retry,
+        let mut stream = match timeout(t, TcpStream::connect(&addr)).await {
+            Err(_) => {
+                return FetchResult::Retry(format!(
+                    "connect to {} timed out after {}ms",
+                    addr, FETCH_TIMEOUT_MS
+                ))
+            }
+            Ok(Err(e)) => {
+                return FetchResult::Retry(format!("connect to {} failed: {}", addr, e))
+            }
+            Ok(Ok(s)) => s,
         };
         let req = "GET /data HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept: application/json\r\n\r\n";
-        if timeout(t, stream.write_all(req.as_bytes()))
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .is_none()
-        {
-            return FetchResult::Retry;
+        match timeout(t, stream.write_all(req.as_bytes())).await {
+            Err(_) => {
+                return FetchResult::Retry(format!(
+                    "write to {} timed out after {}ms",
+                    addr, FETCH_TIMEOUT_MS
+                ))
+            }
+            Ok(Err(e)) => {
+                return FetchResult::Retry(format!("write to {} failed: {}", addr, e))
+            }
+            Ok(Ok(())) => {}
         }
 
         let mut buf = Vec::new();
-        if timeout(t, stream.read_to_end(&mut buf))
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .is_none()
-        {
-            return FetchResult::Retry;
+        match timeout(t, stream.read_to_end(&mut buf)).await {
+            Err(_) => {
+                return FetchResult::Retry(format!(
+                    "read from {} timed out after {}ms",
+                    addr, FETCH_TIMEOUT_MS
+                ))
+            }
+            Ok(Err(e)) => {
+                return FetchResult::Retry(format!("read from {} failed: {}", addr, e))
+            }
+            Ok(Ok(_)) => {}
         }
 
         let text = match String::from_utf8(buf) {
             Ok(s) => s,
-            Err(_) => return FetchResult::Retry,
+            Err(_) => {
+                return FetchResult::Retry(format!("non-UTF8 response from {}", addr))
+            }
         };
+
+        // Status line: "HTTP/1.1 NNN ...\r\n". Surface non-2xx statuses as
+        // themselves so a 404 / 503 from a misrouted or still-warming server
+        // doesn't get swallowed into a downstream JSON parse error.
+        let status_line = match text.lines().next() {
+            Some(s) => s,
+            None => return FetchResult::Retry(format!("empty response from {}", addr)),
+        };
+        match status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<u16>().ok())
+        {
+            Some(c) if (200..300).contains(&c) => {}
+            Some(c) => {
+                return FetchResult::Retry(format!("HTTP {} from {}/data", c, addr))
+            }
+            None => {
+                return FetchResult::Retry(format!(
+                    "malformed status line from {}: {}",
+                    addr,
+                    status_line.chars().take(80).collect::<String>()
+                ))
+            }
+        }
+
         let body_start = match text.find("\r\n\r\n") {
             Some(p) => p + 4,
-            None => return FetchResult::Retry,
+            None => {
+                return FetchResult::Retry(format!(
+                    "no header/body separator in response from {}",
+                    addr
+                ))
+            }
         };
         let body_section = &text[body_start..];
         // Axum emits Content-Length (no chunked) for Json<T>, and we set
@@ -290,7 +348,12 @@ impl Display {
         // stray trailing whitespace by trimming.
         let snap: UiSnapshot = match serde_json::from_str(body_section.trim()) {
             Ok(s) => s,
-            Err(_) => return FetchResult::Retry,
+            Err(e) => {
+                return FetchResult::Retry(format!(
+                    "JSON parse from {}/data: {}",
+                    addr, e
+                ))
+            }
         };
         if snap.version != UI_SNAPSHOT_VERSION {
             // Version mismatch means the server's /data schema is newer
@@ -304,10 +367,14 @@ impl Display {
         FetchResult::Ok(Box::new(snap))
     }
 
-    /// Frame shown only during the brief window before the first successful
-    /// `/data` poll — typically one tick. Kept deliberately sparse so the
-    /// "real" UI takes over as soon as the server's listener is up.
-    fn render_starting(&self) {
+    /// Frame shown until the first successful `/data` poll. In local mode
+    /// this is typically one tick; in `--remote` mode it can persist if
+    /// the client can't reach the server, so we surface the polled URL,
+    /// attempt count, elapsed time, and the most recent failure reason
+    /// underneath the "Starting..." line. That turns a silent hang into a
+    /// debuggable one — the user can see whether they're getting connect
+    /// timeouts, non-2xx HTTP, or schema/parse errors.
+    fn render_starting(&self, last_error: Option<&str>, attempts: u64) {
         let mut stdout = io::stdout();
         let (term_width, term_height) = terminal::size().unwrap_or((80, 24));
         let width = (term_width as usize).saturating_sub(2);
@@ -339,6 +406,58 @@ impl Display {
             ResetColor
         );
         t.newline();
+        t.newline();
+
+        let url = format!(
+            "http://{}:{}/data",
+            self.snapshot_host, self.snapshot_port
+        );
+        let _ = queue!(
+            t.stdout,
+            Print("  Polling "),
+            SetForegroundColor(COLOR_NUMBER),
+            Print(&url),
+            ResetColor
+        );
+        t.newline();
+
+        if let Some(err) = last_error {
+            let elapsed = self.start_time.elapsed().as_secs();
+            let _ = queue!(
+                t.stdout,
+                Print("  Attempts: "),
+                SetForegroundColor(COLOR_NUMBER),
+                Print(format!("{}", attempts)),
+                ResetColor,
+                Print("  Elapsed: "),
+                SetForegroundColor(COLOR_NUMBER),
+                Print(format!("{}s", elapsed)),
+                ResetColor
+            );
+            t.newline();
+
+            // Truncate to the visible width minus indent + "Last error: "
+            // prefix. crossterm/Print trusts us to fit the line; long
+            // serde errors otherwise wrap and shove the rest of the
+            // screen down.
+            let prefix = "  Last error: ";
+            let avail = width.saturating_sub(prefix.len());
+            let truncated: String = if err.chars().count() > avail {
+                let head: String = err.chars().take(avail.saturating_sub(1)).collect();
+                format!("{}…", head)
+            } else {
+                err.to_string()
+            };
+            let _ = queue!(
+                t.stdout,
+                Print(prefix),
+                SetForegroundColor(WARNING_AMBER),
+                Print(&truncated),
+                ResetColor
+            );
+            t.newline();
+        }
+
         t.clear_rest();
         t.flush();
     }
