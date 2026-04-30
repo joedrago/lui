@@ -843,13 +843,26 @@ pub fn spawn_server(eff: &Effective, debug_log: Option<&str>) -> Result<ServerPr
         })
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
-    let mut cmd = CommandBuilder::new("llama-server");
+    // Resolve `llama-server` to an absolute path ourselves, using the
+    // *inherited* process PATH. portable-pty 0.8's CommandBuilder rebuilds PATH
+    // from the Windows registry (HKLM + HKCU Environment) and ignores the PATH
+    // it actually inherited from the shell, so a directory added only to the
+    // current session's PATH (set / setx-without-restart / shell rc) is invisible
+    // to its internal search and CreateProcessW fails with ERROR_FILE_NOT_FOUND.
+    // Handing it an absolute path bypasses that broken search.
+    let exe = which::which("llama-server").map_err(|e| {
+        format!(
+            "Could not find `llama-server` on PATH ({e}). \
+             Install llama.cpp's llama-server and ensure its directory is on PATH."
+        )
+    })?;
+    let mut cmd = CommandBuilder::new(&exe);
     cmd.args(&args);
 
     let child = pty_pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| format!("Failed to spawn llama-server: {}", e))?;
+        .map_err(|e| format!("Failed to spawn llama-server ({}): {}", exe.display(), e))?;
 
     // Read from the pty master (gets both stdout and stderr, and \r progress lines)
     let reader = pty_pair

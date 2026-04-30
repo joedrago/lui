@@ -17,6 +17,7 @@ dirs = "6"
 regex = "1"
 jsonc-parser = { version = "0.32", features = ["cst", "serde_json"] }
 portable-pty = "0.8"
+which = "6"
 axum = "0.7"
 urlencoding = "2"
 
