@@ -105,7 +105,12 @@ impl Store {
                 continue;
             };
             match value::from_toml(setting.kind, v) {
-                Some(val) => {
+                Some(mut val) => {
+                    if setting.cli_repeatable {
+                        if let Value::StringArray(a) = &mut val {
+                            dedup_in_place(a);
+                        }
+                    }
                     store.values.insert(k.clone(), val);
                 }
                 None => warn(format!(
@@ -140,7 +145,12 @@ impl Store {
                 continue;
             };
             match value::from_toml(setting.kind, v) {
-                Some(val) => {
+                Some(mut val) => {
+                    if setting.cli_repeatable {
+                        if let Value::StringArray(a) = &mut val {
+                            dedup_in_place(a);
+                        }
+                    }
                     self.values.insert(setting.name.to_string(), val);
                 }
                 None => warn(format!(
@@ -153,6 +163,15 @@ impl Store {
             }
         }
     }
+}
+
+/// Drop duplicate entries from a StringArray while preserving the first
+/// occurrence's order. Used for `cli_repeatable` settings where the array
+/// is semantically a set (paths, domains) — duplicates are pure noise and
+/// would emit the same flag twice on the resolved llama-server / nono argv.
+fn dedup_in_place(v: &mut Vec<String>) {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    v.retain(|s| seen.insert(s.clone()));
 }
 
 fn toml_kind_name(v: &toml::Value) -> &'static str {
@@ -446,6 +465,14 @@ impl<'a> Effective<'a> {
             if let Some(Value::StringArray(v)) = pm.get(name) {
                 out.extend(v.iter().cloned());
             }
+        }
+        if self
+            .registry
+            .get(name)
+            .map(|s| s.cli_repeatable)
+            .unwrap_or(false)
+        {
+            dedup_in_place(&mut out);
         }
         out
     }

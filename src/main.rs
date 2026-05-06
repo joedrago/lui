@@ -457,14 +457,18 @@ fn handle_flag(
                     Some(SettingValue::StringArray(v)) => v.clone(),
                     _ => Vec::new(),
                 };
-                cur.push(raw);
+                if !cur.contains(&raw) {
+                    cur.push(raw);
+                }
                 store.set(setting.name, SettingValue::StringArray(cur));
             } else {
                 let mut cur = match config.global.get(setting.name) {
                     Some(SettingValue::StringArray(v)) => v.clone(),
                     _ => Vec::new(),
                 };
-                cur.push(raw);
+                if !cur.contains(&raw) {
+                    cur.push(raw);
+                }
                 config
                     .global
                     .set(setting.name, SettingValue::StringArray(cur));
