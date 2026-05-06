@@ -138,6 +138,24 @@ pub fn load_config_from(path: &Path) -> Config {
     config
 }
 
+/// Names of every distinct `toml_section` declared by a `Global`-scope
+/// setting other than `"server"`, in registry order, deduplicated. Drives
+/// both load (which TOML tables to scan) and save (which extra sections
+/// to emit). Today this returns at most `["sandbox"]`; the helper exists
+/// so adding another sibling section is a registry-only change.
+fn non_server_global_sections(reg: &Registry) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for s in reg.settings() {
+        if s.toml_section == "server" {
+            continue;
+        }
+        if !out.contains(&s.toml_section) {
+            out.push(s.toml_section);
+        }
+    }
+    out
+}
+
 /// Build a `Config` view straight from a migrated `toml::Value::Table`.
 /// Every section flows through `Store::from_toml_table` so registry
 /// declarations are the single source of truth for key names and kinds.
@@ -147,6 +165,18 @@ fn config_from_table(table: &toml::value::Table) -> Config {
 
     if let Some(t) = table.get("server").and_then(|v| v.as_table()) {
         config.global = Store::from_toml_table(&reg, t, |w| eprintln!("lui: {}", w));
+    }
+
+    // Sibling tables for global-scope settings that live outside [server]
+    // (e.g. `[sandbox]`). Merged into the same `config.global` store so
+    // every read goes through one place; the section is just a TOML
+    // organization detail.
+    for section in non_server_global_sections(&reg) {
+        if let Some(t) = table.get(section).and_then(|v| v.as_table()) {
+            config.global.merge_from_toml_section(&reg, section, t, |w| {
+                eprintln!("lui: {}", w)
+            });
+        }
     }
 
     if let Some(models_tbl) = table.get("models").and_then(|v| v.as_table()) {
@@ -222,8 +252,19 @@ pub fn save_config_to(config: &Config, path: &Path) {
     // scanning the file sees the interesting stuff at the top.
     let mut output = String::new();
 
-    let server_tbl = config.global.to_toml_table(&reg);
+    let server_tbl = config.global.to_toml_section(&reg, "server");
     output.push_str(&emit_section("server", &server_tbl));
+
+    // Sibling global-scope sections (currently just `[sandbox]`). Empty
+    // tables are skipped so users who never touch a section don't get a
+    // bare header line.
+    for section in non_server_global_sections(&reg) {
+        let tbl = config.global.to_toml_section(&reg, section);
+        if !tbl.is_empty() {
+            output.push('\n');
+            output.push_str(&emit_section(section, &tbl));
+        }
+    }
 
     if !config.aliases.is_empty() {
         let mut at = toml::value::Table::new();

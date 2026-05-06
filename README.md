@@ -108,6 +108,163 @@ lui --remote server.local
 lui --remote server.local:9000    # custom HTTP port
 ```
 
+## Sandboxing the Harness
+
+`lui --sandbox HARNESSNAME` launches a configured harness (currently
+`opencode`, `pi`, or `late`) wrapped in [nono](https://nono.sh) - a
+capability-based sandbox that uses Seatbelt on macOS and Landlock on
+Linux. The harness can read+write your project, hit the network, and
+invoke local toolchains, but **cannot** touch credentials, browser
+data, shell history, or other dirs outside the allow-list. lui itself
+never enters the TUI in this mode - it's a thin launcher that blocks
+on the sandboxed child and propagates its exit code.
+
+If you never type `--sandbox` (or any `--sandbox-*` flag), lui behaves
+exactly as it does today.
+
+### Setup
+
+1. Install nono - <https://nono.sh>. Single binary; the installer
+   drops it on your `PATH`.
+2. That's it. Defaults are tuned for "drop into a project and run an
+   AI agent."
+
+### Defaults at a glance
+
+```
+lui --sandbox opencode                    # this works out of the box
+```
+
+Resolves to roughly:
+
+```
+nono run -p opencode --allow . --allow-cwd \
+    --allow ~/.cargo --allow ~/.rustup --allow ~/go --allow ~/.pyenv \
+    --allow ~/.npm --allow ~/.bun --allow /usr/local/go ...           \
+    -- opencode
+```
+
+What that gets you:
+
+- **Profile auto-detected.** If nono ships a profile by the harness's
+  name (`opencode`, `claude-code`, `codex`, `swival`, ...), lui uses it.
+  Otherwise it falls back to nono's `default` profile (gives `/tmp`,
+  `/usr/bin`, homebrew, system reads, plus deny-rules for credentials,
+  keychains, browser data, shell history).
+- **Project tree r+w** via `--allow .` (the cwd). Skips nono's
+  first-run prompt with `--allow-cwd`.
+- **Toolchains r+w** for any of `~/.cargo`, `~/.rustup`, `~/go`,
+  `/usr/local/go`, `~/.pyenv`, `~/.local/share/uv`, `~/.conda`,
+  `~/.nvm`, `~/.fnm`, `~/.npm`, `~/.bun`, `~/.deno`, `~/Library/pnpm`,
+  `/usr/local/lib/node_modules`, `~/.nix-profile`, `/nix/store`, etc.
+  that exist on your machine. `cargo build` / `go test` / `npm install`
+  / `pip install --user` work first try. `$CARGO_HOME` / `$RUSTUP_HOME`
+  / `$GOPATH` / `$PYENV_ROOT` override the defaults if set.
+- **GPU off**, **network on**. The agent (Node-based) doesn't need
+  GPU; lui's llama-server runs *outside* the sandbox.
+
+### Make it the default
+
+If you always want opencode (or any harness) sandboxed, alias it in
+your shell rc:
+
+```sh
+# ~/.zshrc, ~/.bashrc, etc.
+alias opencode='lui --sandbox opencode'
+```
+
+Now every plain `opencode` invocation runs through nono with lui's
+configured grants. lui itself stays a thin launcher (no TUI, no
+llama-server) so the alias adds essentially zero overhead beyond
+nono's sandbox setup.
+
+To bypass the sandbox temporarily, prefix with `command`:
+`command opencode` (or escape with `\opencode`).
+
+### Preview the resolved sandbox commandline
+
+Plain `lui --cmd` now prints three commandlines: the `lui` invocation
+that would reproduce your config, the resolved `llama-server` argv,
+and a third **sandbox commandline** showing exactly what
+`lui --sandbox HARNESSNAME` would run, with `HARNESSNAME` highlighted
+in magenta wherever it'd be substituted. Use it to inspect what's
+being granted before you launch.
+
+### Adding access to extra directories
+
+Every `--sandbox-*` flag is persisted under `[sandbox]` in `lui.toml`,
+so you only configure once.
+
+* **The harness can't access `~/.<thing>`.**
+  * Fix: `lui --sandbox-allow ~/.<thing>` (repeatable; r+w). Read-only?
+    Use `lui --sandbox-read ~/.<thing>` instead.
+  * Tip: when nono blocks something, it prints
+    `Fix: --read /path --read /path …` at the bottom of its denial
+    output. Translate each `--read` to `--sandbox-read` and each
+    `--allow` to `--sandbox-allow` and re-run.
+  * Example: `lui --sandbox-allow ~/.pi --sandbox pi` gives the `pi`
+    harness r+w on its state dir. Persists - subsequent
+    `lui --sandbox pi` invocations include the grant automatically.
+
+* **The harness needs to reach an extra domain (e.g. an internal
+  registry).**
+  * Fix: `lui --sandbox-allow-domain api.example.com` (repeatable).
+    Maps to nono's `--allow-domain`.
+
+* **I want a tighter sandbox - block all network.**
+  * Fix: `lui --sandbox-block-net`. Mirrors nono's `--block-net`.
+
+* **I want to skip the toolchain auto-allow-list and configure paths
+  manually.**
+  * Fix: `lui --no-sandbox-dev-tools`. Then add what you actually
+    need with `--sandbox-allow` / `--sandbox-read`.
+
+### Picking a different profile
+
+* **I have a custom nono profile and want lui to use it.**
+  * Fix: `lui --sandbox-profile mycustom`. Skips lui's auto-detect
+    and passes `-p mycustom` verbatim to nono.
+
+* **I want no profile at all - just the explicit allows lui produces.**
+  * Fix: `lui --sandbox-profile none`. The literal `none` opts out
+    of the `-p` flag entirely.
+
+### Authoring a custom nono profile (optional)
+
+If a harness needs a recurring set of grants that don't fit lui's
+flags cleanly (e.g. a complex set of allow-rules for a private
+toolchain), nono's own `nono profile init` builds a starter:
+
+```
+nono profile init my-team --extends opencode --groups rust_runtime,python_runtime
+```
+
+That writes a JSON profile under `~/.config/nono/profiles/` (path may
+vary). Then point lui at it:
+
+```
+lui --sandbox-profile my-team --sandbox opencode
+```
+
+You don't *need* to do this for typical use - lui's defaults plus
+`--sandbox-allow` / `--sandbox-read` cover most workflows.
+
+### Troubleshooting
+
+* **`--allow-gpu requires the selected profile to opt into allow_gpu`.**
+  * Cause: nono's shipped profiles for AI agents (opencode,
+    claude-code, etc.) intentionally refuse GPU access since the agent
+    is a Node process that doesn't need it.
+  * Fix: lui's default is `--no-sandbox-allow-gpu`, so this shouldn't
+    trigger unless you flipped it on. To run a GPU-using tool inside
+    the sandbox, switch to a profile that opts into GPU
+    (`--sandbox-profile none` or a custom one) and pass
+    `--sandbox-allow-gpu`.
+
+* **`'nono' not on PATH`.**
+  * Fix: install nono from <https://nono.sh>, or override the binary
+    location with `--sandbox-bin /absolute/path/to/nono`.
+
 ## Quit
 
 `Ctrl+C` or `q`.
@@ -221,6 +378,26 @@ lui --remote server.local:9000    # custom HTTP port
 * **Where is my config stored?**
   * Fix: lui writes a toml at its standard config path (see `lui -l` or inspect the path logic in `src/config.rs`). Everything you pass on the command line is persisted there - next run, plain `lui` picks up where you left off.
 
+### Sandbox
+
+* **I want to run my agent isolated from the rest of my machine.**
+  * Fix: `lui --sandbox opencode` (or `pi`, `late`). Wraps the harness
+    in [nono](https://nono.sh) with sensible defaults; project tree
+    and common toolchains (cargo, rustc, go, npm, bun, pyenv...) are
+    r+w, credentials and shell history are blocked. See
+    "Sandboxing the Harness" above for the full story.
+
+* **The sandboxed harness can't access `~/.foo`.**
+  * Fix: `lui --sandbox-allow ~/.foo` (or `--sandbox-read` for
+    read-only). Repeatable, persists into `[sandbox] allow` in
+    `lui.toml`.
+  * Tip: nono prints a `Fix: --read … --read …` hint when something
+    is denied. Translate to `--sandbox-read DIR` / `--sandbox-allow DIR`
+    and re-run.
+
+* **The harness needs network access to a private domain.**
+  * Fix: `lui --sandbox-allow-domain api.internal.tld` (repeatable).
+
 ### Quick recipes
 
 * **Fresh start on a new model, tuned and aliased in one line:**
@@ -234,6 +411,13 @@ lui --remote server.local:9000    # custom HTTP port
 
 * **Clear a per-model temperature override:**
   `lui --this --temp default`
+
+* **Launch opencode in a sandbox over the project:**
+  `lui --sandbox opencode`
+
+* **Always sandbox opencode (alias trick):**
+  `alias opencode='lui --sandbox opencode'` in your shell rc. Plain
+  `opencode` then runs sandboxed; `command opencode` bypasses.
 
 ## License
 

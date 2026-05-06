@@ -208,9 +208,11 @@ canonical shape. Add a new migrator by writing a function that takes
 rename a stored key or change its sense (see `flip_websearch_sense`,
 `rename_model_identity_to_active_model`).
 
-## The three "sharing" modes — websearch, ssh, remote
+## The "sharing" / launcher modes — websearch, ssh, remote, sandbox
 
-These are *three different things*. Easy to confuse on a fresh read.
+Four distinct things. Easy to confuse on a fresh read; they share the
+property of being top-level commands that change what `lui` does, not
+just what config it stores.
 
 ### 1. Websearch (`src/websearch.rs`)
 
@@ -289,6 +291,91 @@ No SSH involved. Not persisted.
 
 `--ssh` and `--remote` are mutually exclusive and guarded at parse
 time.
+
+### 4. `--sandbox HARNESSNAME [args...]` (`src/sandbox.rs::launch`)
+
+Thin launcher for [nono](https://nono.sh) (capability-based sandbox:
+Seatbelt on macOS, Landlock on Linux, single binary). When invoked, lui
+short-circuits everything else — no llama-server, no TUI, no
+websearch. It resolves persisted `[sandbox]` settings into a `nono run
+…` invocation, execs the chosen harness underneath it with full stdio
+inherited, and exits with the child's status.
+
+Argv slicing is done by a pre-scan in `parse_args` that runs **before**
+lexopt and **before** the `--`-split. Once `--sandbox` is found:
+
+- Everything before it stays in pre_argv and goes through the normal
+  registry-driven lexopt loop, so `--sandbox-*` flags persist before
+  the launch fires.
+- The next token is the harness name. Validated against `HARNESSES`;
+  unknown names are fatal (exit 2 with the legal-names listing).
+- Every token after that is captured verbatim into
+  `SandboxRequest.harness_args`. Including `--`. So `lui --sandbox
+  opencode -- --foo` runs opencode with `-- --foo` literally; lui
+  doesn't peel anything off.
+
+Settings under `[sandbox]` (in lui.toml; declared with
+`.toml_section("sandbox").toml_key(...)` in the registry) cover every
+nono flag we care about — `allow_cwd` / `allow_gpu` / `block_net` /
+`rollback` / `silent` are bools; `profile` / `bin` are scalars; `allow`
+/ `read` / `write` / `allow_domain` / `extra` are repeatable
+`StringArray`s with `cli_repeatable=true` so `--sandbox-allow ./src
+--sandbox-allow ./build` collects to `["./src","./build"]`. The
+`sandbox::build_nono_args(eff, ProfileContext::*)` helper renders all
+of these into a single `Vec<String>` ending in `--`, used both by the
+live launcher AND by `--cmd` to print a faithful preview line.
+
+**Defaults are tuned for "lui --sandbox HARNESS just works":**
+
+- **Profile auto-detection.** When `[sandbox].profile` is unset (the
+  default), the launcher probes `nono profile show <harness>
+  --silent` at run time. If nono ships a profile by that name (e.g.
+  `opencode`, `claude-code`, `codex`, `swival`), it's used; otherwise
+  we fall back to `default` (nono's conservative base — gives /tmp,
+  /usr/bin, /bin, homebrew, $TMPDIR, user_tools, plus the standard
+  deny-rules for credentials / keychains / browser data / shell
+  history). Set `--sandbox-profile NAME` to force a specific one;
+  pass the literal `none` to opt out of `-p` entirely. The probe
+  only fires from `Launch` context — `--cmd` (Display context)
+  renders `-p HARNESSNAME` with the placeholder magenta-highlighted
+  so the live and preview paths can never silently disagree.
+- **Cwd grant.** `--sandbox-allow-cwd` (default ON) emits both
+  `--allow .` (canonical R+W cwd, matches nono's own examples) and
+  `--allow-cwd` (skip the first-run prompt). Two flags, single
+  intent: "give the agent the project tree."
+- **GPU off.** Agents like opencode/claude-code/codex are Node
+  processes that don't need GPU; their nono profiles intentionally
+  refuse `--allow-gpu`. So `sandbox.allow_gpu` defaults FALSE. Flip
+  on with `--sandbox-allow-gpu` if you're sandboxing a GPU-using
+  tool inside the agent.
+- **Network on.** `sandbox.block_net` defaults FALSE — agents need
+  to reach llama-server / OpenAI / etc.
+- **Dev toolchains auto-allowed.** `sandbox.dev_tools` defaults TRUE.
+  At launch, `dev_tool_dirs()` walks a fixed list of canonical
+  toolchain directories (`$CARGO_HOME` / `~/.cargo`, `$RUSTUP_HOME` /
+  `~/.rustup`, `$GOPATH` / `~/go`, `/usr/local/go`, `$PYENV_ROOT` /
+  `~/.pyenv`, `~/.local/share/uv`, `~/.conda`, `~/.nvm`, `~/.fnm`,
+  `~/.npm`, `~/.bun`, `~/.deno`, `~/Library/pnpm`,
+  `~/.local/share/pnpm`, `/usr/local/lib/node_modules`,
+  `~/.nix-profile`, `/nix/store`, …). Existing paths get
+  `--allow DIR` (R+W, since cargo/go/npm need cache writes for
+  first-run fetches; missing paths are skipped to keep the preview
+  tight). The same function feeds both `--cmd` (so the printed line
+  matches the live invocation) and the launcher. Disable with
+  `--no-sandbox-dev-tools` and configure paths manually.
+
+Error contract is intentionally fatal-and-explicit:
+
+- nono not on PATH (or whatever `[sandbox].bin` points at) → exit 2,
+  message tells the user where to install or what flag overrides the
+  binary path.
+- Unknown harness → exit 2, lists known harnesses.
+- `--sandbox` with `--ssh` / `--remote` / `--cmd` → exit 2 with a
+  mutex error.
+
+`--sandbox` is mutually exclusive with `--ssh`, `--remote`, and
+`--cmd`. `--cmd` placed AFTER `--sandbox HARNESS` is a harness arg, not
+a lui flag; the mutex only fires when `--cmd` is in pre_argv.
 
 ## The harness system (`src/harness/`)
 

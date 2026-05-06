@@ -71,6 +71,23 @@ impl Store {
         t
     }
 
+    /// Section-filtered serialization for global-scope settings. Only
+    /// settings whose `toml_section` equals `section` are emitted, and
+    /// each is keyed by its `persisted_key()` (so `sandbox_allow_cwd`
+    /// becomes `allow_cwd` under `[sandbox]`).
+    pub fn to_toml_section(&self, registry: &Registry, section: &str) -> toml::value::Table {
+        let mut t = toml::value::Table::new();
+        for s in registry.settings() {
+            if s.toml_section != section {
+                continue;
+            }
+            if let Some(v) = self.values.get(s.name) {
+                t.insert(s.persisted_key().to_string(), value::to_toml(v));
+            }
+        }
+        t
+    }
+
     /// Load a store from a toml::Table. Type-mismatched keys are reported
     /// through `warn` (printed to stderr by the caller in production; the
     /// tests capture and assert). Absent keys stay absent; they rely on
@@ -100,6 +117,41 @@ impl Store {
             }
         }
         store
+    }
+
+    /// Merge a non-default-section TOML table into this store. Each TOML
+    /// key is matched against settings whose `toml_section == section`
+    /// using their `persisted_key()`; unknown keys are ignored. Used to
+    /// pull in `[sandbox]` (and any future sibling) without disturbing
+    /// the canonical `[server]` load.
+    pub fn merge_from_toml_section(
+        &mut self,
+        registry: &Registry,
+        section: &str,
+        table: &toml::value::Table,
+        mut warn: impl FnMut(String),
+    ) {
+        for (k, v) in table {
+            let Some(setting) = registry
+                .settings()
+                .iter()
+                .find(|s| s.toml_section == section && s.persisted_key() == k.as_str())
+            else {
+                continue;
+            };
+            match value::from_toml(setting.kind, v) {
+                Some(val) => {
+                    self.values.insert(setting.name.to_string(), val);
+                }
+                None => warn(format!(
+                    "settings: TOML key [{}].{:?} expected {} but got {}; ignoring",
+                    section,
+                    k,
+                    setting.kind.name(),
+                    toml_kind_name(v)
+                )),
+            }
+        }
     }
 }
 

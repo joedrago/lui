@@ -22,7 +22,8 @@ pub fn emit_help(reg: &Registry) -> String {
         "lui — a friendly TUI wrapper for llama.cpp's llama-server\n\
          \n\
          USAGE:\n    \
-         lui [OPTIONS] [NAME] [-- <EXTRA_LLAMA_ARGS>...]\n\
+         lui [OPTIONS] [NAME] [-- <EXTRA_LLAMA_ARGS>...]\n    \
+         lui --sandbox <HARNESSNAME> [HARNESS_ARGS...]   # nono-wrapped harness launcher\n\
          \n",
     );
 

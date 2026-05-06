@@ -132,6 +132,24 @@ pub struct Setting {
     /// value is absent (or the formatter returns `None`). Typical values:
     /// `"model default"`, `"server default"`, `"auto"`, `"normal"`.
     pub ui_unset: Option<&'static str>,
+
+    /// `StringArray`-only: when true, the CLI parser accepts a single
+    /// scalar value per occurrence and appends to the stored array, so
+    /// `--foo a --foo b` collects to `["a","b"]`. The TOML round-trip is
+    /// unchanged (a real array, as always). Ignored for non-`StringArray`
+    /// kinds.
+    pub cli_repeatable: bool,
+
+    /// Top-level TOML table this setting persists in for global-scope
+    /// settings. Default `"server"` matches the historical layout.
+    /// Per-model settings always land in `[models."<key>"]` regardless.
+    pub toml_section: &'static str,
+
+    /// Override key used inside `toml_section` when persisting. Defaults
+    /// to `name`. Only relevant when the in-memory name carries a section
+    /// prefix you don't want serialized (e.g. `sandbox_allow_cwd` →
+    /// `[sandbox].allow_cwd`).
+    pub toml_key_override: Option<&'static str>,
 }
 
 /// Formatter hook for UI rendering of a setting's value. See
@@ -162,6 +180,9 @@ impl Setting {
             ui_label: None,
             ui_format: None,
             ui_unset: None,
+            cli_repeatable: false,
+            toml_section: "server",
+            toml_key_override: None,
         }
     }
 
@@ -245,6 +266,24 @@ impl Setting {
     pub fn ui_unset(mut self, s: &'static str) -> Self {
         self.ui_unset = Some(s);
         self
+    }
+    pub fn cli_repeatable(mut self, b: bool) -> Self {
+        self.cli_repeatable = b;
+        self
+    }
+    pub fn toml_section(mut self, s: &'static str) -> Self {
+        self.toml_section = s;
+        self
+    }
+    pub fn toml_key(mut self, s: &'static str) -> Self {
+        self.toml_key_override = Some(s);
+        self
+    }
+
+    /// Serialized key name within `toml_section`. Defaults to `name`
+    /// when no override was provided.
+    pub fn persisted_key(&self) -> &'static str {
+        self.toml_key_override.unwrap_or(self.name)
     }
 
     /// Derived label — prefer the explicit `ui_label`, else fall back to

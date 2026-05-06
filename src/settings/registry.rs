@@ -77,6 +77,13 @@ pub const SECTIONS: &[Section] = &[
         postamble: "",
     },
     Section {
+        name: "SANDBOX",
+        title: "SANDBOX (capability-based wrapper for harness launches; persisted under [sandbox]):",
+        preamble: "",
+        extra_rows: &[],
+        postamble: "",
+    },
+    Section {
         name: "REMOTE",
         title: "REMOTE (one-shot; not persisted):",
         preamble: "",
@@ -837,6 +844,210 @@ pub fn declare_all_settings(reg: &mut Registry) {
                 " providers retain opencode's normal pruning)",
             ]),
     );
+    // ---------- SANDBOX (capability-wrap a harness with `nono`) ----------
+    //
+    // Active only when the user passes `--sandbox HARNESSNAME` on the CLI.
+    // Each setting persists under `[sandbox]` in lui.toml (toml_section
+    // override below); the in-memory key is `sandbox_*` to keep it
+    // unambiguous in the global store. Defaults match a "let the agent
+    // touch the project, but nothing else" stance: CWD allowed, GPU on,
+    // network on. Repeatable directory/domain flags use cli_repeatable so
+    // each occurrence appends.
+    reg.push(
+        Setting::new("sandbox_allow_cwd")
+            .long("sandbox-allow-cwd")
+            .kind(Bool)
+            .scope(Global)
+            .default(Value::Bool(true))
+            .toml_section("sandbox")
+            .toml_key("allow_cwd")
+            .section("SANDBOX")
+            .ui_label("Sandbox: allow-cwd")
+            .help(&[
+                "Grant the sandbox r+w on the cwd (--allow . + --allow-cwd)",
+                "Drop the cwd r+w grant (sandbox can't touch project files)",
+            ]),
+    );
+    reg.push(
+        Setting::new("sandbox_block_net")
+            .long("sandbox-block-net")
+            .kind(Bool)
+            .scope(Global)
+            .default(Value::Bool(false))
+            .toml_section("sandbox")
+            .toml_key("block_net")
+            .section("SANDBOX")
+            .ui_label("Sandbox: block-net")
+            .help(&[
+                "Pass --block-net to nono (no outbound network)",
+                "Allow outbound network from the sandbox (nono default)",
+            ]),
+    );
+    reg.push(
+        Setting::new("sandbox_allow_gpu")
+            .long("sandbox-allow-gpu")
+            .kind(Bool)
+            .scope(Global)
+            .default(Value::Bool(false))
+            .toml_section("sandbox")
+            .toml_key("allow_gpu")
+            .section("SANDBOX")
+            .ui_label("Sandbox: allow-gpu")
+            .help(&[
+                "Pass --allow-gpu to nono (Metal/IOKit access; profile must opt in)",
+                "Don't request GPU inside the sandbox (default: agents like opencode don't need it)",
+            ]),
+    );
+    reg.push(
+        Setting::new("sandbox_rollback")
+            .long("sandbox-rollback")
+            .kind(Bool)
+            .scope(Global)
+            .default(Value::Bool(false))
+            .toml_section("sandbox")
+            .toml_key("rollback")
+            .section("SANDBOX")
+            .ui_label("Sandbox: rollback")
+            .help(&[
+                "Pass --rollback to nono (atomic snapshot session)",
+                "No rollback snapshots",
+            ]),
+    );
+    reg.push(
+        Setting::new("sandbox_silent")
+            .long("sandbox-silent")
+            .kind(Bool)
+            .scope(Global)
+            .default(Value::Bool(false))
+            .toml_section("sandbox")
+            .toml_key("silent")
+            .section("SANDBOX")
+            .ui_label("Sandbox: silent")
+            .help(&[
+                "Pass -s to nono (suppress its banner / summary)",
+                "Show nono banner / summary (default)",
+            ]),
+    );
+    reg.push(
+        Setting::new("sandbox_dev_tools")
+            .long("sandbox-dev-tools")
+            .kind(Bool)
+            .scope(Global)
+            .default(Value::Bool(true))
+            .toml_section("sandbox")
+            .toml_key("dev_tools")
+            .section("SANDBOX")
+            .ui_label("Sandbox: dev-tools")
+            .help(&[
+                "Auto-allow language toolchain dirs that exist on the host",
+                "($CARGO_HOME, ~/.rustup, ~/go, ~/.pyenv, ~/.bun, ~/.npm, …)",
+                "Skip the auto dev-tool allow-list; rely on profile + manual --sandbox-allow",
+            ]),
+    );
+    reg.push(
+        Setting::new("sandbox_profile")
+            .long("sandbox-profile")
+            .placeholder("NAME")
+            .kind(String)
+            .scope(Global)
+            .toml_section("sandbox")
+            .toml_key("profile")
+            .section("SANDBOX")
+            .ui_label("Sandbox: profile")
+            .ui_unset("auto (harness name, fallback: default)")
+            .help(&[
+                "Override the auto-detected nono profile.",
+                "Pass `none` to skip `-p` entirely. Default: pick the",
+                "harness name if nono has a matching profile, else `default`.",
+            ]),
+    );
+    reg.push(
+        Setting::new("sandbox_allow")
+            .long("sandbox-allow")
+            .placeholder("DIR")
+            .kind(StringArray)
+            .cli_repeatable(true)
+            .scope(Global)
+            .toml_section("sandbox")
+            .toml_key("allow")
+            .section("SANDBOX")
+            .ui_label("Sandbox: allow")
+            .ui_format(super::setting::format_count_aggregate)
+            .help(&["Repeatable: extra rw directory for nono --allow"]),
+    );
+    reg.push(
+        Setting::new("sandbox_read")
+            .long("sandbox-read")
+            .placeholder("DIR")
+            .kind(StringArray)
+            .cli_repeatable(true)
+            .scope(Global)
+            .toml_section("sandbox")
+            .toml_key("read")
+            .section("SANDBOX")
+            .ui_label("Sandbox: read")
+            .ui_format(super::setting::format_count_aggregate)
+            .help(&["Repeatable: read-only directory for nono --read"]),
+    );
+    reg.push(
+        Setting::new("sandbox_write")
+            .long("sandbox-write")
+            .placeholder("DIR")
+            .kind(StringArray)
+            .cli_repeatable(true)
+            .scope(Global)
+            .toml_section("sandbox")
+            .toml_key("write")
+            .section("SANDBOX")
+            .ui_label("Sandbox: write")
+            .ui_format(super::setting::format_count_aggregate)
+            .help(&["Repeatable: write-only directory for nono --write"]),
+    );
+    reg.push(
+        Setting::new("sandbox_allow_domain")
+            .long("sandbox-allow-domain")
+            .placeholder("DOMAIN")
+            .kind(StringArray)
+            .cli_repeatable(true)
+            .scope(Global)
+            .toml_section("sandbox")
+            .toml_key("allow_domain")
+            .section("SANDBOX")
+            .ui_label("Sandbox: allow-domain")
+            .ui_format(super::setting::format_count_aggregate)
+            .help(&["Repeatable: domain for nono --allow-domain"]),
+    );
+    reg.push(
+        Setting::new("sandbox_extra")
+            .long("sandbox-extra")
+            .placeholder("ARG")
+            .kind(StringArray)
+            .cli_repeatable(true)
+            .scope(Global)
+            .toml_section("sandbox")
+            .toml_key("extra")
+            .section("SANDBOX")
+            .ui_label("Sandbox: extra")
+            .ui_format(super::setting::format_count_aggregate)
+            .help(&[
+                "Repeatable: free-form extra argument appended",
+                "to the nono argv before the harness",
+            ]),
+    );
+    reg.push(
+        Setting::new("sandbox_bin")
+            .long("sandbox-bin")
+            .placeholder("PATH")
+            .kind(String)
+            .scope(Global)
+            .default(Value::String("nono".to_string()))
+            .toml_section("sandbox")
+            .toml_key("bin")
+            .section("SANDBOX")
+            .ui_label("Sandbox: bin")
+            .help(&["Path or name of the nono binary (default: nono)"]),
+    );
+
     // ---------- REMOTE (one-shot; not persisted) ----------
     reg.push(
         Setting::new("ssh")

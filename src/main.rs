@@ -5,6 +5,7 @@ mod config;
 mod display;
 mod gguf;
 mod harness;
+mod sandbox;
 mod server;
 mod settings;
 mod ssh_tunnel;
@@ -43,6 +44,12 @@ struct RunOpts {
     //       blocks on Ctrl-C. No SSH.
     ssh_share: Option<ssh_tunnel::SshTarget>,
     use_lui: Option<ssh_tunnel::UseTarget>,
+    // Sandbox launcher: when set, lui short-circuits — no llama-server,
+    // no TUI. We resolve the persisted [sandbox] settings into a `nono
+    // run …` invocation, exec the chosen harness underneath it, and exit
+    // with the child's status. Argv past the harness name is forwarded
+    // verbatim, so the harness sees its own flags untouched.
+    sandbox: Option<sandbox::SandboxRequest>,
 }
 
 /// Parse argv, mutating `config` in place and returning per-run options.
@@ -52,18 +59,26 @@ struct RunOpts {
 fn parse_args(config: &mut Config) -> RunOpts {
     use lexopt::prelude::*;
 
+    // Pre-scan for `--sandbox HARNESS [args...]` before any further argv
+    // surgery. Everything after the harness name is captured verbatim
+    // and forwarded to the harness command line — including `--`, which
+    // must not get consumed by the post-`--` passthrough logic below.
+    let all: Vec<OsString> = std::env::args_os().collect();
+    let mut prog_and_pre = all.into_iter();
+    let prog = prog_and_pre.next();
+    let pre_sandbox: Vec<OsString> = prog_and_pre.collect();
+    let (after_sandbox_strip, sandbox_request) = sandbox::extract_request(pre_sandbox);
+
     // Split argv at `--` so the lexopt loop below only ever sees pre-`--`
     // args. That turns a `Value(v)` match into an unambiguous "bare
     // positional", which we treat as an alias lookup. Everything after
     // `--` bypasses lexopt entirely and lands in extras at the end.
-    let all: Vec<OsString> = std::env::args_os().collect();
     let (pre_argv, post_argv): (Vec<OsString>, Vec<OsString>) = {
-        let mut iter = all.into_iter();
-        let prog = iter.next(); // program name
+        let mut iter = after_sandbox_strip.into_iter();
         let mut pre: Vec<OsString> = prog.into_iter().collect();
         let mut post: Vec<OsString> = Vec::new();
         let mut in_post = false;
-        for a in iter {
+        for a in iter.by_ref() {
             if !in_post && a == "--" {
                 in_post = true;
                 continue;
@@ -289,6 +304,9 @@ fn parse_args(config: &mut Config) -> RunOpts {
     if ssh_share.is_some() && use_lui.is_some() {
         die("--ssh and --remote are mutually exclusive");
     }
+    if sandbox_request.is_some() && (ssh_share.is_some() || use_lui.is_some()) {
+        die("--sandbox is mutually exclusive with --ssh / --remote");
+    }
 
     // Apply the accumulated type flag (`--hf` / `-m`) to the active model's
     // per-model store. Deferred to end-of-parse so the flag can appear in
@@ -331,6 +349,7 @@ fn parse_args(config: &mut Config) -> RunOpts {
         cmd,
         ssh_share,
         use_lui,
+        sandbox: sandbox_request,
     }
 }
 
@@ -407,10 +426,52 @@ fn handle_flag(
                 Some(SettingValue::String(raw))
             }
         }
-        ValueKind::StringArray | ValueKind::Map => {
-            // Composites aren't CLI-reachable for registry-declared flags.
-            // `extra_args` is handled by the post-`--` tail; `chat_template_kwargs`
-            // is TOML-only.
+        ValueKind::StringArray => {
+            // Composites without `cli_repeatable` aren't CLI-reachable —
+            // `extra_args` collects via the post-`--` tail. With
+            // `cli_repeatable`, each `--flag X` occurrence appends one
+            // element; we hand the append off below since it has to read
+            // the current store, not just produce a fresh `Value`.
+            if !setting.cli_repeatable {
+                die(&format!(
+                    "{} can't be set on the command line",
+                    flag_display
+                ));
+            }
+            let raw = take_string(parser, &flag_display);
+            let target_is_this = match setting.scope {
+                RegScope::Global => false,
+                RegScope::PerModel => true,
+                RegScope::Both => scope_is_this,
+                RegScope::Ephemeral => false,
+            };
+            if target_is_this {
+                let key = active_key.clone().unwrap_or_else(|| {
+                    die(&format!(
+                        "--this {} requires an active model; pass --hf or -m first",
+                        flag_display
+                    ))
+                });
+                let store = config.per_model.entry(key).or_default();
+                let mut cur = match store.get(setting.name) {
+                    Some(SettingValue::StringArray(v)) => v.clone(),
+                    _ => Vec::new(),
+                };
+                cur.push(raw);
+                store.set(setting.name, SettingValue::StringArray(cur));
+            } else {
+                let mut cur = match config.global.get(setting.name) {
+                    Some(SettingValue::StringArray(v)) => v.clone(),
+                    _ => Vec::new(),
+                };
+                cur.push(raw);
+                config
+                    .global
+                    .set(setting.name, SettingValue::StringArray(cur));
+            }
+            return;
+        }
+        ValueKind::Map => {
             die(&format!(
                 "{} can't be set on the command line",
                 flag_display
@@ -957,6 +1018,20 @@ async fn main() {
         return;
     }
 
+    // --sandbox: thin launcher. Resolve `[sandbox]` settings into a
+    // `nono run …` invocation, exec the chosen harness underneath it
+    // with stdio inherited, exit with the child's status. Never spawns
+    // llama-server, never enters the TUI. Mutex with --cmd here — if the
+    // user wanted just to see the resolved sandbox commandline, plain
+    // `lui --cmd` already shows it as the third color-coded block.
+    if let Some(req) = &opts.sandbox {
+        if opts.cmd {
+            eprintln!("lui: --sandbox and --cmd are mutually exclusive (run plain `lui --cmd` to see the sandbox commandline)");
+            std::process::exit(2);
+        }
+        sandbox::launch(req, &effective);
+    }
+
     // --cmd: print the fully-resolved llama-server invocation and exit.
     // Placed after SWA auto-detect so the printed line matches what we'd
     // actually launch, but BEFORE any side effects (opencode config,
@@ -1076,6 +1151,64 @@ async fn main() {
             Print(&line["llama-server".len()..])
         );
         let _ = crossterm::execute!(handle, ResetColor, Print("\n"));
+
+        // --- sandbox line (preview of `lui --sandbox HARNESSNAME …`) ---
+        //
+        // HARNESSNAME is a literal placeholder rendered in magenta so
+        // it's visually distinct from the resolved nono argv. The argv
+        // itself comes straight from `sandbox::build_nono_args`, so the
+        // preview can never drift from what an actual `--sandbox` run
+        // would produce.
+        let nono_argv = sandbox::build_nono_args(&effective, sandbox::ProfileContext::Display);
+        let magenta = Color::Rgb {
+            r: 230,
+            g: 110,
+            b: 220,
+        };
+        let _ = crossterm::execute!(
+            handle,
+            SetForegroundColor(amber),
+            Print("\nsandbox commandline (for `lui --sandbox HARNESSNAME …`):\n")
+        );
+        let _ = crossterm::execute!(handle, Print("    "));
+        // Tokens that equal HARNESS_PLACEHOLDER are stand-ins the live
+        // launcher would substitute (the auto-detected profile name and
+        // the appended program slot). Render those in magenta so the
+        // distinction from resolved values is obvious at a glance.
+        let mut emitted_first = false;
+        for a in &nono_argv {
+            if !emitted_first {
+                let _ = crossterm::execute!(handle, SetForegroundColor(pink), Print(a));
+                emitted_first = true;
+                continue;
+            }
+            if a == sandbox::HARNESS_PLACEHOLDER {
+                let _ = crossterm::execute!(
+                    handle,
+                    SetAttribute(Attribute::Reset),
+                    SetForegroundColor(magenta),
+                    Print(" "),
+                    Print(a)
+                );
+            } else {
+                let _ = crossterm::execute!(
+                    handle,
+                    SetForegroundColor(lavender),
+                    SetAttribute(Attribute::Dim),
+                    Print(" "),
+                    Print(&shell_quote(a))
+                );
+            }
+        }
+        let _ = crossterm::execute!(
+            handle,
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(magenta),
+            Print(" "),
+            Print(sandbox::HARNESS_PLACEHOLDER),
+            ResetColor,
+            Print("\n"),
+        );
 
         return;
     }
