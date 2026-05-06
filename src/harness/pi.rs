@@ -25,6 +25,7 @@ pub const HARNESS: Harness = Harness {
     ],
     config: ConfigFile {
         dir: ".pi/agent",
+        dir_macos: None,
         candidates: &["models.json"],
     },
     apply,

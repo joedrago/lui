@@ -24,6 +24,7 @@ pub const HARNESS: Harness = Harness {
     ],
     config: ConfigFile {
         dir: ".config/opencode",
+        dir_macos: None,
         candidates: &["opencode.jsonc", "opencode.json"],
     },
     apply,

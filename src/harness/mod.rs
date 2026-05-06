@@ -15,6 +15,7 @@
 //! and is shared. Adding a harness is a `src/harness/<name>.rs` plus one
 //! entry in `HARNESSES`.
 
+pub mod late;
 pub mod opencode;
 pub mod pi;
 
@@ -32,6 +33,8 @@ use crate::ssh_tunnel::{ssh_run, SshTarget};
 pub struct ConfigFile {
     /// Home-relative directory, without leading `~/`. E.g. `.config/opencode`.
     pub dir: &'static str,
+    /// Optional macOS-specific directory. Falls back to `dir` when absent.
+    pub dir_macos: Option<&'static str>,
     /// Filenames tried in order. First entry is the default when no candidate exists.
     pub candidates: &'static [&'static str],
 }
@@ -75,7 +78,7 @@ pub struct Harness {
 /// Ordered list of every declared harness. Registry walks this to create
 /// one `harness_X` bool per harness; main / ssh_tunnel iterate it to drive
 /// updates.
-pub const HARNESSES: &[&Harness] = &[&opencode::HARNESS, &pi::HARNESS];
+pub const HARNESSES: &[&Harness] = &[&opencode::HARNESS, &pi::HARNESS, &late::HARNESS];
 
 // Tiny `CstInputValue` builders shared by per-harness `apply` fns.
 
@@ -95,11 +98,20 @@ pub fn obj<I: IntoIterator<Item = (&'static str, CstInputValue)>>(props: I) -> C
     CstInputValue::Object(props.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
 }
 
+fn local_dir(cf: &ConfigFile) -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let dir = if std::env::consts::OS == "macos" {
+        cf.dir_macos.unwrap_or(cf.dir)
+    } else {
+        cf.dir
+    };
+    home.join(dir)
+}
+
 /// Pick the local config file path for a harness: first existing
 /// candidate, else the first declared candidate (creating it on save).
 pub fn local_config_path(cf: &ConfigFile) -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let dir = home.join(cf.dir);
+    let dir = local_dir(cf);
     for name in cf.candidates {
         let p = dir.join(name);
         if p.exists() {
@@ -113,8 +125,7 @@ pub fn local_config_path(cf: &ConfigFile) -> PathBuf {
 /// both opencode and pi expect; parameterized so harnesses don't each
 /// hard-code their own path.
 pub fn local_skill_dir(cf: &ConfigFile) -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(cf.dir).join("skills").join("lui-web-search")
+    local_dir(cf).join("skills").join("lui-web-search")
 }
 
 /// Apply a harness locally: parse its config, let the harness edit the
