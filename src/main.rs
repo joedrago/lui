@@ -758,6 +758,12 @@ fn print_current_config() {
         );
         for (name, store) in &config.per_model {
             let is_active = active_key_opt.as_deref() == Some(name.as_str());
+            let aliases_for_model: Vec<&str> = config
+                .aliases
+                .iter()
+                .filter(|(_, target)| target.as_str() == name.as_str())
+                .map(|(alias, _)| alias.as_str())
+                .collect();
             let _ = crossterm::execute!(
                 stdout,
                 Print("  "),
@@ -767,15 +773,28 @@ fn print_current_config() {
                     Color::DarkGrey
                 }),
                 SetAttribute(Attribute::Bold),
-                Print(if is_active {
-                    format!("{} (active)", name)
-                } else {
-                    name.clone()
-                }),
+                Print(name.clone()),
                 SetAttribute(Attribute::Reset),
                 ResetColor,
-                Print("\n"),
             );
+            if !aliases_for_model.is_empty() {
+                let _ = crossterm::execute!(
+                    stdout,
+                    Print(" "),
+                    SetForegroundColor(muted),
+                    Print(format!("({})", aliases_for_model.join(", "))),
+                    ResetColor,
+                );
+            }
+            if is_active {
+                let _ = crossterm::execute!(
+                    stdout,
+                    SetForegroundColor(Color::Cyan),
+                    Print(" (active)"),
+                    ResetColor,
+                );
+            }
+            let _ = crossterm::execute!(stdout, Print("\n"));
             // Copy-pasteable command line. The per_model entry already
             // exists, so the positional form works — no -m / --hf
             // needed; those are only for net-new models.
