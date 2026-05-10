@@ -106,10 +106,10 @@ struct AppState {
     /// struct into each snapshot is a handful of `String::clone`s, which
     /// is trivial even at 4 Hz.
     config_summary: ConfigSummary,
-    /// Pre-built per-setting UI rows. Registry-walk is cheap but we still
-    /// only need to run it once — the effective server config is fixed for
-    /// the lifetime of the process.
-    setting_entries: Vec<crate::server::SettingEntry>,
+    /// Pre-built display atoms for the resolved llama-server argv.
+    /// Registry-walk is cheap but we still only need to run it once — the
+    /// effective server config is fixed for the lifetime of the process.
+    cmdline: Vec<String>,
 }
 
 /// JSON returned by `GET /config`. Used by `lui --ssh` on a client to
@@ -176,7 +176,7 @@ pub fn spawn(
     config_info: LuiConfigResponse,
     start_time: Instant,
     config_summary: ConfigSummary,
-    setting_entries: Vec<crate::server::SettingEntry>,
+    cmdline: Vec<String>,
 ) {
     let websearch_enabled = config_info.websearch;
     let state = AppState {
@@ -186,7 +186,7 @@ pub fn spawn(
         config_info,
         start_time,
         config_summary,
-        setting_entries,
+        cmdline,
     };
 
     let mut app: Router<AppState> = Router::new()
@@ -321,7 +321,7 @@ async fn handle_data(State(state): State<AppState>) -> Json<UiSnapshot> {
     let uptime = state.start_time.elapsed();
     let snapshot = {
         let mut st = state.server_state.lock().unwrap();
-        st.build_snapshot(uptime, &state.config_summary, &state.setting_entries)
+        st.build_snapshot(uptime, &state.config_summary, &state.cmdline)
     };
     Json(snapshot)
 }

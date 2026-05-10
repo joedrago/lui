@@ -596,7 +596,16 @@ impl Display {
             // CPU_Mapped and accurately shrinks its own GPU buffer), so this
             // is a no-op there.
             let gpu_model_active = (st.gpu_mem_mib - st.cpu_repack_mib).max(0.0);
-            let gpu_total = gpu_model_active + st.kv_cache_mib + st.compute_buf_mib;
+
+            // MTP draft head (when present): its KV cache is real additional
+            // working memory and gets folded into the displayed KV total.
+            // The MTP model/cpu mmap buffers are deliberately *not* added —
+            // they're the same .gguf mmapped twice, so adding them would
+            // count overlapping physical pages and inflate the line. See
+            // `ServerState::in_mtp_load` for the load-time handling.
+            let kv_total = st.kv_cache_mib + st.mtp_kv_mib;
+
+            let gpu_total = gpu_model_active + kv_total + st.compute_buf_mib;
             let cpu_total = st.cpu_mem_mib + st.cpu_repack_mib + st.cpu_compute_mib;
             let _ = queue!(
                 t.stdout,
@@ -619,6 +628,19 @@ impl Display {
                     Print(" MiB RAM"),
                 );
             }
+            // On unified-memory backends (Apple Silicon Metal) the GPU and
+            // CPU buffers share the same physical RAM, so summing them is a
+            // genuine working-set total. On discrete-GPU systems the pools
+            // are disjoint and adding them would mislead — `unified_memory`
+            // gates the annotation off there.
+            if st.unified_memory && cpu_total > 0.0 {
+                let total_gib = (gpu_total + cpu_total) / 1024.0;
+                let _ = queue!(
+                    t.stdout,
+                    SetForegroundColor(Color::DarkGrey),
+                    Print(format!(" ({:.1} GiB total)", total_gib)),
+                );
+            }
             let _ = queue!(t.stdout, ResetColor);
             t.newline();
 
@@ -629,8 +651,8 @@ impl Display {
             if gpu_model_active > 0.0 {
                 gpu_parts.push(format!("{:.0} model", gpu_model_active));
             }
-            if st.kv_cache_mib > 0.0 {
-                gpu_parts.push(format!("{:.0} KV", st.kv_cache_mib));
+            if kv_total > 0.0 {
+                gpu_parts.push(format!("{:.0} KV", kv_total));
             }
             if st.compute_buf_mib > 0.0 {
                 gpu_parts.push(format!("{:.0} compute", st.compute_buf_mib));
@@ -799,20 +821,6 @@ impl Display {
         };
         self.print_wrapped(&mut t, &ctx_display);
 
-        // Sampling (grey sub of Model) — only if any sampler was explicitly
-        // set. The renderer doesn't know which setting names belong to this
-        // group: it filters on the `group` tag the server-side walker
-        // embedded into each `SettingEntry`.
-        let sampling_parts: Vec<String> = snap
-            .settings
-            .iter()
-            .filter(|s| s.group.as_deref() == Some("sampling") && !s.is_default)
-            .map(format_setting_entry)
-            .collect();
-        if !sampling_parts.is_empty() {
-            self.print_wrapped(&mut t, &format!("sampling: {}", sampling_parts.join(" · ")));
-        }
-
         // llamacpp + status
         let uptime = Duration::from_secs(snap.uptime_seconds);
         let uptime_str = format_duration(uptime);
@@ -851,18 +859,12 @@ impl Display {
         // Bind (grey sub-line under llamacpp)
         self.print_wrapped(&mut t, &snap.config.bind_addr);
 
-        // Tuning (grey sub-line under llamacpp) — effective performance
-        // knobs. Every `tuning`-group entry lands here regardless of
-        // is_default; that matches legacy behavior where lui always showed
-        // `np`, `KV`, and `batch` even at their defaults.
-        let tuning_parts: Vec<String> = snap
-            .settings
-            .iter()
-            .filter(|s| s.group.as_deref() == Some("tuning"))
-            .map(format_setting_entry)
-            .collect();
-        if !tuning_parts.is_empty() {
-            self.print_wrapped(&mut t, &tuning_parts.join(" · "));
+        // Resolved llama-server argv (grey sub-line under llamacpp). The
+        // server pre-quotes and pre-pairs each atom (`--temp 0.6`,
+        // `--swa-full`, …) so the renderer just word-wraps without
+        // splitting a flag from its value.
+        if !snap.cmdline.is_empty() {
+            self.print_wrapped_atoms(&mut t, &snap.cmdline);
         }
 
         // Performance section
@@ -1184,6 +1186,49 @@ impl Display {
         }
     }
 
+    /// Word-wrap a list of pre-formed atoms (one flag/value pair, one bare
+    /// flag, or one literal token per atom) under the same hanging-indent
+    /// prefix `print_wrapped` uses. Atoms that overflow the line break to
+    /// a fresh line; atoms longer than the available width are truncated
+    /// rather than mid-token wrapped.
+    fn print_wrapped_atoms(&self, t: &mut TermBuf, atoms: &[String]) {
+        let prefix = "                 ";
+        let prefix_len = prefix.chars().count();
+        let max_val = t.width.saturating_sub(prefix_len);
+        if max_val == 0 || atoms.is_empty() {
+            return;
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        for atom in atoms {
+            let atom_len = atom.chars().count();
+            if cur.is_empty() {
+                cur = atom.clone();
+            } else if cur.chars().count() + 1 + atom_len <= max_val {
+                cur.push(' ');
+                cur.push_str(atom);
+            } else {
+                lines.push(std::mem::take(&mut cur));
+                cur = atom.clone();
+            }
+        }
+        if !cur.is_empty() {
+            lines.push(cur);
+        }
+
+        for line in &lines {
+            let _ = queue!(
+                t.stdout,
+                Print(prefix),
+                SetForegroundColor(Color::DarkGrey),
+                Print(truncate(line, max_val)),
+                ResetColor
+            );
+            t.newline();
+        }
+    }
+
     fn render_log(snap: &UiSnapshot, t: &mut TermBuf) {
         let log_prefix = "  ── Server Log ";
         let log_header = format!(
@@ -1383,19 +1428,6 @@ impl Display {
 
         println!();
         let _ = stdout.flush();
-    }
-}
-
-/// Render one `SettingEntry` as the `label=value` (or bare `label`) form
-/// used on the sampling and tuning sub-lines. The server-side walker has
-/// already done the hard work of resolving defaults, collapsing
-/// cache_type_k/v into a single KV row, formatting swa_full's bare / =off
-/// variants, and so on — the renderer just concatenates.
-fn format_setting_entry(s: &crate::server::SettingEntry) -> String {
-    if s.value.is_empty() {
-        s.display_label.clone()
-    } else {
-        format!("{}={}", s.display_label, s.value)
     }
 }
 

@@ -31,7 +31,15 @@ const WARNING_TTL: Duration = Duration::from_secs(5 * 60);
 /// renderer can recompute the total. An older v5 client polling a v6
 /// server would interpret per-slot as total and underestimate the
 /// allocated KV; the version check at the client refuses the mismatch.
-pub const UI_SNAPSHOT_VERSION: u32 = 6;
+///
+/// Version 7: dropped `settings: Vec<SettingEntry>` (the per-setting
+/// label/value rows the renderer used for the sampling and tuning
+/// sub-lines) in favour of `cmdline: Vec<String>` — pre-shell-quoted
+/// atoms of the resolved llama-server argv minus the always-on policy
+/// block and the model flag. The renderer prints them as one wrapped
+/// line, which is both simpler and strictly more informative than the
+/// old renamed-label panel.
+pub const UI_SNAPSHOT_VERSION: u32 = 7;
 
 #[derive(Debug, Clone)]
 pub struct SlotInfo {
@@ -82,6 +90,39 @@ pub struct ServerState {
     pub gpu_mem_mib: f64,
     pub kv_cache_mib: f64,
     pub compute_buf_mib: f64,
+
+    // MTP (Multi-Token Prediction) draft-head accumulators. When the model is
+    // an MTP-enabled .gguf, llama-server logs `srv load_model: loading MTP
+    // head from ...` and reopens the same file to load a small sibling
+    // "draft head" alongside the trunk. That second pass emits another full
+    // round of `model buffer size`, `KV buffer size`, and `compute buffer
+    // size` lines — with the *same* mmap region size for the model buffers,
+    // since both passes mmap the same .gguf. Naively `+=`ing those into
+    // `gpu_mem_mib` / `cpu_mem_mib` (the original behavior) double-counts
+    // mmap overhead that maps to the same physical pages, producing
+    // dashboard numbers like "34433 MiB GPU model" for a 17 GiB model.
+    //
+    // Once `in_mtp_load` flips true (on the `loading MTP head` line), the
+    // buffer-size branches in `parse_load_line` route subsequent emissions
+    // into these MTP-specific fields. The display then sums KV across both
+    // (it really is additional working memory) but ignores the duplicate
+    // model buffers.
+    pub in_mtp_load: bool,
+    pub mtp_gpu_mib: f64,
+    pub mtp_cpu_mib: f64,
+    pub mtp_kv_mib: f64,
+    pub mtp_compute_mib: f64,
+    pub mtp_cpu_compute_mib: f64,
+
+    // True iff the active backend reports a unified memory architecture
+    // (e.g. Apple Silicon Metal, where GPU and CPU buffers live in the same
+    // physical RAM). Captured from llama.cpp's
+    // `ggml_metal_device_init: has unified memory = true` log line. The
+    // display uses this to decide whether summing VRAM + RAM into a "total
+    // working set" line is meaningful — on a discrete-GPU box the two pools
+    // are disjoint and adding them would mislead.
+    pub unified_memory: bool,
+
     // Tensors llama.cpp forced to plain CPU because the preferred backend
     // couldn't accept them (e.g. q8_0 embedding with a CPU_REPACK backend).
     // Parsed from the `done_getting_tensors: ... (and N others) ... using CPU
@@ -263,6 +304,31 @@ pub struct UiSnapshot {
     pub gpu_mem_mib: f64,
     pub kv_cache_mib: f64,
     pub compute_buf_mib: f64,
+
+    /// MTP draft-head buffers. Populated only when llama-server logs
+    /// `srv load_model: loading MTP head ...` during startup; zero
+    /// otherwise. See the comment on `ServerState::in_mtp_load` for why
+    /// these need their own bucket. `#[serde(default)]` so a v6 client
+    /// reading a newer payload still parses (the renderer falls back to
+    /// 0.0 and just doesn't add the MTP slice to the displayed totals).
+    #[serde(default)]
+    pub mtp_gpu_mib: f64,
+    #[serde(default)]
+    pub mtp_cpu_mib: f64,
+    #[serde(default)]
+    pub mtp_kv_mib: f64,
+    #[serde(default)]
+    pub mtp_compute_mib: f64,
+    #[serde(default)]
+    pub mtp_cpu_compute_mib: f64,
+
+    /// Backend reports unified memory (e.g. Apple Silicon Metal).
+    /// `#[serde(default)]` keeps older client snapshots parseable; on
+    /// discrete-GPU systems the field is simply false and the display
+    /// renders no total.
+    #[serde(default)]
+    pub unified_memory: bool,
+
     pub gpu_layers_loaded: u32,
     pub total_layers: u32,
     #[serde(default)]
@@ -303,41 +369,19 @@ pub struct UiSnapshot {
     /// truth per frame.
     pub config: ConfigSummary,
 
-    /// Flat list of every registry-declared setting the UI wants to render,
-    /// grouped by `group` label (`"sampling"`, `"tuning"`, ...). The
-    /// renderer filters by group and concatenates — it never names an
-    /// individual setting. See `build_setting_entries` for the production
-    /// logic.
+    /// Pre-shell-quoted atoms of the resolved llama-server argv, minus
+    /// the always-on policy block (host/port/-fa/-jinja/etc.) and the
+    /// model flag (already shown on the Model line). Each atom is one
+    /// flag-with-value pair (`"--temp 0.6"`), one bare flag
+    /// (`"--swa-full"`), or one post-`--` literal token. The renderer
+    /// prints them as a single wrapped line under the bind sub-line.
     #[serde(default)]
-    pub settings: Vec<SettingEntry>,
+    pub cmdline: Vec<String>,
 
     /// Tail of the server log ring (up to 40 lines, newest first, each
     /// truncated to 150 chars). Used by the Server Log panel in both local
     /// and remote mode.
     pub log_lines: Vec<String>,
-}
-
-/// One entry per registry-declared setting the UI wants to surface.
-/// Pre-formatted server-side so a local renderer and a remote `--remote`
-/// client render identical text. `display_label` pairs with `value` via
-/// `"label=value"` — or just `label` when `value` is empty (bare flags
-/// like `swa-full`, or aggregate rows like `"+3 extra"`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SettingEntry {
-    /// Canonical registry name. Synthetic for aggregate rows (e.g. `"KV"`
-    /// combining `cache_type_k` + `cache_type_v`).
-    pub name: String,
-    /// Human label shown in the UI (`"temp"`, `"KV"`, `"np"`, ...).
-    pub display_label: String,
-    /// Formatted value. Empty for bare-flag entries whose label is the
-    /// whole rendered form (`"swa-full"`, `"+3 extra"`).
-    pub value: String,
-    /// Visual grouping: `"sampling"`, `"tuning"`, or None.
-    pub group: Option<String>,
-    /// True when no layer explicitly set this — the value shown is the
-    /// registry default. The renderer uses this to dim-style defaults or
-    /// skip them entirely for groups where "unset" means "don't show".
-    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,8 +409,8 @@ pub struct DownloadSnapshot {
 /// the same lines a local renderer would — no duplicate format functions
 /// on both ends, and no need to ship the full Config over the wire.
 ///
-/// Sampler / tuning detail lives in `UiSnapshot.settings` (built from
-/// the registry); this struct carries only the static machine-shape
+/// The resolved llama-server argv lives in `UiSnapshot.cmdline` (built
+/// from the registry); this struct carries only the static machine-shape
 /// strings that don't change for the life of the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigSummary {
@@ -417,45 +461,97 @@ impl ConfigSummary {
     }
 }
 
-/// Build the per-snapshot `settings` payload as a single registry walk.
-/// Iteration order is the registry declaration order, which doubles as
-/// the UI order for sampling and tuning rows; each entry's display
-/// behavior is pulled entirely from `Setting::ui_label` +
-/// `Setting::ui_format` with a generic fallback.
+/// Build the wrapped-display atoms surfaced under the `llamacpp` line.
+/// Each returned string is one whole atom — a flag-with-value pair
+/// (`"--temp 0.6"`), a bare flag (`"--swa-full"`), or a single
+/// post-`--` literal token — already shell-quoted so the renderer can
+/// just word-wrap them. The full llama-server argv is built by
+/// `build_args` and then trimmed of:
 ///
-/// No setting names appear here: adding a new `group`-tagged setting to
-/// the registry surfaces automatically.
-pub fn build_setting_entries(eff: &Effective) -> Vec<SettingEntry> {
-    let mut out: Vec<SettingEntry> = Vec::new();
-    for s in eff.registry.settings() {
-        let Some(group) = s.group else { continue };
-        let raw = eff.get(s.name);
-        let Some(value_str) = render_value(s, raw, eff) else {
-            continue;
-        };
-        out.push(SettingEntry {
-            name: s.name.to_string(),
-            display_label: s.derived_ui_label(),
-            value: value_str,
-            group: Some(group.to_string()),
-            is_default: !eff.is_explicitly_set(s.name),
-        });
+///   - the always-on lui policy block (host/port + the fixed
+///     `--metrics --jinja --log-colors off -v -fa on --cache-reuse 256
+///     -kvu` tail), since none of those vary with user config;
+///   - the model flag (`-m PATH` or `-hf REPO`), since the Model and
+///     Source lines already show it.
+pub fn build_display_atoms(eff: &Effective) -> Vec<String> {
+    let raw = build_args(eff);
+
+    // Length of the always-on prefix `build_args` emits before any
+    // user-driven flags. Hardcoded — the prefix is 14 tokens long and
+    // the only force keeping the two in sync is this comment plus the
+    // matching block at the top of `build_args`.
+    const POLICY_PREFIX_LEN: usize = 14;
+    let mut idx = POLICY_PREFIX_LEN.min(raw.len());
+
+    // Skip the model-identity flag pair if present. `build_args`
+    // emits it (when set) immediately after the policy prefix.
+    if idx + 1 < raw.len() && (raw[idx] == "-m" || raw[idx] == "-hf") {
+        idx += 2;
+    }
+
+    let rest = &raw[idx..];
+    group_into_atoms(rest)
+}
+
+/// Pair flags with their values into single shell-quoted atoms so the
+/// renderer can wrap by atom without splitting `--temp` from `0.6`.
+/// A token is a flag iff it starts with `-` and the next char is `-`
+/// or alphabetic (so a negative-number value like `-1` stays a value).
+/// Bool flags whose next neighbour is itself a flag fall through as
+/// bare atoms.
+fn group_into_atoms(tokens: &[String]) -> Vec<String> {
+    fn is_flag(t: &str) -> bool {
+        let mut chars = t.chars();
+        chars.next() == Some('-')
+            && match chars.next() {
+                Some('-') => true,
+                Some(c) => c.is_ascii_alphabetic(),
+                None => false,
+            }
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = &tokens[i];
+        if is_flag(tok) && i + 1 < tokens.len() && !is_flag(&tokens[i + 1]) {
+            out.push(format!("{} {}", tok, shell_quote(&tokens[i + 1])));
+            i += 2;
+        } else if is_flag(tok) {
+            out.push(tok.clone());
+            i += 1;
+        } else {
+            out.push(shell_quote(tok));
+            i += 1;
+        }
     }
     out
 }
 
-/// Run the setting's UI formatter (if any) or the generic value
-/// renderer. Returns `None` when the row should be skipped — no value
-/// set, no registry default, and no formatter output.
-fn render_value(
-    s: &crate::settings::setting::Setting,
-    value: Option<&crate::settings::value::Value>,
-    eff: &Effective,
-) -> Option<String> {
-    if let Some(fmt) = s.ui_format {
-        return fmt(value, eff, s);
+/// POSIX-style shell quoting for a single argv token. Bare when the
+/// token is strictly alphanum or `-._/:=,+`; otherwise single-quoted
+/// with embedded single quotes escaped as `'\''`. Same rule as the
+/// `--cmd` printer in `main.rs`, just lifted here so the snapshot
+/// builder can reuse it.
+pub fn shell_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | ',' | '+')
+        });
+    if safe {
+        return s.to_string();
     }
-    generic_value_display(value)
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// Format an f64 to 3 significant figures, trimming trailing zeros.
@@ -487,20 +583,6 @@ pub fn format_float(f: f64) -> String {
         .to_string()
 }
 
-/// Default renderer for scalar values. Composite kinds (`Map`,
-/// `StringArray`) don't have a sensible single-row form here — settings
-/// that need one provide a `ui_format`.
-fn generic_value_display(value: Option<&crate::settings::value::Value>) -> Option<String> {
-    use crate::settings::value::Value;
-    match value? {
-        Value::Bool(b) => Some(b.to_string()),
-        Value::Integer(n) => Some(n.to_string()),
-        Value::Float(f) => Some(format_float(*f)),
-        Value::String(s) => Some(s.clone()),
-        Value::StringArray(_) | Value::Map(_) => None,
-    }
-}
-
 impl SlotInfo {
     fn to_snapshot(&self) -> SlotSnapshot {
         SlotSnapshot {
@@ -523,11 +605,13 @@ impl ServerState {
     /// since the server process started — supplied by the caller because the
     /// lui HTTP server (not `ServerState`) owns that clock. `config` is
     /// the pre-formatted `ConfigSummary`, built once at spawn time.
+    /// `cmdline` is the pre-quoted display atoms of the resolved
+    /// llama-server argv, also built once at spawn time.
     pub fn build_snapshot(
         &mut self,
         uptime: Duration,
         config: &ConfigSummary,
-        setting_entries: &[SettingEntry],
+        cmdline: &[String],
     ) -> UiSnapshot {
         // Age out stale warnings before the renderer sees them.
         self.prune_warnings();
@@ -612,6 +696,12 @@ impl ServerState {
             gpu_mem_mib: self.gpu_mem_mib,
             kv_cache_mib: self.kv_cache_mib,
             compute_buf_mib: self.compute_buf_mib,
+            mtp_gpu_mib: self.mtp_gpu_mib,
+            mtp_cpu_mib: self.mtp_cpu_mib,
+            mtp_kv_mib: self.mtp_kv_mib,
+            mtp_compute_mib: self.mtp_compute_mib,
+            mtp_cpu_compute_mib: self.mtp_cpu_compute_mib,
+            unified_memory: self.unified_memory,
             gpu_layers_loaded: self.gpu_layers_loaded,
             total_layers: self.total_layers,
             overflow_layers: self.overflow_layers,
@@ -643,7 +733,7 @@ impl ServerState {
             warnings: self.warnings.iter().map(|(_, w)| w.clone()).collect(),
 
             config: config.clone(),
-            settings: setting_entries.to_vec(),
+            cmdline: cmdline.to_vec(),
 
             // Tail of the log ring: newest first, up to 40 lines, each
             // truncated to 150 chars to keep the wire payload reasonable.
@@ -1096,37 +1186,80 @@ fn parse_load_line(line: &str, state: &mut ServerState) {
             state.total_layers = caps[2].parse().unwrap_or(0);
         }
     }
+    // Backend unified-memory capability. Apple Silicon Metal logs this as
+    // `ggml_metal_device_init: has unified memory = true` very early in
+    // startup (before any model load); CUDA and other discrete-GPU
+    // backends never emit it, so the field stays false and the display
+    // omits the unified-total annotation.
+    else if line.contains("has unified memory") {
+        if let Some(val) = extract_after_eq(line) {
+            state.unified_memory = val.trim().eq_ignore_ascii_case("true");
+        }
+    }
+    // MTP draft-head load transition. After this line, llama-server reopens
+    // the same .gguf to pull in the MTP sibling tensors, then emits a fresh
+    // round of `model buffer size` / `KV buffer size` / `compute buffer
+    // size` lines for that load. Flip `in_mtp_load` so the branches below
+    // route those emissions into the MTP accumulators instead of
+    // double-counting them onto the trunk's totals.
+    else if line.contains("loading MTP head") {
+        state.in_mtp_load = true;
+    }
     // CPU_Mapped model buffer size (embedding/output tensors forced to plain
     // CPU; on CUDA overflow this also carries the spilled expert weights).
     else if line.contains("CPU_Mapped model buffer size") {
         if let Some(mib) = extract_mib(line) {
-            state.cpu_mem_mib += mib;
+            if state.in_mtp_load {
+                state.mtp_cpu_mib += mib;
+            } else {
+                state.cpu_mem_mib += mib;
+            }
         }
     }
     // CPU_REPACK model buffer size (Metal's path for MoE experts that spilled
     // to host RAM — CUDA uses CPU_Mapped for the same thing).
     else if line.contains("CPU_REPACK model buffer size") {
         if let Some(mib) = extract_mib(line) {
-            state.cpu_repack_mib += mib;
+            // MTP heads don't carry MoE experts (they're a few attention
+            // layers), so any REPACK emission during MTP load would be
+            // surprising — but route it for consistency rather than letting
+            // it leak onto the trunk's accumulator.
+            if state.in_mtp_load {
+                state.mtp_cpu_mib += mib;
+            } else {
+                state.cpu_repack_mib += mib;
+            }
         }
     }
     // Plain "CPU model buffer size" (probe allocations print 0 here; kept so
     // it doesn't leak into the GPU branch below).
     else if line.contains("CPU model buffer size") {
         if let Some(mib) = extract_mib(line) {
-            state.cpu_mem_mib += mib;
+            if state.in_mtp_load {
+                state.mtp_cpu_mib += mib;
+            } else {
+                state.cpu_mem_mib += mib;
+            }
         }
     }
     // GPU model buffer size (MTL0 on macOS, CUDA0 on NVIDIA, Vulkan0, etc.)
     else if line.contains("model buffer size") && !line.contains("CPU") {
         if let Some(mib) = extract_mib(line) {
-            state.gpu_mem_mib += mib;
+            if state.in_mtp_load {
+                state.mtp_gpu_mib += mib;
+            } else {
+                state.gpu_mem_mib += mib;
+            }
         }
     }
     // KV buffer size (any GPU backend)
     else if line.contains("KV buffer size") && !line.contains("CPU") {
         if let Some(mib) = extract_mib(line) {
-            state.kv_cache_mib = mib;
+            if state.in_mtp_load {
+                state.mtp_kv_mib = mib;
+            } else {
+                state.kv_cache_mib = mib;
+            }
         }
     }
     // CPU compute buffer (small on GPU-backed runs; non-trivial once there's
@@ -1134,13 +1267,21 @@ fn parse_load_line(line: &str, state: &mut ServerState) {
     // wins, matching how the GPU compute line is handled.
     else if line.contains("CPU compute buffer size") {
         if let Some(mib) = extract_mib(line) {
-            state.cpu_compute_mib = mib;
+            if state.in_mtp_load {
+                state.mtp_cpu_compute_mib = mib;
+            } else {
+                state.cpu_compute_mib = mib;
+            }
         }
     }
     // Compute buffer size (any GPU backend)
     else if line.contains("compute buffer size") && !line.contains("CPU") {
         if let Some(mib) = extract_mib(line) {
-            state.compute_buf_mib = mib;
+            if state.in_mtp_load {
+                state.mtp_compute_mib = mib;
+            } else {
+                state.compute_buf_mib = mib;
+            }
         }
     }
     // `done_getting_tensors: tensor 'X' (q8_0) (and N others) cannot be used

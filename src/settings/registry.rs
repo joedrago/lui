@@ -378,7 +378,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--temp")
             .section("SETTINGS")
-            .group("sampling")
             .ui_unset("model default")
             .help(&["Sampling temperature"]),
     );
@@ -391,7 +390,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--top-p")
             .section("SETTINGS")
-            .group("sampling")
             .ui_unset("model default")
             .help(&["Top-p (nucleus)"]),
     );
@@ -404,7 +402,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--top-k")
             .section("SETTINGS")
-            .group("sampling")
             .ui_unset("model default")
             .help(&["Top-k"]),
     );
@@ -417,7 +414,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--min-p")
             .section("SETTINGS")
-            .group("sampling")
             .ui_unset("model default")
             .help(&["Min-p"]),
     );
@@ -430,7 +426,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--presence-penalty")
             .section("SETTINGS")
-            .group("sampling")
             .ui_unset("model default")
             .help(&["Presence penalty (0.0 = disabled)"]),
     );
@@ -443,7 +438,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--dry-multiplier")
             .section("SETTINGS")
-            .group("sampling")
             .ui_unset("model default")
             .help(&["DRY sampling multiplier (0.0 = disabled)"]),
     );
@@ -456,7 +450,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--dry-base")
             .section("SETTINGS")
-            .group("sampling")
             .ui_unset("model default")
             .help(&["DRY sampling base value"]),
     );
@@ -470,7 +463,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--dry-allowed-length")
             .section("SETTINGS")
-            .group("sampling")
             .ui_unset("model default")
             .help(&["Allowed length for DRY sampling"]),
     );
@@ -483,7 +475,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--frequency-penalty")
             .section("SETTINGS")
-            .group("sampling")
             .ui_unset("model default")
             .help(&["Frequency penalty (0.0 = disabled)"]),
     );
@@ -497,7 +488,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--reasoning-budget")
             .section("SETTINGS")
-            .group("sampling")
             .ui_unset("unrestricted")
             .help(&["Token budget for thinking (-1 = unrestricted, 0 = immediate end)"]),
     );
@@ -513,7 +503,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("-np")
             .section("SETTINGS")
-            .group("tuning")
             .help(&["Server slots (llama-server -np)"]),
     );
     reg.push(
@@ -527,7 +516,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("-ub")
             .section("SETTINGS")
-            .group("tuning")
             .ui_label("ubatch")
             .ui_unset("server default")
             .help(&["Physical batch size (llama-server -ub)"]),
@@ -542,7 +530,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("-ctk")
             .section("SETTINGS")
-            .group("tuning")
             .ui_label("ctk")
             .ui_unset("server default")
             .help(&["KV cache key type (f16, q8_0, ...)"]),
@@ -557,7 +544,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("-ctv")
             .section("SETTINGS")
-            .group("tuning")
             .ui_label("ctv")
             .ui_unset("server default")
             .help(&["KV cache value type"]),
@@ -572,7 +558,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("-b")
             .section("SETTINGS")
-            .group("tuning")
             .ui_label("batch")
             .ui_unset("server default")
             .help(&["Logical batch size (llama-server -b)"]),
@@ -595,7 +580,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
                 .max(1) as i64,
             ))
             .section("SETTINGS")
-            .group("tuning")
             .ui_label("Threads")
             .ui_unset("auto")
             .help(&["CPU threads for generation (llama-server -t)"]),
@@ -611,7 +595,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("-tb")
             .section("SETTINGS")
-            .group("tuning")
             .ui_label("tb")
             .ui_unset("auto")
             .help(&["Prompt/batch threads (llama-server -tb)"]),
@@ -626,7 +609,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--cache-ram")
             .section("SETTINGS")
-            .group("tuning")
             .ui_label("cache-ram")
             .ui_format(super::setting::format_mib)
             .ui_unset("server default")
@@ -643,7 +625,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--prio-batch")
             .section("SETTINGS")
-            .group("tuning")
             .ui_label("prio-batch")
             .ui_unset("normal")
             .help(&["Batch thread priority"]),
@@ -658,7 +639,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--fit-target")
             .section("SETTINGS")
-            .group("tuning")
             .ui_label("fit-target")
             .help(&[
                 "Free-VRAM headroom reserved by llama-server --fit",
@@ -674,7 +654,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(BoolFlagIfTrue)
             .llama_flag("--swa-full")
             .section("SETTINGS")
-            .group("tuning")
             .ui_label("swa-full")
             .ui_format(super::setting::format_bare_or_off)
             .ui_unset("auto (SWA/hybrid detection at launch)")
@@ -711,7 +690,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .passthrough(FlagValue)
             .llama_flag("--reasoning")
             .section("SETTINGS")
-            .group("tuning")
             .ui_unset("auto")
             .help(&[
                 "Reasoning/thinking in chat: on, off, or auto",
@@ -733,7 +711,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .scope(PerModel)
             .passthrough(LiteralTokens)
             .section("SETTINGS")
-            .group("tuning")
             .ui_label("extra")
             .ui_format(super::setting::format_count_aggregate)
             .help(&[

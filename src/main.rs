@@ -505,32 +505,6 @@ fn primary_flag_display(setting: &Setting, negated: bool) -> String {
     format!("<{}>", setting.name)
 }
 
-/// Minimal POSIX-style shell quoting for `--cmd` output, so the printed
-/// line is directly copy-pasteable. Bare if the arg is strictly
-/// alphanum/`-._/:=,+`; otherwise single-quoted with embedded single quotes
-/// escaped as `'\''`. Good enough for the llama-server args we emit
-/// (notably the JSON kwargs blob, which contains braces and quotes).
-fn shell_quote(s: &str) -> String {
-    let safe = !s.is_empty()
-        && s.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | ',' | '+')
-        });
-    if safe {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 fn die(msg: &str) -> ! {
     eprintln!("lui: {}", msg);
     std::process::exit(2);
@@ -1095,7 +1069,7 @@ async fn main() {
                 Print(" --")
             );
             for a in &extra {
-                let _ = crossterm::execute!(handle, Print(" "), Print(&shell_quote(a)));
+                let _ = crossterm::execute!(handle, Print(" "), Print(&server::shell_quote(a)));
             }
         }
         let _ = crossterm::execute!(handle, ResetColor, Print("\n"));
@@ -1104,7 +1078,7 @@ async fn main() {
         let mut line = String::from("llama-server");
         for a in &args {
             line.push(' ');
-            line.push_str(&shell_quote(a));
+            line.push_str(&server::shell_quote(a));
         }
         let _ = crossterm::execute!(
             handle,
@@ -1164,7 +1138,7 @@ async fn main() {
                     SetForegroundColor(lavender),
                     SetAttribute(Attribute::Dim),
                     Print(" "),
-                    Print(&shell_quote(a))
+                    Print(&server::shell_quote(a))
                 );
             }
         }
@@ -1239,7 +1213,7 @@ async fn main() {
     // renderer and any future client renderer agree on server lifetime.
     let start_time = std::time::Instant::now();
     let config_summary = ConfigSummary::from_effective(&effective, &config.aliases);
-    let setting_entries = server::build_setting_entries(&effective);
+    let cmdline = server::build_display_atoms(&effective);
     websearch::spawn(
         &host_for_spawn,
         web_port,
@@ -1247,7 +1221,7 @@ async fn main() {
         config_info,
         start_time,
         config_summary,
-        setting_entries,
+        cmdline,
     );
 
     // Store version and kick off brew update check in background

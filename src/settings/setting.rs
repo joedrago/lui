@@ -87,12 +87,6 @@ pub struct Setting {
     /// consults a fixed order to keep section ordering deterministic.
     pub section: &'static str,
 
-    /// Visual group inside the UI payload, e.g. "sampling", "tuning".
-    /// `None` means "don't surface in the UI's grouped sections" (either a
-    /// hidden setting or one the UI shows in its own typed blocks). The
-    /// TUI renderer filters `settings` by this label at draw time.
-    pub group: Option<&'static str>,
-
     /// Minimum allowed value for `ValueKind::Integer`. Enforced at parse
     /// time and TOML-load time. Ignored for other kinds.
     pub min: Option<i64>,
@@ -169,7 +163,6 @@ impl Setting {
             default: None,
             help: &[],
             section: "OTHER",
-            group: None,
             min: None,
             max: None,
             llama_flag: None,
@@ -224,10 +217,6 @@ impl Setting {
     }
     pub fn section(mut self, s: &'static str) -> Self {
         self.section = s;
-        self
-    }
-    pub fn group(mut self, g: &'static str) -> Self {
-        self.group = Some(g);
         self
     }
     pub fn min(mut self, n: i64) -> Self {
