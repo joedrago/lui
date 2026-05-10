@@ -106,15 +106,18 @@ All fields live on `Setting` in `src/settings/setting.rs`.
 
 **Where it's stored:**
 - `scope(Scope)`:
-  - `Global` — lives in `[server]` only. `--this --port 8080` is a
-    hard error.
-  - `PerModel` — lives in `[models."<key>"]` only. No CLI flag
-    lands here today except the per-model `type` tag.
-  - `Both` — honors the sticky `--this` / `--global` cursor. Writes
-    to the chosen scope; effective value is per-model over global.
+  - `Global` — machine-wide. Lives in `[server]` (or another global
+    table like `[sandbox]` per `toml_section`). Things like `--port`
+    / `--public` / `--websearch` / harness toggles. There is no
+    `--this` / `--global` cursor; per-model tunables never land here.
+  - `PerModel` — lives in `[models."<key>"]` only. Every tunable
+    setting (`temp`, `ctx_size`, `extra_args`, …) sits here. CLI
+    flags for these write into the active model's table directly;
+    if no active model is set yet, lui errors with a hint to pass
+    `--hf` / `-m` / a positional first.
   - `Ephemeral` — not persisted. Mode flags (`--list`, `--cmd`,
-    `--ssh`, `--alias`, `--public`) use this. Parse loop reads side
-    effects directly in `main.rs`, not via `handle_flag`.
+    `--ssh`, `--alias`, `--public`, `--clone`) use this. Parse loop
+    reads side effects directly in `main.rs`, not via `handle_flag`.
 - `default(Value)`: registry-level default, used when neither
   store has a value. **Absence of a default means "truly unset"** —
   no flag reaches `llama-server` and the UI falls back to
@@ -507,9 +510,9 @@ it's probably missing `ui_label` / `ui_format` / `ui_unset`, or its
 
 **Every CLI flag is persisted.** That's the feature — plain `lui`
 resumes last time. It's also the footgun for testing: running
-`lui --hf fake/model --temp 999 --this -c 1` writes that garbage
-straight into `~/.config/lui.toml`, clobbering whatever real
-configuration the user had.
+`lui --hf fake/model --temp 999 -c 1` writes that garbage straight
+into `~/.config/lui.toml`, clobbering whatever real configuration the
+user had.
 
 The standard dance when experimenting:
 
@@ -519,8 +522,8 @@ The standard dance when experimenting:
 cp ~/.config/lui.toml ~/.config/lui.toml.bak
 
 # 2. Run any weird test invocations.
-./target/debug/lui --hf fake/test:Q4 --alias fakealias --this -c 1234 --cmd
-./target/debug/lui --ngl 99 --temp 0.1 --this --temp default -l
+./target/debug/lui --hf fake/test:Q4 --alias fakealias -c 1234 --cmd
+./target/debug/lui --ngl 99 --temp default -l
 
 # 3. Restore before you forget.
 mv ~/.config/lui.toml.bak ~/.config/lui.toml
@@ -550,7 +553,7 @@ copy-paste. Handy for comparing two config states:
 
 ```
 ./target/debug/lui --cmd > /tmp/before.txt
-./target/debug/lui --this --temp 0.2 --cmd > /tmp/after.txt
+./target/debug/lui --temp 0.2 --cmd > /tmp/after.txt
 diff /tmp/before.txt /tmp/after.txt   # shows just `--temp 0.2` added
 ```
 

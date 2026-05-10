@@ -12,6 +12,11 @@ use std::collections::{BTreeMap, HashMap};
 use super::setting::{PassthroughMode, Scope, Setting};
 use super::value::{Value, ValueKind};
 
+/// Long-flag prefix that signals "clear the stored list for this
+/// StringArray setting at the active scope." Mirrors the way `no-` is
+/// the inverter prefix for bool flags. Not intended to be configurable.
+const CLEAR_PREFIX: &str = "clear-";
+
 /// Ordered list of help sections and their narrative content. A
 /// `Setting::section` string must match one of these `name`s to appear in
 /// the right block; anything unmatched gets bucketed at the end of
@@ -39,7 +44,7 @@ pub struct ExtraRow {
 pub const SECTIONS: &[Section] = &[
     Section {
         name: "MODEL",
-        title: "MODEL (identity — always global):",
+        title: "MODEL (identity):",
         preamble: "",
         extra_rows: &[ExtraRow {
             signature: "<NAME>",
@@ -48,23 +53,15 @@ pub const SECTIONS: &[Section] = &[
         postamble: "",
     },
     Section {
-        name: "SCOPE",
-        title: "SCOPE (sticky; defaults to --global):",
-        preamble: "",
-        extra_rows: &[],
-        postamble: "\n    Scope toggles may appear multiple times. Example:\n        \
-                    lui --temp 0.6 --this --temp 0.2       # global=0.6, this model=0.2\n",
-    },
-    Section {
         name: "SETTINGS",
-        title: "SETTINGS (scoped; pass `default` as the value to clear a per-scope override):",
+        title: "SETTINGS (per-model; pass `default` as the value to clear an override):",
         preamble: "",
         extra_rows: &[],
         postamble: "",
     },
     Section {
         name: "MACHINE",
-        title: "MACHINE SETTINGS (always global; rejected with --this):",
+        title: "MACHINE SETTINGS (machine-wide):",
         preamble: "",
         extra_rows: &[],
         postamble: "",
@@ -78,7 +75,8 @@ pub const SECTIONS: &[Section] = &[
     },
     Section {
         name: "SANDBOX",
-        title: "SANDBOX (capability-based wrapper for harness launches; persisted under [sandbox]):",
+        title:
+            "SANDBOX (capability-based wrapper for harness launches; persisted under [sandbox]):",
         preamble: "",
         extra_rows: &[],
         postamble: "",
@@ -110,12 +108,16 @@ pub struct Registry {
 }
 
 /// A hit on a long flag: the index of the matching setting plus whether
-/// the form was negated (`--no-<long>`). Negation is only produced for
-/// settings where `has_no_form()` is true.
+/// the form was negated (`--no-<long>`) or cleared (`--clear-<long>`).
+/// Negation is only produced for bool settings where `has_no_form()` is
+/// true; clearing is only produced for `StringArray` settings with a
+/// long flag. The two are mutually exclusive — no single setting
+/// produces both forms.
 #[derive(Debug, Clone, Copy)]
 pub struct LongLookup {
     pub index: usize,
     pub negated: bool,
+    pub cleared: bool,
 }
 
 impl Registry {
@@ -170,6 +172,7 @@ impl Registry {
                     LongLookup {
                         index: idx,
                         negated: false,
+                        cleared: false,
                     },
                 );
                 if s.has_no_form() {
@@ -182,6 +185,21 @@ impl Registry {
                         LongLookup {
                             index: idx,
                             negated: true,
+                            cleared: false,
+                        },
+                    );
+                }
+                if s.has_clear_form() {
+                    let cleared = format!("{}{}", CLEAR_PREFIX, l);
+                    if self.by_long.contains_key(&cleared) {
+                        panic!("SettingsRegistry: duplicate long flag --{}", cleared);
+                    }
+                    self.by_long.insert(
+                        cleared,
+                        LongLookup {
+                            index: idx,
+                            negated: false,
+                            cleared: true,
                         },
                     );
                 }
@@ -287,10 +305,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .kind(String)
             .scope(Ephemeral)
             .section("MODEL")
-            .help(&[
-                "Clone per-model settings from SOURCE to the active model",
-                "(also sets --this for subsequent flags)",
-            ]),
+            .help(&["Clone per-model settings from SOURCE to the active model"]),
     );
     reg.push(
         Setting::new("active_model")
@@ -311,32 +326,6 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .section("MODEL"),
     );
 
-    // ---------- SCOPE cursor ----------
-    //
-    // Not persisted; mutates the sticky scope cursor during parse. Kept
-    // in the registry so `--help` stays generated from one source. The
-    // parser special-cases their effect before the generic dispatch
-    // runs.
-    reg.push(
-        Setting::new("global")
-            .long("global")
-            .kind(Bool)
-            .scope(Ephemeral)
-            .section("SCOPE")
-            .no_form(false)
-            .help(&["Subsequent settings update [server] (the global defaults)"]),
-    );
-    reg.push(
-        Setting::new("this")
-            .long("this")
-            .long_aliases(&["local"])
-            .kind(Bool)
-            .scope(Ephemeral)
-            .section("SCOPE")
-            .no_form(false)
-            .help(&["Subsequent settings update [models.\"<active-model>\"] only"]),
-    );
-
     // ---------- SETTINGS ----------
     //
     // Declaration order doubles as UI order: `--help` lists these in this
@@ -350,7 +339,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .placeholder("N")
             .kind(Integer)
             .min(0)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("-c")
             .section("SETTINGS")
@@ -371,7 +360,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .placeholder("N")
             .kind(Integer)
             .min(-1)
-            .scope(Both)
+            .scope(PerModel)
             .default(Value::Integer(-1))
             .passthrough(FlagValue)
             .llama_flag("-ngl")
@@ -385,7 +374,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long("temp")
             .placeholder("F")
             .kind(Float)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--temp")
             .section("SETTINGS")
@@ -398,7 +387,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long("top-p")
             .placeholder("F")
             .kind(Float)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--top-p")
             .section("SETTINGS")
@@ -411,7 +400,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long("top-k")
             .placeholder("N")
             .kind(Integer)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--top-k")
             .section("SETTINGS")
@@ -424,7 +413,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long("min-p")
             .placeholder("F")
             .kind(Float)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--min-p")
             .section("SETTINGS")
@@ -437,7 +426,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long("presence-penalty")
             .placeholder("F")
             .kind(Float)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--presence-penalty")
             .section("SETTINGS")
@@ -450,7 +439,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long("dry-multiplier")
             .placeholder("F")
             .kind(Float)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--dry-multiplier")
             .section("SETTINGS")
@@ -463,7 +452,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long("dry-base")
             .placeholder("F")
             .kind(Float)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--dry-base")
             .section("SETTINGS")
@@ -477,7 +466,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .placeholder("N")
             .kind(Integer)
             .min(0)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--dry-allowed-length")
             .section("SETTINGS")
@@ -490,7 +479,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long("frequency-penalty")
             .placeholder("F")
             .kind(Float)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--frequency-penalty")
             .section("SETTINGS")
@@ -504,7 +493,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .placeholder("N")
             .kind(Integer)
             .min(-1)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--reasoning-budget")
             .section("SETTINGS")
@@ -519,7 +508,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .placeholder("N")
             .kind(Integer)
             .min(1)
-            .scope(Both)
+            .scope(PerModel)
             .default(Value::Integer(1))
             .passthrough(FlagValue)
             .llama_flag("-np")
@@ -534,7 +523,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .placeholder("N")
             .kind(Integer)
             .min(1)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("-ub")
             .section("SETTINGS")
@@ -549,7 +538,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long_aliases(&["cache-type-k"])
             .placeholder("T")
             .kind(String)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("-ctk")
             .section("SETTINGS")
@@ -564,7 +553,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long_aliases(&["cache-type-v"])
             .placeholder("T")
             .kind(String)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("-ctv")
             .section("SETTINGS")
@@ -579,7 +568,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .placeholder("N")
             .kind(Integer)
             .min(1)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("-b")
             .section("SETTINGS")
@@ -595,7 +584,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .placeholder("N")
             .kind(Integer)
             .min(1)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("-t")
             .default(Value::Integer(
@@ -618,7 +607,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .placeholder("N")
             .kind(Integer)
             .min(1)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("-tb")
             .section("SETTINGS")
@@ -633,7 +622,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .placeholder("MIB")
             .kind(Integer)
             .min(0)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--cache-ram")
             .section("SETTINGS")
@@ -650,7 +639,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .kind(Integer)
             .min(0)
             .max(3)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--prio-batch")
             .section("SETTINGS")
@@ -665,7 +654,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long_aliases(&["fitt"])
             .placeholder("MiB")
             .kind(String) // comma-separated per-device list — keep as String
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--fit-target")
             .section("SETTINGS")
@@ -681,7 +670,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
         Setting::new("swa_full")
             .long("swa-full")
             .kind(Bool)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(BoolFlagIfTrue)
             .llama_flag("--swa-full")
             .section("SETTINGS")
@@ -701,7 +690,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
     reg.push(
         Setting::new("chat_template_kwargs")
             .kind(Map)
-            .scope(Both)
+            .scope(PerModel)
             .default(Value::Map(BTreeMap::from([(
                 "preserve_thinking".to_string(),
                 toml::Value::Boolean(true),
@@ -718,7 +707,7 @@ pub fn declare_all_settings(reg: &mut Registry) {
             .long("reasoning")
             .placeholder("on|off|auto")
             .kind(String)
-            .scope(Both)
+            .scope(PerModel)
             .passthrough(FlagValue)
             .llama_flag("--reasoning")
             .section("SETTINGS")
@@ -729,21 +718,31 @@ pub fn declare_all_settings(reg: &mut Registry) {
                 "(detect from template; default: auto)",
             ]),
     );
-    // Extra args: post-`--` passthrough. Append semantics at resolve
-    // time (global entries + active model's entries, concatenated). The
-    // `ui_label` doubles as the "+N _label_" phrase on the tuning line.
+    // Extra args: passed verbatim to llama-server's argv. Two CLI paths
+    // both append into the same per-model store: each `--extra-args TOKEN`
+    // (cli_repeatable) appends one token, and the post-`--` tail appends
+    // every remaining token in one shot. `--clear-extra-args` resets the
+    // stored list (per the auto-generated `--clear-<long>` for every
+    // StringArray with a long flag).
     reg.push(
         Setting::new("extra_args")
+            .long("extra-args")
+            .placeholder("TOKEN")
             .kind(StringArray)
-            .scope(Both)
+            .cli_repeatable(true)
+            .scope(PerModel)
             .passthrough(LiteralTokens)
             .section("SETTINGS")
             .group("tuning")
             .ui_label("extra")
-            .ui_format(super::setting::format_count_aggregate),
+            .ui_format(super::setting::format_count_aggregate)
+            .help(&[
+                "Append a single token to llama-server's argv.",
+                "Repeatable. The post-`--` tail is the bulk equivalent.",
+            ]),
     );
 
-    // ---------- MACHINE (global-only; rejected under --this) ----------
+    // ---------- MACHINE (global-only) ----------
     reg.push(
         Setting::new("port")
             .long("port")

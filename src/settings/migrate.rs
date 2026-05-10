@@ -15,6 +15,8 @@
 //! `websearch`.
 
 use crate::config::infer_model_type;
+use crate::settings::registry::Registry;
+use crate::settings::setting::Scope;
 
 /// Result of running the migrator. Warnings are surfaced by the caller;
 /// we hand them back as strings so the caller can `eprintln!` them once
@@ -36,8 +38,87 @@ pub fn migrate(table: &mut toml::value::Table) -> MigrateOutcome {
     outcome.did_migrate |= drop_zero_gpu_layers(table);
     outcome.did_migrate |= rename_model_identity_to_active_model(table);
     outcome.did_migrate |= flip_websearch_sense(table);
+    outcome.did_migrate |= promote_per_model_from_server(table);
 
     outcome
+}
+
+/// One-shot promotion: every key in `[server]` whose registry scope is
+/// now `PerModel` gets removed from `[server]` and copied into every
+/// existing `[models."X"]` entry that doesn't already declare it.
+/// Models without an explicit override inherit the legacy global default;
+/// models with their own value keep what they had. Idempotent — once
+/// `[server]` has no PerModel keys left, this is a no-op.
+///
+/// Edge case: when the legacy `[server]` had tunables but no
+/// `[models."X"]` table existed yet, the values would have nowhere to
+/// land. To avoid silent data loss we synthesize an entry for
+/// `[server].active_model` first (with a `type` tag inferred from the
+/// key) so the promotion has at least one destination — matching the
+/// belt-and-suspenders backfill in `save_config_to` for in-memory
+/// configs.
+fn promote_per_model_from_server(table: &mut toml::value::Table) -> bool {
+    let reg = Registry::build();
+    let per_model_names: Vec<&'static str> = reg
+        .settings()
+        .iter()
+        .filter(|s| s.scope == Scope::PerModel)
+        .map(|s| s.name)
+        .collect();
+
+    let Some(server_val) = table.get_mut("server") else {
+        return false;
+    };
+    let Some(server_tbl) = server_val.as_table_mut() else {
+        return false;
+    };
+
+    let mut promote: Vec<(String, toml::Value)> = Vec::new();
+    for name in &per_model_names {
+        if let Some(v) = server_tbl.remove(*name) {
+            promote.push(((*name).to_string(), v));
+        }
+    }
+    if promote.is_empty() {
+        return false;
+    }
+
+    // Pick up the active model name (if any) before re-borrowing `table`
+    // for the [models] write below.
+    let active_model: Option<String> = match server_tbl.get("active_model") {
+        Some(toml::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    };
+
+    let models_val = table
+        .entry("models".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let Some(models_tbl) = models_val.as_table_mut() else {
+        return true;
+    };
+
+    if let Some(active) = active_model {
+        if !models_tbl.contains_key(&active) {
+            let mut entry = toml::value::Table::new();
+            entry.insert(
+                "type".to_string(),
+                toml::Value::String(infer_model_type(&active).to_string()),
+            );
+            models_tbl.insert(active, toml::Value::Table(entry));
+        }
+    }
+
+    for (_key, entry) in models_tbl.iter_mut() {
+        let Some(entry_tbl) = entry.as_table_mut() else {
+            continue;
+        };
+        for (k, v) in &promote {
+            if !entry_tbl.contains_key(k) {
+                entry_tbl.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    true
 }
 
 /// Rewrite `[server].websearch_disabled = X` to `websearch = !X`. Flipping

@@ -14,12 +14,11 @@ use std::collections::{BTreeMap, HashMap};
 pub enum CliSegment {
     /// The model specification (`--hf ...` or `-m ...` or `--alias ...`).
     Model(String),
-    /// A global setting flag (blue).
-    Global(String),
-    /// The `--this` scope switch (dim green).
-    This,
-    /// A per-model setting flag after `--this` (green).
-    PerModel(String),
+    /// A setting flag (blue) — machine-wide or per-model. With `--this`
+    /// removed there's no longer a meaningful colour distinction between
+    /// the two; both are just "settings the active model would launch
+    /// with".
+    Setting(String),
 }
 
 use super::registry::Registry;
@@ -218,9 +217,11 @@ impl Config {
 
     /// Reconstruct a `lui` command-line that would recreate the current
     /// effective config. Returns typed segments for colored rendering.
-    /// Emits: `lui <model-spec> [global-flags] [--this per-model-flags]`.
-    /// Only explicitly-set settings are emitted (not effective defaults).
-    /// Skips the per-model `type` tag (not a CLI flag).
+    /// Emits: `lui <model-spec> [setting-flags...]`. Only explicitly-set
+    /// settings are emitted (not effective defaults). Per-model and
+    /// global settings now share a single colour band; with `--this`
+    /// removed there's no scope cursor to render between them. Skips
+    /// the per-model `type` tag (not a CLI flag).
     pub fn reconstruct_cli_segments(&self, registry: &Registry) -> Vec<CliSegment> {
         let mut segments = Vec::new();
 
@@ -264,31 +265,17 @@ impl Config {
             }
         }
 
-        // Collect per-model keys to avoid emitting them from global
-        let mut per_model_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let has_per_model_overrides = self.per_model.get(&active).is_some_and(|pm| {
-            for (name, _) in pm.iter() {
-                if name.as_str() != "type" {
-                    per_model_keys.insert(name.as_str());
-                }
-            }
-            !per_model_keys.is_empty()
-        });
-
-        // Emit global settings first (skip those overridden per-model), in registry order
+        // Emit machine settings (from the global store), in registry order.
         for setting in registry.settings() {
             let Some(value) = self.global.get(setting.name) else {
                 continue;
             };
-            if per_model_keys.contains(setting.name) {
-                continue;
-            }
             // Special case: host => --public for 0.0.0.0, --host <val> otherwise
             if setting.name == "host" {
                 if value.as_str() == Some("0.0.0.0") {
-                    segments.push(CliSegment::Global("--public".to_string()));
+                    segments.push(CliSegment::Setting("--public".to_string()));
                 } else {
-                    segments.push(CliSegment::Global(format!(
+                    segments.push(CliSegment::Setting(format!(
                         "--host {}",
                         value.as_str().unwrap_or("")
                     )));
@@ -296,36 +283,33 @@ impl Config {
                 continue;
             }
             if let Some(flag) = format_flag(setting, value) {
-                segments.push(CliSegment::Global(flag));
+                segments.push(CliSegment::Setting(flag));
             }
         }
 
-        // Emit --this + per-model settings if there are overrides, in registry order
-        if has_per_model_overrides {
-            segments.push(CliSegment::This);
-            if let Some(pm) = self.per_model.get(&active) {
-                let name_to_idx: HashMap<&str, usize> = registry
-                    .settings()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| (s.name, i))
-                    .collect();
-                let mut pm_names: Vec<&str> = pm
-                    .iter()
-                    .filter(|(k, _)| k.as_str() != "type")
-                    .map(|(k, _)| k.as_str())
-                    .collect();
-                pm_names.sort_by_key(|name| name_to_idx.get(name).copied().unwrap_or(usize::MAX));
-                for name in pm_names {
-                    let Some(value) = pm.get(name) else {
-                        continue;
-                    };
-                    let Some(setting) = registry.get(name) else {
-                        continue;
-                    };
-                    if let Some(flag) = format_flag(setting, value) {
-                        segments.push(CliSegment::PerModel(flag));
-                    }
+        // Emit per-model settings for the active model, in registry order.
+        if let Some(pm) = self.per_model.get(&active) {
+            let name_to_idx: HashMap<&str, usize> = registry
+                .settings()
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.name, i))
+                .collect();
+            let mut pm_names: Vec<&str> = pm
+                .iter()
+                .filter(|(k, _)| k.as_str() != "type")
+                .map(|(k, _)| k.as_str())
+                .collect();
+            pm_names.sort_by_key(|name| name_to_idx.get(name).copied().unwrap_or(usize::MAX));
+            for name in pm_names {
+                let Some(value) = pm.get(name) else {
+                    continue;
+                };
+                let Some(setting) = registry.get(name) else {
+                    continue;
+                };
+                if let Some(flag) = format_flag(setting, value) {
+                    segments.push(CliSegment::Setting(flag));
                 }
             }
         }

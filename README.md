@@ -19,18 +19,18 @@ Example first runs (use `lui -h` to see what these settings mean and tune them f
 ```
 # This runs on *anything* and is pretty good. the UD-Q6_K might be even better if you turn down -c a bit
 lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
-lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --this -c 262144 --presence-penalty 1.5
-lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --alias qwenmoe --this -c 262144 --ctk q8_0 --ctv q8_0 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00 --presence-penalty 1.5
+lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M -c 262144 --presence-penalty 1.5
+lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --alias qwenmoe -c 262144 --ctk q8_0 --ctv q8_0 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00 --presence-penalty 1.5
 
 # This runs on fewer things but seems great so far
-lui --hf unsloth/Qwen3.6-27B-GGUF:Q4_K_M --alias qwendense --this -c 131072 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --reasoning on --presence-penalty 1.5
+lui --hf unsloth/Qwen3.6-27B-GGUF:Q4_K_M --alias qwendense -c 131072 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --reasoning on --presence-penalty 1.5
 
 # GLM 4.7 is fun
 lui --hf unsloth/GLM-4.7-Flash-GGUF:Q4_K_M
-lui --hf unsloth/GLM-4.7-Flash-GGUF:Q4_K_M --alias glm --this -c 131072 --ctk q8_0 --ctv q8_0
+lui --hf unsloth/GLM-4.7-Flash-GGUF:Q4_K_M --alias glm -c 131072 --ctk q8_0 --ctv q8_0
 
 # Gemma is also neat
-lui --hf "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M" --alias gemma --this --ctk q8_0 --ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 64
+lui --hf "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M" --alias gemma --ctk q8_0 --ctv q8_0 --temp 1.0 --top-p 0.95 --top-k 64
 ```
 
 lui will show download progress bars, start `llama-server`, configure opencode, and print **Ready** once the model is loaded.
@@ -205,6 +205,10 @@ so you only configure once.
   * Example: `lui --sandbox-allow ~/.pi --sandbox pi` gives the `pi`
     harness r+w on its state dir. Persists - subsequent
     `lui --sandbox pi` invocations include the grant automatically.
+  * Wiping the list: every `--sandbox-*` array flag has a paired
+    `--clear-sandbox-*` (no value) — e.g. `lui --clear-sandbox-allow`
+    drops every stored allow path. Mix with a fresh
+    `--sandbox-allow ./fresh` on the same line to replace.
 
 * **The harness needs to reach an extra domain (e.g. an internal
   registry).**
@@ -275,18 +279,18 @@ You don't *need* to do this for typical use - lui's defaults plus
 
 ### Scope & aliases
 
-* **I only want to change this setting for _this_ model, not all models globally.**
-  * Fix: Put `--this` (or `--local`) before the setting. It writes into `[models."<active>"]` instead of the global `[server]` block.
-  * Example: `lui --this --temp 0.2` tweaks only the active model; other models keep whatever global `--temp` you set.
-  * Notes: `--this` is sticky until you flip back with `--global`. You can mix them in one command: `lui --temp 0.6 --this --temp 0.2` sets global 0.6 and per-model 0.2 in a single invocation.
+Every tunable setting (temp, ctx_size, top_p, …) is **per-model** — it lives in `[models."<active>"]` only. There is no global tuning section any more; if you want a setting to apply to a different model, alias it or `--clone` from one model to another. Truly machine-wide knobs (`--port`, `--public`, `--websearch`, the harness/sandbox toggles) keep living in `[server]` / `[sandbox]`.
 
-* **I want to wipe a per-model override and fall back to the global value.**
-  * Fix: Pass the literal word `default` as the value under `--this`. Example: `lui --this --temp default` clears the per-model temperature override.
+* **I want this temp to apply to a different model too.**
+  * Fix: Switch to that model and re-set, or use `--clone`: `lui --hf org/Other-GGUF:Q4 --clone qwenmoe` copies every per-model setting from `qwenmoe` over to the new model in one shot.
+
+* **I want to wipe a per-model setting back to llama.cpp's default.**
+  * Fix: Pass the literal word `default` as the value. Example: `lui --temp default` clears the active model's stored temperature. (Same trick works for any scalar.)
 
 * **I never remember these model names, help!**
   * Fix: Use `--alias NAME` right after selecting a model. `lui --hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --alias qwen` lets you later run just `lui qwen`.
   * Fix: The alias pool is inferred - `--hf` aliases go under `[aliases.hf]`, local-path aliases under `[aliases.model]`. Bare positionals (`lui qwen`) look up both pools; a collision is a hard error.
-  * Tip: Aliases also work as the argument to `--hf` / `-m` (e.g. `lui --hf qwen --this -c 131072`).
+  * Tip: Aliases also work as the argument to `--hf` / `-m` (e.g. `lui --hf qwen -c 131072`).
 
 * **How do I switch between cached models without typing the full repo every time?**
   * Fix: After the first run, just `lui` starts the last-used model. To switch, pass the alias (or repo) on its own: `lui gemma`.
@@ -323,7 +327,7 @@ You don't *need* to do this for typical use - lui's defaults plus
 
 * **The model feels too random / too deterministic.**
   * Fix: `--temp F` (sampling temperature).
-  * Fix: `--top-p F` (nucleus), `--top-k N`, `--min-p F`. Omitting a sampler uses llama.cpp's default; set `--this --top-p default` to clear a per-model override.
+  * Fix: `--top-p F` (nucleus), `--top-k N`, `--min-p F`. Omitting a sampler uses llama.cpp's default; set `--top-p default` to clear a per-model override.
 
 * **Prefill is slow / prompt processing is CPU-bound.**
   * Fix: `--ubatch-size N` (aka `--ub`) - physical batch size llama.cpp processes at once. Larger = faster prefill, more VRAM.
@@ -346,7 +350,7 @@ You don't *need* to do this for typical use - lui's defaults plus
 ### Server / networking
 
 * **Port 8080 is taken / I want a different port.**
-  * Fix: `--port N`. Machine-wide setting; can't be scoped to `--this`.
+  * Fix: `--port N`. Machine-wide setting; persists in `[server]`.
 
 * **I want another machine on my LAN to talk to this server.**
   * Fix: `--public` binds to `0.0.0.0` instead of `127.0.0.1`.
@@ -371,9 +375,9 @@ You don't *need* to do this for typical use - lui's defaults plus
   * Fix: `--debug PATH` - dumps raw llama-server stdout/stderr to a file for inspection.
 
 * **I want to pass a llama-server flag lui doesn't expose.**
-  * Fix: Everything after `--` is appended to llama-server's argv. `lui -- --flash-attn 1 --something-else`.
-  * Fix: Scope applies here too. `lui --this -- --some-flag` appends to the active model's `extra_args` instead of the global list.
-  * Note: Passing _any_ extras for a given scope replaces the stored list for that scope. To clear pass-through args, re-run with an empty `--` tail under the right scope.
+  * Fix: Everything after `--` is appended to the active model's `extra_args` list, which lui hands to llama-server's argv. `lui -- --flash-attn 1 --something-else`. Subsequent runs that pass new post-`--` tokens append to the same list.
+  * Fix: `--extra-args TOKEN` does the same thing for one token, repeatably (no `--` needed). Useful when you want to mix new extras with regular flags on the same line.
+  * Wiping the stored list: pass `--clear-extra-args` earlier in the line. It's a no-value flag — `lui --clear-extra-args -- --new-only` resets the list and then appends `--new-only`. Same pattern works for every StringArray flag (`--clear-sandbox-allow`, `--clear-sandbox-read`, etc.).
 
 * **Where is my config stored?**
   * Fix: lui writes a toml at its standard config path (see `lui -l` or inspect the path logic in `src/config.rs`). Everything you pass on the command line is persisted there - next run, plain `lui` picks up where you left off.
@@ -401,16 +405,19 @@ You don't *need* to do this for typical use - lui's defaults plus
 ### Quick recipes
 
 * **Fresh start on a new model, tuned and aliased in one line:**
-  `lui --hf org/SomeModel-GGUF:Q4_K_M --alias foo --this -c 131072 --temp 0.6 --top-p 0.95`
+  `lui --hf org/SomeModel-GGUF:Q4_K_M --alias foo -c 131072 --temp 0.6 --top-p 0.95`
 
 * **Shrink VRAM without rewriting everything:**
-  `lui --this --fit-target 2048 --ctk q4_0 --ctv q4_0`
+  `lui --fit-target 2048 --ctk q4_0 --ctv q4_0`
+
+* **Copy a working model's settings to a new one:**
+  `lui --hf org/NewModel-GGUF:Q4_K_M --clone foo`
 
 * **See exactly what will run, without running it:**
   `lui --cmd`
 
 * **Clear a per-model temperature override:**
-  `lui --this --temp default`
+  `lui --temp default`
 
 * **Launch opencode in a sandbox over the project:**
   `lui --sandbox opencode`

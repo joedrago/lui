@@ -173,9 +173,9 @@ fn config_from_table(table: &toml::value::Table) -> Config {
     // organization detail.
     for section in non_server_global_sections(&reg) {
         if let Some(t) = table.get(section).and_then(|v| v.as_table()) {
-            config.global.merge_from_toml_section(&reg, section, t, |w| {
-                eprintln!("lui: {}", w)
-            });
+            config
+                .global
+                .merge_from_toml_section(&reg, section, t, |w| eprintln!("lui: {}", w));
         }
     }
 

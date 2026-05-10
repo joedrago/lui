@@ -84,9 +84,9 @@ pub fn extract_request(argv: Vec<OsString>) -> (Vec<OsString>, Option<SandboxReq
     let mut iter = argv.into_iter();
     let pre: Vec<OsString> = iter.by_ref().take(pos).collect();
     let _flag = iter.next();
-    let harness_os = iter.next().unwrap_or_else(|| {
-        die("--sandbox requires a HARNESSNAME (e.g. --sandbox opencode)")
-    });
+    let harness_os = iter
+        .next()
+        .unwrap_or_else(|| die("--sandbox requires a HARNESSNAME (e.g. --sandbox opencode)"));
     let harness = harness_os
         .into_string()
         .unwrap_or_else(|_| die("--sandbox HARNESSNAME must be UTF-8"));

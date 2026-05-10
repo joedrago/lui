@@ -28,7 +28,7 @@ struct RunOpts {
     debug: Option<String>,
     // Dry-run: print the fully-resolved llama-server command line and exit
     // without spawning. Useful for "what would this actually run?" debugging
-    // after a chain of --global / --this edits plus SWA auto-detection.
+    // after a chain of edits plus SWA auto-detection.
     cmd: bool,
     // One-shot peer-configuration modes. Neither persists to lui.toml.
     //
@@ -95,21 +95,16 @@ fn parse_args(config: &mut Config) -> RunOpts {
     let reg = Registry::build();
     let mut parser = lexopt::Parser::from_args(pre_argv.into_iter().skip(1));
 
-    // Sticky scope cursor: flipped by `--global` / `--this`, consulted by
-    // `handle_flag` to decide where to write scoped settings. Starts global
-    // so plain `lui --temp 0.6` keeps its previous meaning.
-    let mut scope_is_this = false;
-
     let mut list = false;
     let mut debug: Option<String> = None;
     let mut cmd = false;
     let mut ssh_share: Option<ssh_tunnel::SshTarget> = None;
     let mut use_lui: Option<ssh_tunnel::UseTarget> = None;
 
-    // Active model key: the one that per-model scoped settings write into.
-    // Seeded from the loaded `[server].active_model`, so `lui --this --temp
-    // 0.3` works with no positional. Updated whenever a bare positional
-    // or alias target resolves.
+    // Active model key: the one that per-model settings write into.
+    // Seeded from the loaded `[server].active_model`, so `lui --temp 0.3`
+    // works with no positional. Updated whenever a bare positional or
+    // alias target resolves.
     let mut active_key: Option<String> = model_key(config);
 
     // Tracks whether the user passed an explicit type flag (-m or --hf)
@@ -119,13 +114,12 @@ fn parse_args(config: &mut Config) -> RunOpts {
     let mut type_flag_this_run: Option<&'static str> = None;
     let mut positional_was_new_model: bool = false;
 
-    // Extra-args replacement tracking: if the user passes ANY extra args for
-    // a scope in this invocation, those replace the stored list for that
-    // scope. We can't just push-into the store because that would grow the
-    // list across runs. None = untouched (keep stored); Some = replace.
-    let mut new_global_extras: Option<Vec<String>> = None;
-    let mut new_model_extras: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+    // Post-`--` extras: append-by-default. Tokens land in the active
+    // model's `extra_args` list, in argv order. To wipe what's stored
+    // first, the user passes `--clear-extra-args` (or any other
+    // `--clear-<long>` for a different StringArray) earlier in the
+    // invocation; the parse path handles that as a regular flag.
+    let mut new_model_extras: Vec<String> = Vec::new();
 
     loop {
         let arg = match parser.next() {
@@ -141,9 +135,6 @@ fn parse_args(config: &mut Config) -> RunOpts {
                 print!("{}", settings::help::emit_help(&reg));
                 std::process::exit(0);
             }
-            Long("global") => scope_is_this = false,
-            Long("this") | Long("local") => scope_is_this = true,
-
             // Zero-arg type setters: flag the active model's per-model
             // `type` as `local` or `huggingface`. We accumulate here and
             // apply at end-of-parse so the flag can appear in any order
@@ -192,10 +183,8 @@ fn parse_args(config: &mut Config) -> RunOpts {
                 for (k, v) in pairs {
                     dest_store.set(k, v);
                 }
-                scope_is_this = true;
             }
             Long("public") => {
-                require_global(scope_is_this, "--public");
                 config
                     .global
                     .set("host", SettingValue::String("0.0.0.0".to_string()));
@@ -209,12 +198,10 @@ fn parse_args(config: &mut Config) -> RunOpts {
                 debug = Some(take_string(&mut parser, "--debug"));
             }
             Long("ssh") => {
-                require_global(scope_is_this, "--ssh");
                 let v = take_string(&mut parser, "--ssh");
                 ssh_share = Some(ssh_tunnel::parse_share_target(&v).unwrap_or_else(|e| die(&e)));
             }
             Long("remote") => {
-                require_global(scope_is_this, "--remote");
                 let v = take_string(&mut parser, "--remote");
                 use_lui = Some(ssh_tunnel::parse_use_target(&v).unwrap_or_else(|e| die(&e)));
             }
@@ -247,9 +234,9 @@ fn parse_args(config: &mut Config) -> RunOpts {
                     &reg,
                     setting,
                     false,
+                    false,
                     &mut parser,
                     config,
-                    scope_is_this,
                     &active_key,
                 ),
                 None => die(&format!("unknown -{}", c)),
@@ -259,9 +246,9 @@ fn parse_args(config: &mut Config) -> RunOpts {
                     &reg,
                     setting,
                     lookup.negated,
+                    lookup.cleared,
                     &mut parser,
                     config,
-                    scope_is_this,
                     &active_key,
                 ),
                 None => die(&format!("unknown --{}", name)),
@@ -269,36 +256,25 @@ fn parse_args(config: &mut Config) -> RunOpts {
         }
     }
 
-    // Anything after `--` is pure llama-server passthrough. Scope at the
-    // time the loop ended determines whether it appends to global or the
-    // active model's extras.
+    // Anything after `--` is pure llama-server passthrough — appended
+    // to the active model's stored `extra_args` list. Pre-existing
+    // entries are preserved; pass `--clear-extra-args` earlier in the
+    // line to wipe before this append fires.
     for a in post_argv {
         let s = os_into_string(a, "extra arg");
-        if scope_is_this {
-            let key = active_key.clone().unwrap_or_else(|| {
-                die("--this (for pass-through args) requires an active model; pass --hf or -m first")
-            });
-            new_model_extras.entry(key).or_default().push(s);
-        } else {
-            new_global_extras.get_or_insert_with(Vec::new).push(s);
-        }
+        new_model_extras.push(s);
     }
-    if let Some(v) = new_global_extras {
-        if v.is_empty() {
-            config.global.unset("extra_args");
-        } else {
-            config
-                .global
-                .set("extra_args", SettingValue::StringArray(v));
-        }
-    }
-    for (k, v) in new_model_extras {
-        let store = config.per_model.entry(k).or_default();
-        if v.is_empty() {
-            store.unset("extra_args");
-        } else {
-            store.set("extra_args", SettingValue::StringArray(v));
-        }
+    if !new_model_extras.is_empty() {
+        let key = active_key.clone().unwrap_or_else(|| {
+            die("pass-through args (after `--`) require an active model; pass --hf or -m first")
+        });
+        let store = config.per_model.entry(key).or_default();
+        let mut cur: Vec<String> = match store.get("extra_args") {
+            Some(SettingValue::StringArray(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        cur.extend(new_model_extras);
+        store.set("extra_args", SettingValue::StringArray(cur));
     }
 
     if ssh_share.is_some() && use_lui.is_some() {
@@ -358,29 +334,38 @@ fn parse_args(config: &mut Config) -> RunOpts {
 /// any) and where the resulting value lands in `config`. Ephemeral
 /// settings aren't routed here — the main match arm handles their side
 /// effects explicitly.
+///
+/// `cleared` is set when the user typed `--clear-<long>` for a
+/// StringArray setting — we wipe the stored list at the right scope and
+/// return without taking any value.
 fn handle_flag(
     reg: &Registry,
     setting: &Setting,
     negated: bool,
+    cleared: bool,
     parser: &mut lexopt::Parser,
     config: &mut Config,
-    scope_is_this: bool,
     active_key: &Option<String>,
 ) {
     let flag_display = primary_flag_display(setting, negated);
 
-    // Scope guard. Ephemerals and `Both`-scope settings don't gate; the
-    // two pinned-scope cases (Global, PerModel) fire early.
-    match setting.scope {
-        RegScope::Global if scope_is_this => die(&format!(
-            "{} is a machine-wide setting and can't be scoped to --this",
-            flag_display
-        )),
-        RegScope::PerModel if !scope_is_this => die(&format!(
-            "{} is a per-model setting; prefix with --this",
-            flag_display
-        )),
-        _ => {}
+    // `--clear-<long>`: reset the stored list at the right scope and
+    // return. Only StringArray settings produce this lookup form.
+    if cleared {
+        if setting.scope == RegScope::PerModel {
+            let key = active_key.clone().unwrap_or_else(|| {
+                die(&format!(
+                    "--clear-{} requires an active model; pass --hf or -m first",
+                    setting.long.unwrap_or(setting.name)
+                ))
+            });
+            if let Some(store) = config.per_model.get_mut(&key) {
+                store.unset(setting.name);
+            }
+        } else {
+            config.global.unset(setting.name);
+        }
+        return;
     }
 
     // Read the value. `None` means "clear" — matches the legacy
@@ -439,16 +424,10 @@ fn handle_flag(
                 ));
             }
             let raw = take_string(parser, &flag_display);
-            let target_is_this = match setting.scope {
-                RegScope::Global => false,
-                RegScope::PerModel => true,
-                RegScope::Both => scope_is_this,
-                RegScope::Ephemeral => false,
-            };
-            if target_is_this {
+            if setting.scope == RegScope::PerModel {
                 let key = active_key.clone().unwrap_or_else(|| {
                     die(&format!(
-                        "--this {} requires an active model; pass --hf or -m first",
+                        "{} requires an active model; pass --hf or -m first",
                         flag_display
                     ))
                 });
@@ -483,21 +462,14 @@ fn handle_flag(
         }
     };
 
-    // Target layer: Global settings always land in the global store;
-    // Both / PerModel settings honor the sticky scope.
-    let target_is_this = match setting.scope {
-        RegScope::Global => false,
-        RegScope::PerModel => true,
-        RegScope::Both => scope_is_this,
-        // Ephemerals aren't routed here; if one somehow slips through,
-        // default to global so we can't silently shadow a per-model store.
-        RegScope::Ephemeral => false,
-    };
-
-    if target_is_this {
+    // Target layer: Global settings land in the global store; PerModel
+    // settings land in the active model's store. Ephemerals don't route
+    // here; if one somehow slips through, default to global so we can't
+    // silently shadow a per-model store.
+    if setting.scope == RegScope::PerModel {
         let key = active_key.clone().unwrap_or_else(|| {
             die(&format!(
-                "--this {} requires an active model; pass --hf or -m first",
+                "{} requires an active model; pass --hf or -m first",
                 flag_display
             ))
         });
@@ -562,15 +534,6 @@ fn shell_quote(s: &str) -> String {
 fn die(msg: &str) -> ! {
     eprintln!("lui: {}", msg);
     std::process::exit(2);
-}
-
-fn require_global(scope_is_this: bool, flag: &str) {
-    if scope_is_this {
-        die(&format!(
-            "{} is a machine-wide setting and can't be scoped to --this",
-            flag
-        ));
-    }
 }
 
 fn os_into_string(v: OsString, what: &str) -> String {
@@ -1061,7 +1024,6 @@ async fn main() {
         };
         let cyan = Color::Cyan;
         let blue = Color::Blue;
-        let green = Color::Green;
         let lavender = Color::Rgb {
             r: 180,
             g: 150,
@@ -1089,27 +1051,10 @@ async fn main() {
                         Print(&s)
                     );
                 }
-                CliSegment::Global(s) => {
+                CliSegment::Setting(s) => {
                     let _ = crossterm::execute!(
                         handle,
                         SetForegroundColor(blue),
-                        Print(" "),
-                        Print(&s)
-                    );
-                }
-                CliSegment::This => {
-                    let _ = crossterm::execute!(
-                        handle,
-                        SetForegroundColor(green),
-                        Print(" --this"),
-                        ResetColor
-                    );
-                }
-                CliSegment::PerModel(s) => {
-                    let _ = crossterm::execute!(
-                        handle,
-                        SetForegroundColor(green),
-                        SetAttribute(Attribute::Dim),
                         Print(" "),
                         Print(&s)
                     );

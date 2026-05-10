@@ -15,19 +15,18 @@ use super::value::{Value, ValueKind};
 
 /// Where in the TOML a setting is stored, and who is allowed to set it.
 ///
-/// - `Global`: lives in `[server]` only. `--this --port 9` is rejected at
-///   parse time.
-/// - `PerModel`: lives in `[models."X"]` only. Used by the (future) `type`
-///   field that pins a model as huggingface vs local.
-/// - `Both`: honors the sticky `--this`/`--global` cursor — writes to either
-///   section depending on scope. Effective value is per-model-over-global.
+/// - `Global`: machine-wide. Lives in `[server]` (or another global table
+///   like `[sandbox]` per `toml_section`). Tunable settings the user might
+///   reasonably want to vary per model are NOT here.
+/// - `PerModel`: lives in `[models."X"]` only. Every tunable that affects
+///   a single model — `temp`, `ctx_size`, `extra_args`, etc. — sits here.
+///   Read through the per-model layer of `Effective`, then registry default.
 /// - `Ephemeral`: not persisted; lives only for the duration of one
 ///   invocation. Mode flags (`--list`, `--cmd`, `--ssh`, ...) use this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     Global,
     PerModel,
-    Both,
     Ephemeral,
 }
 
@@ -307,6 +306,14 @@ impl Setting {
     /// True iff `--no-<long>` should be accepted as an inverted bool.
     pub fn has_no_form(&self) -> bool {
         self.kind == ValueKind::Bool && self.no_form && self.long.is_some()
+    }
+
+    /// True iff `--clear-<long>` should be accepted as a list reset for
+    /// this StringArray setting. Mirrors `--no-<long>` for bools — every
+    /// CLI-reachable StringArray gets one automatically. Returns false
+    /// for settings with no long flag (storage-only).
+    pub fn has_clear_form(&self) -> bool {
+        self.kind == ValueKind::StringArray && self.long.is_some()
     }
 }
 

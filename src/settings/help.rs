@@ -84,9 +84,10 @@ pub fn emit_help(reg: &Registry) -> String {
 
     out.push_str(
         "\nPass-through (`--`):\n    \
-         Everything after `--` is appended to llama-server's argv. The pass-through\n    \
-         list is scoped too: `lui --this -- --some-llama-flag` appends to the active\n    \
-         model's extra_args; without --this, it appends to the global list.\n",
+         Everything after `--` is appended to the active model's extra_args\n    \
+         list (lui hands it to llama-server's argv). Each `--extra-args TOKEN`\n    \
+         flag does the same for one token at a time. Pass --clear-extra-args\n    \
+         earlier in the line to wipe the stored list before this run appends.\n",
     );
 
     out
@@ -154,6 +155,19 @@ fn rows_for_help(reg: &Registry) -> Vec<Row> {
                 description: desc,
                 continuation: cont,
             });
+            // Auto-paired `--clear-<long>` row for every CLI-reachable
+            // StringArray. Mirrors the way bool settings get a `--no-<long>`
+            // pair above. The 4-space prefix matches that convention so the
+            // reset row sits flush with the long flag.
+            if s.has_clear_form() {
+                let long = s.long.expect("has_clear_form implies long is Some");
+                rows.push(Row {
+                    section: s.section,
+                    signature: format!("    --clear-{}", long),
+                    description: format!("Wipe the stored {} list before this run", long),
+                    continuation: Vec::new(),
+                });
+            }
         }
     }
     rows
