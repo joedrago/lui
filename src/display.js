@@ -17,22 +17,17 @@ import {
     reset,
     wrapStyled,
     truncateLeft,
-    renderBar,
     enterAltScreen,
     leaveAltScreen,
     disableLineWrap,
     enableLineWrap
 } from "./ansi.js"
+import { STYLE } from "./theme.js"
 
 const POLL_MS = 250
 const GUTTER = 2
 // Windows Terminal truncates the last column(s); shave 2 off for safety.
 const RIGHT_MARGIN = 2
-
-const TITLE_STYLE = { fg: [120, 100, 180] }
-const BAR_FILLED_STYLE = { fg: [180, 150, 255] }
-const BAR_EMPTY_STYLE = { fg: [120, 100, 180] }
-const BAR_TEXT_STYLE = { fg: [210, 150, 255] }
 
 const ENTER_ALT = enterAltScreen() + disableLineWrap() + hideCursor() + cursorTo(1, 1)
 const LEAVE_ALT = showCursor() + enableLineWrap() + leaveAltScreen()
@@ -109,7 +104,7 @@ export function startTui(lui) {
             // width to the right edge. paint() ends with a hard reset
             // so we have to re-establish the title style on each side
             // of the inline title.
-            const titleSgr = compileEntry(TITLE_STYLE)
+            const titleSgr = compileEntry(STYLE.LABEL)
             buf += cursorTo(row, 1) + clearLine()
             buf += " ".repeat(GUTTER) + titleSgr + "── "
             const title = panel.title || ""
@@ -213,14 +208,12 @@ function paintBar(bar, width, compiled) {
     let out = ""
     if (label) out += paint(label, compiled) + reset() + " "
     out += "["
-    out += styled("█".repeat(filled), BAR_FILLED_STYLE)
-    out += styled("░".repeat(empty), BAR_EMPTY_STYLE)
+    out += styled("█".repeat(filled), STYLE.BAR_FILL)
+    out += styled("░".repeat(empty), STYLE.BAR_EMPTY)
     out += "]"
-    if (text) out += " " + styled(paint(text, compiled), BAR_TEXT_STYLE)
+    if (text) out += " " + styled(paint(text, compiled), STYLE.VALUE)
     return out
 }
-
-void renderBar // kept exported from ansi.js for programmatic callers
 
 function fetchData(port) {
     return new Promise((resolve, reject) => {

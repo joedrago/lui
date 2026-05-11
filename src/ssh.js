@@ -7,7 +7,7 @@ import process from "node:process"
 import { spawn } from "node:child_process"
 
 import { CONFIG_VERSION } from "./web.js"
-import { harnesses, renderWebsearchSkill, applyAllLocal } from "./harness/index.js"
+import { harnesses, renderWebsearchSkill, applyAllLocal, harnessContext } from "./harness.js"
 import { startWebServer } from "./web.js"
 import { startTui } from "./display.js"
 
@@ -64,9 +64,8 @@ export async function sshSetupUse(lui, hostSpec) {
 
     const llamaBaseURL = `http://${target.host}:${cfg.engine_port}/v1`
     lui.activeModel = { name: cfg.active_model || "lui", engine: "remote", args: [] }
-    lui.engineBaseURL = llamaBaseURL
     const enabled = lui.config.global.websearch !== false
-    applyAllLocal(lui)
+    applyAllLocal(lui, { baseURL: llamaBaseURL })
 
     process.stdout.write(`\n  Using server at ${target.host}:${target.httpPort}\n`)
     process.stdout.write(`    model:           ${cfg.active_model ?? "(unknown)"}\n`)
@@ -82,11 +81,7 @@ export async function sshSetupUse(lui, hostSpec) {
     }
     lui.tui = startTui(lui)
 
-    await new Promise((resolve) => {
-        lui.onShutdownResolve = resolve
-        process.on("SIGINT", () => lui.shutdown(0))
-        process.on("SIGTERM", () => lui.shutdown(0))
-    })
+    await lui.awaitShutdown()
 }
 
 function parseShareTarget(s) {
@@ -168,18 +163,13 @@ async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remote
         }
     }
 
-    const remoteLui = {
-        config: {
-            global: {
-                engine_port: remoteEnginePort,
-                web_port: remoteWebPort,
-                websearch: lui.config.global.websearch !== false
-            }
-        },
+    const ctx = harnessContext({
         activeModel: lui.activeModel ?? { name: "lui", engine: "llama-server", args: [] },
-        addWarning() {}
-    }
-    const next = harness.apply(existing || "", remoteLui)
+        enginePort: remoteEnginePort,
+        webPort: remoteWebPort,
+        websearch: lui.config.global.websearch
+    })
+    const next = harness.apply(existing || "", ctx)
     await sshRun(target, `mkdir -p ~/${dir} && cat > ${remotePath}`, next)
 
     const skillDir = `~/${dir}/skills/lui-web-search`

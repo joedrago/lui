@@ -1,21 +1,69 @@
-// Harness registry + shared apply-local flow + lui-web-search SKILL.md.
-// Each harness module exports `harness` (see REWRITE.md §9).
+// Harness registry, local apply flow, lui-web-search SKILL.md, and
+// shared helpers (deriveModelName, inferContextSize, harnessContext).
+// Each concrete harness lives in src/harness/<name>.js and exports a
+// `harness` object — see the contract referenced from those files.
 
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
-import { harness as opencode } from "./opencode.js"
-import { harness as pi } from "./pi.js"
+import { harness as opencode } from "./harness/opencode.js"
+import { harness as pi } from "./harness/pi.js"
 
 export const harnesses = [opencode, pi]
 
+// One `enabled` toggle per harness, shown under "Available Settings".
+export function harnessSchemaDefaults(harnessModules) {
+    return harnessModules.map((h) => ({
+        path: `harness.${h.name}.enabled`,
+        display: String(h.defaultEnabled)
+    }))
+}
+
+// Caller assembles one of these and hands it to `harness.apply(existing, ctx)`.
+// Pre-derives the values every harness wants, so harness modules don't
+// need to know how to walk an args array or build a baseURL.
+export function harnessContext({ activeModel, baseURL, enginePort, webPort, websearch }) {
+    return {
+        modelName: deriveModelName(activeModel?.name),
+        baseURL: baseURL ?? `http://127.0.0.1:${enginePort}/v1`,
+        ctxSize: inferContextSize(activeModel?.args || []),
+        webPort,
+        websearch: websearch !== false
+    }
+}
+
+export function deriveModelName(activeKey) {
+    if (!activeKey) return "lui"
+    const tail = activeKey.split("/").pop() || activeKey
+    return tail.split(":")[0].replace(/-GGUF$/, "") || "lui"
+}
+
+export function inferContextSize(args) {
+    for (let i = 0; i < args.length; i++) {
+        if ((args[i] === "-c" || args[i] === "--ctx-size") && i + 1 < args.length) {
+            const n = parseInt(args[i + 1], 10)
+            if (Number.isFinite(n) && n > 0) return n
+        }
+    }
+    return 32768
+}
+
 // Walks every shipped harness so just-disabled ones get their stale
-// SKILL.md swept; config edits stay gated on `enabled`.
-export function applyAllLocal(lui) {
+// SKILL.md swept; config edits stay gated on `enabled`. Pass
+// `{ baseURL }` to point harness configs at a remote llama-server
+// instead of the local one — used by `lui remote`.
+export function applyAllLocal(lui, { baseURL } = {}) {
+    const ctx = harnessContext({
+        activeModel: lui.activeModel,
+        baseURL,
+        enginePort: lui.config.global.engine_port,
+        webPort: lui.config.global.web_port,
+        websearch: lui.config.global.websearch
+    })
     for (const h of harnesses) {
         try {
-            applyOneLocal(lui, h, isEnabled(lui, h))
+            applyOneLocal(lui, h, ctx, isEnabled(lui, h))
         } catch (e) {
             process.stderr.write(`lui: harness "${h.name}" apply failed: ${e.message}\n`)
         }
@@ -28,17 +76,16 @@ function isEnabled(lui, harness) {
     return harness.defaultEnabled
 }
 
-function applyOneLocal(lui, harness, enabled) {
+function applyOneLocal(lui, harness, ctx, enabled) {
     const dir = expandTilde(harness.configDir)
-    const websearch = lui.config.global.websearch !== false
-    const wantSkill = enabled && websearch
+    const wantSkill = enabled && ctx.websearch
 
     // Skill add/remove runs regardless of `enabled` (sweep stale files).
     const skillDir = path.join(dir, "skills", "lui-web-search")
     const skillPath = path.join(skillDir, "SKILL.md")
     if (wantSkill) {
         fs.mkdirSync(skillDir, { recursive: true })
-        const body = renderWebsearchSkill(lui.config.global.web_port)
+        const body = renderWebsearchSkill(ctx.webPort)
         if (!fs.existsSync(skillPath) || fs.readFileSync(skillPath, "utf8") !== body) {
             fs.writeFileSync(skillPath, body)
         }
@@ -65,7 +112,7 @@ function applyOneLocal(lui, harness, enabled) {
         }
     }
 
-    const next = harness.apply(existing, lui)
+    const next = harness.apply(existing, ctx)
     if (next !== existing) {
         const tmp = file + ".tmp"
         fs.writeFileSync(tmp, next)

@@ -13,6 +13,23 @@ export const DEFAULTS = {
     websearch: true
 }
 
+// Top-level TOML tables lui knows about. `global` settings are the bare
+// keys at the file root; the rest are nested. `model` is user-data
+// (added/removed via `lui add/rm`), not a schema-controlled setting,
+// but it's still a valid path prefix for `lui config set model.X.Y …`.
+export const TOP_LEVEL_TABLES = ["global", "model", "harness", "engine", "sandbox"]
+
+// Schema entries displayed by `lui config` under "Available Settings".
+// One entry per knob; `isArray` marks list-typed paths (so `lui config
+// set` appends and `lui config clear` removes the whole list).
+export const globalSchemaDefaults = [
+    { path: "engine_port", display: String(DEFAULTS.engine_port) },
+    { path: "web_port", display: String(DEFAULTS.web_port) },
+    { path: "websearch", display: String(DEFAULTS.websearch) },
+    { path: "public", display: "false" },
+    { path: "debug_log", display: "(unset)" }
+]
+
 export class Config {
     constructor(data = {}) {
         const g = data.global ?? {}

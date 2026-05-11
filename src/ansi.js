@@ -348,17 +348,3 @@ export function showCursor() {
 export function reset() {
     return RESET
 }
-
-// Single-row progress bar: "label [█████░░░░░] text".
-export function renderBar(width, label, value, max, text) {
-    const frac = max ? Math.max(0, Math.min(1, value / max)) : Math.max(0, Math.min(1, value))
-    const labelW = vwidth(label || "")
-    const textStr = text == null ? "" : String(text)
-    const textW = vwidth(textStr)
-    const overhead = labelW + 4 + textW + (textW ? 1 : 0)
-    const inner = Math.max(1, width - overhead)
-    const filled = Math.round(frac * inner)
-    const bar = "█".repeat(filled) + "░".repeat(Math.max(0, inner - filled))
-    const trailing = textStr ? " " + textStr : ""
-    return `${label || ""} [${bar}]${trailing}`
-}

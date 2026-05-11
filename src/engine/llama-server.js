@@ -4,16 +4,11 @@
 import { spawn } from "node:child_process"
 import os from "node:os"
 
-import { STYLE } from "../engine.js"
+import { STYLE } from "../theme.js"
 import { stripAnsi } from "../ansi.js"
 
-const MUTED_PURPLE = { fg: [120, 100, 180] }
-const NUMBER = { fg: [210, 150, 255] }
-const ALIAS = { fg: [220, 215, 230] }
-const WARNING_AMBER = { fg: [230, 180, 80] }
 const DIM = { dim: true }
 const BOLD = { bold: true }
-const READY = { fg: "green" }
 const TEXT = {}
 
 const POLICY_ARGS = ["--metrics", "--jinja", "--log-colors", "off", "-v", "-fa", "on", "--cache-reuse", "256", "-kvu"]
@@ -498,20 +493,21 @@ function appendModelPanel(v, lui) {
         // on startup; then fades to dim so it stops competing with the
         // live status fields below it. Matches the Rust display behavior.
         const fresh = Date.now() - lui.startedAt < SETUP_URL_BRIGHT_MS
-        const urlStyle = fresh ? { fg: "cyan", bold: true } : DIM
-        p.line({ align: "right" }).style(urlStyle).text(`http://${host}:${webPort}/setup`)
+        p.line({ align: "right" })
+            .style(fresh ? STYLE.URL_FRESH : DIM)
+            .text(`http://${host}:${webPort}/setup`)
     }
 
     const gpuTotal = s.gpuMemMib + s.kvCacheMib + s.computeBufMib
     const cpuTotal = s.cpuMemMib + s.cpuRepackMib + s.cpuComputeMib
     if (gpuTotal > 0 || cpuTotal > 0) {
-        const ln = p.line().style(MUTED_PURPLE).text("Memory   : ").style()
-        ln.style(NUMBER)
+        const ln = p.line().style(STYLE.LABEL).text("Memory   : ").style()
+        ln.style(STYLE.VALUE)
             .text((gpuTotal / 1024).toFixed(1))
             .style()
             .text(" GiB VRAM")
         if (cpuTotal > 0) {
-            ln.text(" · ").style(NUMBER).text(cpuTotal.toFixed(0)).style().text(" MiB RAM")
+            ln.text(" · ").style(STYLE.VALUE).text(cpuTotal.toFixed(0)).style().text(" MiB RAM")
         }
         if (s.unifiedMemory && cpuTotal > 0) {
             ln.text(" ")
@@ -556,12 +552,12 @@ function appendModelPanel(v, lui) {
     const aliasName = lui.activeModel?.name ?? ""
     const ln = p
         .line()
-        .style(MUTED_PURPLE)
+        .style(STYLE.LABEL)
         .text("Model    : ")
         .style()
         .text(modelDisplay || "(loading…)")
     if (aliasName) {
-        ln.style(MUTED_PURPLE).text(" — ").style(ALIAS).style(BOLD).text(aliasName).style()
+        ln.style(STYLE.LABEL).text(" — ").style(STYLE.ALIAS).style(BOLD).text(aliasName).style()
     }
 
     const src = inferSource(lui.activeModel?.args || [])
@@ -592,17 +588,17 @@ function appendModelPanel(v, lui) {
     p.line()
 
     const uptimeSec = Math.floor((Date.now() - (s.startedAt || Date.now())) / 1000)
-    const ln2 = p.line().style(MUTED_PURPLE).text("llamacpp : ").style()
+    const ln2 = p.line().style(STYLE.LABEL).text("llamacpp : ").style()
     if (s.exited) {
-        ln2.style({ fg: "red" }).text("Exited").style()
+        ln2.style(STYLE.ERROR_INLINE).text("Exited").style()
         if (s.exitMessage) ln2.text(`  ${s.exitMessage}`)
     } else if (s.ready) {
-        ln2.style(READY).text("Ready").style()
+        ln2.style(STYLE.READY).text("Ready").style()
         const tail = s.llamaVersion
             ? ` (${s.llamaVersion}, uptime: ${formatDurationSeconds(uptimeSec)})`
             : ` (uptime: ${formatDurationSeconds(uptimeSec)})`
         ln2.text(tail)
-        if (s.updateAvailable) ln2.text("  ").style(WARNING_AMBER).text("(update available)").style()
+        if (s.updateAvailable) ln2.text("  ").style(STYLE.WARNING).text("(update available)").style()
     } else {
         ln2.style(DIM).text("Starting…").style()
     }
@@ -610,10 +606,10 @@ function appendModelPanel(v, lui) {
     if (s.listenUrl) p.line({ indent: 15 }).style(DIM).text(s.listenUrl)
 
     // Full resolved argv, all dim — colors compete with labels above.
-    if (lui.activeModel) {
-        const { binary, segments } = engine.buildArgv(lui.activeModel, lui)
-        const ln = p.line({ indent: 15 }).style(DIM).text(binary)
-        for (const seg of segments) {
+    // Reads the segments lui stashed at spawn rather than recomputing.
+    if (lui.spawnSegments) {
+        const ln = p.line({ indent: 15 }).style(DIM).text(lui.spawnBinary)
+        for (const seg of lui.spawnSegments) {
             if (!seg.args.length) continue
             ln.text(" ").text(seg.args.join(" "))
         }
@@ -643,9 +639,9 @@ function appendPerformancePanel(v, lui) {
 
     if (s.promptTpsSamples > 0) {
         p.line()
-            .style(MUTED_PURPLE)
+            .style(STYLE.LABEL)
             .text("Prompt   : ")
-            .style(NUMBER)
+            .style(STYLE.VALUE)
             .text(s.lastPromptTps.toFixed(1))
             .style(TEXT)
             .text(" tok/s ")
@@ -654,9 +650,9 @@ function appendPerformancePanel(v, lui) {
     }
     if (s.genTpsSamples > 0) {
         p.line()
-            .style(MUTED_PURPLE)
+            .style(STYLE.LABEL)
             .text("Generate : ")
-            .style(NUMBER)
+            .style(STYLE.VALUE)
             .text(s.lastGenTps.toFixed(1))
             .style(TEXT)
             .text(" tok/s ")
@@ -667,40 +663,40 @@ function appendPerformancePanel(v, lui) {
     if (s.promptTpsSamples > 0 || s.genTpsSamples > 0) p.line()
 
     p.line()
-        .style(MUTED_PURPLE)
+        .style(STYLE.LABEL)
         .text("WebSearch: ")
-        .style(NUMBER)
+        .style(STYLE.VALUE)
         .text(`${lui.websearchCount ?? 0}`.padStart(4))
         .style(TEXT)
         .text(" total · ")
-        .style(NUMBER)
+        .style(STYLE.VALUE)
         .text(`${lui.activeSearchCount ?? 0}`.padStart(4))
         .style(TEXT)
         .text(" active")
 
     p.line()
-        .style(MUTED_PURPLE)
+        .style(STYLE.LABEL)
         .text("Requests : ")
-        .style(NUMBER)
+        .style(STYLE.VALUE)
         .text(`${s.requestCount}`.padStart(4))
         .style(TEXT)
         .text(" total · ")
-        .style(NUMBER)
+        .style(STYLE.VALUE)
         .text(`${s.activeRequests}`.padStart(4))
         .style(TEXT)
         .text(" active · ")
-        .style(NUMBER)
+        .style(STYLE.VALUE)
         .text(`${s.fullReprocessCount}`.padStart(4))
         .style(TEXT)
         .text(" reproc · ")
-        .style(NUMBER)
+        .style(STYLE.VALUE)
         .text(`${s.invalidatedCheckpointCount}`.padStart(4))
         .style(TEXT)
         .text(" invalidated")
 
     for (const slot of [...s.activeSlots.values()].sort((a, b) => a.slotId - b.slotId)) {
         const elapsed = slot.processingStarted ? ((Date.now() - slot.processingStarted) / 1000).toFixed(1) : "0"
-        p.line({ indent: 13 }).style(NUMBER).text(`● slot ${slot.slotId}: ${slot.nTokens} tokens, ${elapsed}s`)
+        p.line({ indent: 13 }).style(STYLE.VALUE).text(`● slot ${slot.slotId}: ${slot.nTokens} tokens, ${elapsed}s`)
     }
     for (const slot of [...s.recentCompleted].reverse()) {
         const time = slot.totalTimeMs > 0 ? ` in ${(slot.totalTimeMs / 1000).toFixed(1)}s` : ""

@@ -7,7 +7,25 @@ import path from "node:path"
 import os from "node:os"
 import process from "node:process"
 
-import { STYLE } from "./engine.js"
+import { STYLE } from "./theme.js"
+
+// `lui config` displays these under "Available Settings". `isArray`
+// marks list-typed paths where `set` appends and `clear` drops.
+export const sandboxSchemaDefaults = [
+    { path: "sandbox.allow_cwd", display: "true" },
+    { path: "sandbox.block_net", display: "false" },
+    { path: "sandbox.allow_gpu", display: "false" },
+    { path: "sandbox.rollback", display: "false" },
+    { path: "sandbox.silent", display: "false" },
+    { path: "sandbox.dev_tools", display: "true" },
+    { path: "sandbox.profile", display: "(auto-detected from harness name)" },
+    { path: "sandbox.bin", display: "nono" },
+    { path: "sandbox.allow", display: "[]", isArray: true },
+    { path: "sandbox.read", display: "[]", isArray: true },
+    { path: "sandbox.write", display: "[]", isArray: true },
+    { path: "sandbox.allow_domain", display: "[]", isArray: true },
+    { path: "sandbox.extra", display: "[]", isArray: true }
+]
 
 const PROFILE_OPT_OUT = "none"
 const FALLBACK_PROFILE = "default"

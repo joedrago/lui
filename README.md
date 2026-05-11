@@ -1,30 +1,30 @@
 # lui
 
-A friendly TUI wrapper for [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. Pronounced **"Louie"** — short for *llm ui*.
+A friendly TUI wrapper for [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. Pronounced **"Louie"** — short for _llm ui_.
 
 ## Setup
 
 1. **Install opencode** — <https://opencode.ai>. No config needed; lui will wire it up for you.
 2. **Put `llama-server` on your PATH.**
-   - **macOS:** `brew install llama.cpp`
-   - **Windows:** grab the matching `llama-bin-win-*` zip **and** the `cudart-llama-bin-win-cuda-*` zip (for NVIDIA) from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases), extract them into the same folder, and add that folder to your `PATH`.
-   - **Linux:** grab the matching `llama-bin-ubuntu-*` tarball from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) — `*-rocm-*` for AMD GPUs, `*-vulkan-*` for any other GPU — extract it, and add the folder to your `PATH`.
-   - Verify: run `llama-server --version` and make sure it detects your GPU with no serious errors.
+    - **macOS:** `brew install llama.cpp`
+    - **Windows:** grab the matching `llama-bin-win-*` zip **and** the `cudart-llama-bin-win-cuda-*` zip (for NVIDIA) from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases), extract them into the same folder, and add that folder to your `PATH`.
+    - **Linux:** grab the matching `llama-bin-ubuntu-*` tarball from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) — `*-rocm-*` for AMD GPUs, `*-vulkan-*` for any other GPU — extract it, and add the folder to your `PATH`.
+    - Verify: run `llama-server --version` and make sure it detects your GPU with no serious errors.
 3. **Install lui** — requires Node 20+.
 
-   ```
-   npm install -g github:joedrago/lui
-   ```
+    ```
+    npm install -g github:joedrago/lui
+    ```
 
-   That fetches the repo, installs deps, and drops `lui` on your `PATH`.
-   Re-run the same command to update.
+    That fetches the repo, installs deps, and drops `lui` on your `PATH`.
+    Re-run the same command to update.
 
-   Or, working from a checkout:
+    Or, working from a checkout:
 
-   ```
-   git clone https://github.com/joedrago/lui && cd lui && npm install
-   # then put `bin/lui` on your PATH (symlink, copy, or add <repo>/bin to PATH)
-   ```
+    ```
+    git clone https://github.com/joedrago/lui && cd lui && npm install
+    # then put `bin/lui` on your PATH (symlink, copy, or add <repo>/bin to PATH)
+    ```
 
 ## Run
 
@@ -65,14 +65,14 @@ lui config clear sandbox.profile
 
 Paths are dot-separated. A path that doesn't name a top-level table (`global`, `model`, `harness`, `engine`, `sandbox`) is automatically rooted under `global.`. See `lui --help` for a comprehensive list of every setting × verb.
 
-The handful of flags that *aren't* persisted (override for one run only):
+The handful of flags that _aren't_ persisted (override for one run only):
 
-| flag | effect |
-| --- | --- |
-| `--debug PATH` | tee raw `llama-server` stdout to `PATH` |
-| `--engine-port N` | override `engine_port` for this run |
-| `--web-port N` | override `web_port` for this run |
-| `--public` | bind `0.0.0.0` instead of `127.0.0.1` |
+| flag              | effect                                  |
+| ----------------- | --------------------------------------- |
+| `--debug PATH`    | tee raw `llama-server` stdout to `PATH` |
+| `--engine-port N` | override `engine_port` for this run     |
+| `--web-port N`    | override `web_port` for this run        |
+| `--public`        | bind `0.0.0.0` instead of `127.0.0.1`   |
 
 ## Connecting to a shared server
 
@@ -168,7 +168,7 @@ What that gets you:
 - **Profile auto-detected.** If nono ships a profile by the harness's name (`opencode`, `claude-code`, `codex`, …), lui uses it. Otherwise it falls back to nono's `default` profile (gives `/tmp`, `/usr/bin`, homebrew, plus deny-rules for credentials, keychains, browser data, shell history).
 - **Project tree r+w** via `--allow .` and `--allow-cwd` (skips nono's first-run prompt).
 - **Toolchains r+w** for any of `~/.cargo`, `~/.rustup`, `~/go`, `/usr/local/go`, `~/.pyenv`, `~/.local/share/uv`, `~/.conda`, `~/.nvm`, `~/.fnm`, `~/.npm`, `~/.bun`, `~/.deno`, `~/Library/pnpm`, `/usr/local/lib/node_modules`, `~/.nix-profile`, `/nix/store`, etc. that exist on your machine. `$CARGO_HOME` / `$RUSTUP_HOME` / `$GOPATH` / `$PYENV_ROOT` override the defaults.
-- **GPU off**, **network on**. Node-based agents don't need GPU; lui's llama-server runs *outside* the sandbox.
+- **GPU off**, **network on**. Node-based agents don't need GPU; lui's llama-server runs _outside_ the sandbox.
 
 ### Tuning the sandbox
 

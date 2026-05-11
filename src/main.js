@@ -1,13 +1,21 @@
 import process from "node:process"
 
 import { Lui } from "./lui.js"
-import { harnesses } from "./harness/index.js"
-import { engines } from "./engine.js"
+import { harnesses, harnessSchemaDefaults } from "./harness.js"
+import { engines, engineSchemaDefaults } from "./engine.js"
+import { TOP_LEVEL_TABLES, globalSchemaDefaults } from "./config.js"
+import { sandboxSchemaDefaults } from "./sandbox.js"
 import { styled } from "./ansi.js"
+import { STYLE } from "./theme.js"
 
-const HEADER_STYLE = { fg: [120, 100, 180] }
-const PATH_STYLE = { fg: [230, 200, 140] }
-const VAL_STYLE = { fg: [210, 150, 255] }
+function gatherSchemaDefaults() {
+    return [
+        ...globalSchemaDefaults,
+        ...harnessSchemaDefaults(harnesses),
+        ...engineSchemaDefaults(Object.values(engines)),
+        ...sandboxSchemaDefaults
+    ]
+}
 
 const SUBCOMMANDS = new Set(["run", "add", "cp", "set", "rm", "ssh", "remote", "websearch", "sandbox", "config"])
 
@@ -46,7 +54,7 @@ function fatal(msg, code = 2) {
 
 function runConfigDump(lui) {
     const tty = process.stdout.isTTY
-    const header = (label) => process.stdout.write((tty ? styled(label, HEADER_STYLE) : label) + "\n")
+    const header = (label) => process.stdout.write((tty ? styled(label, STYLE.LABEL) : label) + "\n")
 
     header("Active Settings:")
     const setPaths = writeFlatConfig(lui, "  ")
@@ -65,7 +73,7 @@ function runConfigDump(lui) {
 }
 
 function emitPair(out, indent, path, value, tty) {
-    if (tty) out.push(`${indent}${styled(path, PATH_STYLE)} ${styled(value, VAL_STYLE)}\n`)
+    if (tty) out.push(`${indent}${styled(path, STYLE.CONFIG_KEY)} ${styled(value, STYLE.VALUE)}\n`)
     else out.push(`${indent}${path} ${value}\n`)
 }
 
@@ -84,9 +92,12 @@ function comparePairs(a, b) {
 function writeFlatConfig(lui, indent = "") {
     const pairs = []
     visit(pairs, "", lui.config.global)
-    visit(pairs, "harness", lui.config.harness)
-    visit(pairs, "engine", lui.config.engine)
-    visit(pairs, "sandbox", lui.config.sandbox)
+    for (const table of TOP_LEVEL_TABLES) {
+        // `global` is rendered flat above; `model` is user data, listed
+        // separately under "Models".
+        if (table === "global" || table === "model") continue
+        visit(pairs, table, lui.config[table])
+    }
 
     pairs.sort(comparePairs)
 
@@ -104,42 +115,12 @@ function writeFlatConfig(lui, indent = "") {
 function writeDefaultConfig(setPaths, indent = "") {
     const out = []
     const tty = process.stdout.isTTY
-    const sorted = schemaDefaults()
+    const sorted = gatherSchemaDefaults()
         .filter(({ path }) => !setPaths.has(path))
+        .map(({ path, display }) => ({ path, value: display }))
         .sort(comparePairs)
     for (const { path, value } of sorted) emitPair(out, indent, path, value, tty)
     process.stdout.write(out.join(""))
-}
-
-function schemaDefaults() {
-    const out = []
-    out.push({ path: "engine_port", value: "8080" })
-    out.push({ path: "web_port", value: "8081" })
-    out.push({ path: "websearch", value: "true" })
-    out.push({ path: "public", value: "false" })
-    out.push({ path: "debug_log", value: "(unset)" })
-
-    for (const h of harnesses) out.push({ path: `harness.${h.name}.enabled`, value: String(h.defaultEnabled) })
-
-    for (const name of Object.keys(engines)) {
-        out.push({ path: `engine.${name}.binary`, value: `(PATH: ${engines[name].defaultBinary})` })
-    }
-
-    out.push({ path: "sandbox.allow_cwd", value: "true" })
-    out.push({ path: "sandbox.block_net", value: "false" })
-    out.push({ path: "sandbox.allow_gpu", value: "false" })
-    out.push({ path: "sandbox.rollback", value: "false" })
-    out.push({ path: "sandbox.silent", value: "false" })
-    out.push({ path: "sandbox.dev_tools", value: "true" })
-    out.push({ path: "sandbox.profile", value: "(auto-detected from harness name)" })
-    out.push({ path: "sandbox.bin", value: "nono" })
-    out.push({ path: "sandbox.allow", value: "[]" })
-    out.push({ path: "sandbox.read", value: "[]" })
-    out.push({ path: "sandbox.write", value: "[]" })
-    out.push({ path: "sandbox.allow_domain", value: "[]" })
-    out.push({ path: "sandbox.extra", value: "[]" })
-
-    return out
 }
 
 function visit(pairs, prefix, obj) {
@@ -164,10 +145,16 @@ function formatLeaf(v) {
     return String(v)
 }
 
-const TOP_LEVEL_KEYS = new Set(["global", "model", "harness", "engine", "sandbox"])
+const TOP_LEVEL_KEYS = new Set(TOP_LEVEL_TABLES)
 
 // `set` on these paths appends; `clear` removes the whole list.
-const ARRAY_PATHS = new Set(["sandbox.allow", "sandbox.read", "sandbox.write", "sandbox.allow_domain", "sandbox.extra"])
+// Derived from every subsystem's schema so adding a new array-typed
+// knob just means adding `isArray: true` to one descriptor.
+const ARRAY_PATHS = new Set(
+    gatherSchemaDefaults()
+        .filter((s) => s.isArray)
+        .map((s) => s.path)
+)
 
 function isArrayPath(path) {
     return ARRAY_PATHS.has(path.join("."))

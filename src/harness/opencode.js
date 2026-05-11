@@ -12,14 +12,10 @@ export const harness = {
     configDir: "~/.config/opencode",
     configCandidates: ["opencode.jsonc", "opencode.json"],
 
-    apply(existing, lui) {
+    apply(existing, ctx) {
         let text = existing.trim() ? existing : "{}\n"
-        const modelName = deriveModelName(lui.activeModel?.name)
-        const baseURL = lui.engineBaseURL ?? `http://127.0.0.1:${lui.config.global.engine_port}/v1`
-        const ctxSize = inferContextSize(lui.activeModel?.args || [])
-
-        text = setProviderLui(text, modelName, baseURL, ctxSize)
-        text = setPermissionBash(text, lui.config.global.web_port, lui.config.global.websearch !== false)
+        text = setProviderLui(text, ctx.modelName, ctx.baseURL, ctx.ctxSize)
+        text = setPermissionBash(text, ctx.webPort, ctx.websearch)
         return text
     },
 
@@ -91,21 +87,4 @@ function setPermissionBash(text, webPort, websearch) {
         }
     }
     return cur
-}
-
-function deriveModelName(activeKey) {
-    if (!activeKey) return "lui"
-    const tail = activeKey.split("/").pop() || activeKey
-    const stripped = tail.split(":")[0].replace(/-GGUF$/, "")
-    return stripped || "lui"
-}
-
-function inferContextSize(args) {
-    for (let i = 0; i < args.length; i++) {
-        if ((args[i] === "-c" || args[i] === "--ctx-size") && i + 1 < args.length) {
-            const n = parseInt(args[i + 1], 10)
-            if (Number.isFinite(n) && n > 0) return n
-        }
-    }
-    return 32768
 }

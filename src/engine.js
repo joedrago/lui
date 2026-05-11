@@ -1,6 +1,5 @@
-// Engine registry + runEngine(). Each engine module exports `engine`
-// (see REWRITE.md §8). STYLE.SEGMENT_* are shared per-segment palette
-// conventions; engines can use plain inline PaletteEntry objects too.
+// Engine registry + runEngine(). Each engine module exports `engine`.
+// Per-segment palette conventions live in src/theme.js (STYLE.SEGMENT_*).
 
 import { spawn } from "node:child_process"
 import fs from "node:fs"
@@ -8,15 +7,18 @@ import path from "node:path"
 
 import { engine as llamaServer } from "./engine/llama-server.js"
 
-export const STYLE = {
-    SEGMENT_BINDING: { fg: "cyan" },
-    SEGMENT_POLICY: { dim: true },
-    SEGMENT_DEFAULTS: { fg: [100, 170, 200] },
-    SEGMENT_USER: { fg: [230, 200, 140] }
-}
-
 export const engines = {
     [llamaServer.name]: llamaServer
+}
+
+// One default-binary path per engine, shown under "Available Settings".
+// The default is "look up engine.defaultBinary on $PATH" — that's why
+// the display is a hint, not a concrete path.
+export function engineSchemaDefaults(engineModules) {
+    return engineModules.map((e) => ({
+        path: `engine.${e.name}.binary`,
+        display: `(PATH: ${e.defaultBinary})`
+    }))
 }
 
 // [engine.<name>].binary if set, else engine.defaultBinary on $PATH.

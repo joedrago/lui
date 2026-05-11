@@ -3,12 +3,13 @@ import process from "node:process"
 import { Config } from "./config.js"
 import { View } from "./wire.js"
 import { stripStyle, compilePalette, paint, wrapStyled, vwidth, styled } from "./ansi.js"
+import { STYLE } from "./theme.js"
 import { engines, runEngine } from "./engine.js"
 import { startWebServer } from "./web.js"
 import { startTui } from "./display.js"
 import { sshSetupShare, sshSetupUse } from "./ssh.js"
 import { runSandbox, previewSandboxArgs } from "./sandbox.js"
-import { harnesses, applyAllLocal } from "./harness/index.js"
+import { harnesses, applyAllLocal } from "./harness.js"
 
 export class Lui {
     static WARNING_TTL_MS = 60_000
@@ -17,7 +18,6 @@ export class Lui {
         this.config = Config.load()
         this.startedAt = Date.now()
         this.warnings = []
-        this.requestCount = 0
         this.websearchCount = 0
         this.activeSearchCount = 0
 
@@ -25,6 +25,12 @@ export class Lui {
         this.engineChild = null
         this.activeModel = null
         this.state = {}
+
+        // Resolved spawn argv, populated by spawnEngine. Render paths
+        // read these instead of re-invoking buildArgv, which has side
+        // effects (PATH lookup, thread autodetect).
+        this.spawnBinary = null
+        this.spawnSegments = null
 
         this.web = null
         this.tui = null
@@ -52,11 +58,7 @@ export class Lui {
         this.web = await startWebServer(this)
         this.tui = startTui(this)
 
-        await new Promise((resolve) => {
-            this.onShutdownResolve = resolve
-            process.on("SIGINT", () => this.shutdown(0))
-            process.on("SIGTERM", () => this.shutdown(0))
-        })
+        await this.awaitShutdown()
     }
 
     add(name, engineName, args) {
@@ -142,10 +144,6 @@ export class Lui {
 
         const v = View()
         const p = v.panel("")
-        const ACTIVE_DOT = { fg: [230, 200, 140], bold: true }
-        const NAME = { bold: true }
-        const ENGINE_NAME = { fg: "cyan" }
-        const DIM_TEXT = { dim: true }
 
         for (let i = 0; i < names.length; i++) {
             const name = names[i]
@@ -154,9 +152,9 @@ export class Lui {
 
             // Header: ● name  engine
             const ln = p.line()
-            if (isActive) ln.style(ACTIVE_DOT).text("● ").style()
-            else ln.style(DIM_TEXT).text("○ ").style()
-            ln.style(NAME).text(name).style().text("  ").style(ENGINE_NAME).text(m.engine).style()
+            if (isActive) ln.style(STYLE.ACTIVE).text("● ").style()
+            else ln.style({ dim: true }).text("○ ").style()
+            ln.style({ bold: true }).text(name).style().text("  ").style(STYLE.ENGINE_NAME).text(m.engine).style()
 
             // Body: the model's full resolved engine commandline, with
             // per-segment colors (binding/policy/defaults/user). This
@@ -168,7 +166,11 @@ export class Lui {
                 const cmdLine = p.line({ indent: 4 }).text(binary)
                 for (const seg of segments) {
                     if (!seg.args.length) continue
-                    cmdLine.text(" ").style(seg.style ?? {}).text(seg.args.join(" ")).style()
+                    cmdLine
+                        .text(" ")
+                        .style(seg.style ?? {})
+                        .text(seg.args.join(" "))
+                        .style()
                 }
             }
 
@@ -182,10 +184,8 @@ export class Lui {
     printSandboxCommandline() {
         const v = View()
         const p = v.panel("")
-        const HEADER = { fg: [120, 100, 180] }
-        const HARNESS = { fg: "magenta", bold: true }
 
-        p.line().style(HEADER).text("Sandbox Commandline:")
+        p.line().style(STYLE.LABEL).text("Sandbox Commandline:")
         const sb = previewSandboxArgs(this)
         // Indent 6 so the body aligns with the Models section's wrapped
         // engine commandlines (which sit at outer indent 2 + line
@@ -196,8 +196,12 @@ export class Lui {
             if (!seg.args.length) continue
             for (const tok of seg.args) {
                 sandboxLine.text(" ")
-                if (tok === "HARNESS") sandboxLine.style(HARNESS).text(tok).style()
-                else sandboxLine.style(seg.style ?? {}).text(tok).style()
+                if (tok === "HARNESS") sandboxLine.style(STYLE.HARNESS_NAME).text(tok).style()
+                else
+                    sandboxLine
+                        .style(seg.style ?? {})
+                        .text(tok)
+                        .style()
             }
         }
 
@@ -218,16 +222,23 @@ export class Lui {
     async websearch() {
         this.web = await startWebServer(this)
         this.tui = startTui(this)
-        await new Promise((resolve) => {
+        await this.awaitShutdown({ recordReason: true })
+    }
+
+    // Install SIGINT/SIGTERM → shutdown(0) and return a promise that
+    // resolves once `shutdown` runs. `recordReason: true` stamps
+    // `this.quitReason` from the signal name so the shutdown summary can
+    // show why we left (only modes without a richer reason source — like
+    // a parsed engine exit — want this).
+    awaitShutdown({ recordReason = false } = {}) {
+        return new Promise((resolve) => {
             this.onShutdownResolve = resolve
-            process.on("SIGINT", () => {
-                this.quitReason ??= "received SIGINT"
+            const onSignal = (sig) => {
+                if (recordReason) this.quitReason ??= `received ${sig}`
                 this.shutdown(0)
-            })
-            process.on("SIGTERM", () => {
-                this.quitReason ??= "received SIGTERM"
-                this.shutdown(0)
-            })
+            }
+            process.on("SIGINT", () => onSignal("SIGINT"))
+            process.on("SIGTERM", () => onSignal("SIGTERM"))
         })
     }
 
@@ -257,6 +268,8 @@ export class Lui {
             process.exit(1)
         }
         for (const w of warnings ?? []) this.addWarning(w)
+        this.spawnBinary = binary
+        this.spawnSegments = segments
         this.engineModule.initState?.(this)
         this.engineChild = runEngine(this, binary, segments)
     }
@@ -306,11 +319,6 @@ export class Lui {
     }
 
     printShutdownSummary() {
-        const LAVENDER_BOLD = { fg: [180, 150, 255], bold: true }
-        const LABEL = { fg: [120, 100, 180] }
-        const FATAL_LABEL = { fg: [230, 100, 100], bold: true }
-        const FATAL_BODY = { fg: [230, 100, 100] }
-
         const uptimeMs = Date.now() - this.startedAt
         const uptime = formatDuration(uptimeMs)
         const model = this.activeModel?.name
@@ -319,15 +327,15 @@ export class Lui {
 
         const out = []
         out.push("\n")
-        out.push(`${styled("lui", LAVENDER_BOLD)} shutting down\n`)
-        if (model) out.push(`  ${styled("Model   :", LABEL)} ${model}\n`)
-        out.push(`  ${styled("Uptime  :", LABEL)} ${uptime}\n`)
+        out.push(`${styled("lui", STYLE.BRAND)} shutting down\n`)
+        if (model) out.push(`  ${styled("Model   :", STYLE.LABEL)} ${model}\n`)
+        out.push(`  ${styled("Uptime  :", STYLE.LABEL)} ${uptime}\n`)
         if (this.state?.requestCount != null) {
-            out.push(`  ${styled("Requests:", LABEL)} ${this.state.requestCount}\n`)
+            out.push(`  ${styled("Requests:", STYLE.LABEL)} ${this.state.requestCount}\n`)
         }
-        out.push(`  ${styled("Reason  :", LABEL)} ${reason}\n`)
+        out.push(`  ${styled("Reason  :", STYLE.LABEL)} ${reason}\n`)
         if (fatal) {
-            out.push(`\n  ${styled("lui aborted:", FATAL_LABEL)} ${styled(fatal, FATAL_BODY)}\n`)
+            out.push(`\n  ${styled("lui aborted:", STYLE.FATAL_LABEL)} ${styled(fatal, STYLE.FATAL)}\n`)
         }
         out.push("\n")
         process.stdout.write(out.join(""))
@@ -341,17 +349,9 @@ export class Lui {
         if (this.engineModule) return
         const p = v.panel("lui — llm ui")
         const webPort = this.config.global.web_port
-        if (webPort) p.line({ align: "right" }).style({ fg: "cyan" }).text(`http://127.0.0.1:${webPort}/setup`)
-        p.line()
-            .style({ fg: [180, 130, 220] })
-            .text("Mode     : ")
-            .style()
-            .text("websearch only")
-        p.line()
-            .style({ fg: [180, 130, 220] })
-            .text("Listening: ")
-            .style()
-            .text(`127.0.0.1:${webPort}`)
+        if (webPort) p.line({ align: "right" }).style(STYLE.URL).text(`http://127.0.0.1:${webPort}/setup`)
+        p.line().style(STYLE.LABEL).text("Mode     : ").style().text("websearch only")
+        p.line().style(STYLE.LABEL).text("Listening: ").style().text(`127.0.0.1:${webPort}`)
     }
 
     appendWarningsPanel(v) {
@@ -360,18 +360,11 @@ export class Lui {
         this.warnings = live
         if (!live.length) return
         const p = v.panel("Warnings")
-        for (const w of live) p.line().style({ fg: "yellow" }).text(w.text)
+        for (const w of live) p.line().style(STYLE.WARNING).text(w.text)
     }
 
     addWarning(text) {
         this.warnings.push({ text, addedAt: Date.now() })
-    }
-
-    bumpRequest() {
-        this.requestCount += 1
-    }
-    bumpWebsearch() {
-        this.websearchCount += 1
     }
 
     enabledHarnesses() {
@@ -417,4 +410,3 @@ function emitPaintedLines(built, outerIndent = "") {
         }
     }
 }
-
