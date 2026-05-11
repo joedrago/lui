@@ -633,8 +633,18 @@ function appendModelPanel(v, lui) {
 
     if (s.listenUrl) p.line({ indent: 15 }).style(DIM).text(s.listenUrl)
 
-    const userArgs = lui.activeModel?.args || []
-    if (userArgs.length) p.line({ indent: 15 }).style(DIM).text(userArgs.join(" "))
+    // Full resolved argv as one dim line. The per-segment colors are
+    // useful in `lui cmd` (one-shot audit) but in the live panel they
+    // compete with the labelled fields above; keep everything muted so
+    // the status reads as supporting detail.
+    if (lui.activeModel) {
+        const { binary, segments } = engine.buildArgv(lui.activeModel, lui)
+        const ln = p.line({ indent: 15 }).style(DIM).text(binary)
+        for (const seg of segments) {
+            if (!seg.args.length) continue
+            ln.text(" ").text(seg.args.join(" "))
+        }
+    }
 
     // Active downloads as bars.
     for (const [name, pct] of [...s.downloads.entries()].sort()) {

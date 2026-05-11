@@ -73,6 +73,26 @@ function nonoProfileExists(bin, name) {
     }
 }
 
+// Static preview of what `lui sandbox HARNESS` would run, with the
+// literal string "HARNESS" standing in everywhere the actual harness
+// name would land — both as the profile (when auto-detect is in play)
+// and as the binary after `--`. Used by `lui cmd` so users can audit
+// the sandbox invocation without launching anything. No nono probe.
+export function previewSandboxArgs(lui) {
+    const cfg = lui.config.sandbox || {}
+    const bin = cfg.bin || "nono"
+    const explicit = (cfg.profile ?? "").trim()
+    let profile
+    if (explicit) {
+        profile = explicit.toLowerCase() === PROFILE_OPT_OUT ? null : explicit
+    } else {
+        profile = "HARNESS"
+    }
+    const args = buildNonoArgs(cfg, profile)
+    args.push("--", "HARNESS")
+    return { bin, args }
+}
+
 function buildNonoArgs(cfg, profile) {
     const out = ["run"]
     if (profile) out.push("-p", profile)

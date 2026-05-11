@@ -18,7 +18,7 @@ export const STYLE = {
     SEGMENT_BINDING: { fg: "cyan" },
     SEGMENT_POLICY: { dim: true },
     SEGMENT_DEFAULTS: { fg: [100, 170, 200] },
-    SEGMENT_USER: {}
+    SEGMENT_USER: { fg: [230, 200, 140] }
 }
 
 export const engines = {

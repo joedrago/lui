@@ -15,7 +15,7 @@ import { engines, runEngine } from "./engine.js"
 import { startWebServer } from "./web.js"
 import { startTui } from "./display.js"
 import { sshSetupShare, sshSetupUse } from "./ssh.js"
-import { runSandbox } from "./sandbox.js"
+import { runSandbox, previewSandboxArgs } from "./sandbox.js"
 import { harnesses, applyAllLocal } from "./harness/index.js"
 
 export class Lui {
@@ -205,27 +205,42 @@ export class Lui {
 
         const v = View()
         const p = v.panel("")
-        const ln = p.line()
-        ln.text(binary)
+        const HEADER = { fg: [120, 100, 180] }
+        const HARNESS = { fg: "magenta", bold: true }
+        const INDENT = "    "
+
+        p.line().style(HEADER).text("Engine commandline:")
+        const engineLine = p.line().text(INDENT + binary)
         for (const seg of segments) {
             if (!seg.args.length) continue
-            ln.text(" ")
-                .style(seg.style ?? {})
-                .text(seg.args.join(" "))
-                .style()
+            engineLine.text(" ").style(seg.style ?? {}).text(seg.args.join(" ")).style()
         }
+
+        p.line()
+
+        // Sandbox preview with `HARNESS` standing in for the harness
+        // name in both the profile slot (when auto-detected) and the
+        // trailing binary slot. Highlighted in magenta so the
+        // substitution points are visible at a glance.
+        p.line().style(HEADER).text("Sandbox commandline:")
+        const sb = previewSandboxArgs(this)
+        const sandboxLine = p.line().text(INDENT + sb.bin)
+        for (const tok of sb.args) {
+            sandboxLine.text(" ")
+            if (tok === "HARNESS") sandboxLine.style(HARNESS).text(tok).style()
+            else sandboxLine.text(tok)
+        }
+
         const built = v.build()
-        const text = built.panels[0]?.lines?.[0]?.text ?? ""
+        const lines = built.panels[0]?.lines ?? []
         const tty = process.stdout.isTTY
         if (tty) {
-            // The TUI uses ansi.paint with a compiled palette; for a one-shot
-            // line we can just lean on the same compilation step here.
             import("./ansi.js").then(({ compilePalette, paint }) => {
                 const compiled = compilePalette(built.palette)
-                process.stdout.write(paint(text, compiled) + "\n")
+                for (const l of lines) process.stdout.write(paint(l.text, compiled) + "\n")
             })
         } else {
-            process.stdout.write(stripStyle(text) + "\n")
+            for (const l of lines) process.stdout.write(stripStyle(l.text) + "\n")
         }
     }
 
