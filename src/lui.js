@@ -15,6 +15,7 @@ import { engines, runEngine } from "./engine.js"
 import { startWebServer } from "./web.js"
 import { startTui } from "./display.js"
 import { sshSetupShare, sshSetupUse } from "./ssh.js"
+import { runSandbox } from "./sandbox.js"
 import { harnesses, applyAllLocal } from "./harness/index.js"
 
 export class Lui {
@@ -78,7 +79,7 @@ export class Lui {
             process.stderr.write(`lui: unknown engine "${engineName}". Available: ${Object.keys(engines).join(", ")}\n`)
             process.exit(2)
         }
-        if (this.config.models[name]) {
+        if (this.config.model[name]) {
             process.stderr.write(`lui: model "${name}" already exists. Use \`lui set ${name} -- ...\` to replace its args.\n`)
             process.exit(2)
         }
@@ -88,13 +89,13 @@ export class Lui {
             for (const e of probe.errors) process.stderr.write(`lui: ${e}\n`)
             process.exit(1)
         }
-        this.config.models[name] = { engine: engineName, args: [...args] }
+        this.config.model[name] = { engine: engineName, args: [...args] }
         this.config.save()
         process.stdout.write(`Added model "${name}" (${engineName}).\n`)
     }
 
     set(name, args) {
-        const existing = this.config.models[name]
+        const existing = this.config.model[name]
         const creating = !existing
         const engineName = existing?.engine ?? "llama-server"
         if (!engines[engineName]) {
@@ -107,7 +108,7 @@ export class Lui {
             process.exit(1)
         }
         if (creating) {
-            this.config.models[name] = { engine: engineName, args: [...args] }
+            this.config.model[name] = { engine: engineName, args: [...args] }
             process.stdout.write(`(model "${name}" didn't exist — created with engine "${engineName}".)\n`)
         } else {
             existing.args = [...args]
@@ -117,25 +118,25 @@ export class Lui {
     }
 
     rm(name) {
-        if (!this.config.models[name]) {
+        if (!this.config.model[name]) {
             process.stderr.write(`lui: model "${name}" not found.\n`)
             process.exit(1)
         }
-        delete this.config.models[name]
+        delete this.config.model[name]
         if (this.config.global.active_model === name) delete this.config.global.active_model
         this.config.save()
         process.stdout.write(`Removed "${name}".\n`)
     }
 
     ls() {
-        const names = Object.keys(this.config.models).sort()
+        const names = Object.keys(this.config.model).sort()
         if (!names.length) {
             process.stdout.write("(no models — try `lui add NAME ENGINE -- ARGS`)\n")
             return
         }
         const active = this.config.activeModelName
         for (const name of names) {
-            const m = this.config.models[name]
+            const m = this.config.model[name]
             const star = name === active ? "*" : " "
             const args = (m.args || []).join(" ")
             process.stdout.write(`${star} ${name}  [${m.engine}]  ${args}\n`)
@@ -150,24 +151,29 @@ export class Lui {
 
         emit("[global]\n")
         for (const [k, v] of Object.entries(this.config.global)) {
-            if (k === "harness" || k === "engines") continue
+            if (k === "harness" || k === "engine") continue
             emit(`${k} = ${tomlScalar(v)}\n`)
         }
-        const harness = this.config.global.harness || {}
+        const harness = this.config.harness || {}
         for (const h of Object.keys(harness).sort()) {
-            emit(`\n[global.harness.${h}]\n`)
+            emit(`\n[harness.${h}]\n`)
             for (const [k, v] of Object.entries(harness[h] || {})) emit(`${k} = ${tomlScalar(v)}\n`)
         }
-        const eng = this.config.global.engines || {}
+        const eng = this.config.engine || {}
         for (const e of Object.keys(eng).sort()) {
-            emit(`\n[global.engines.${e}]\n`)
+            emit(`\n[engine.${e}]\n`)
             for (const [k, v] of Object.entries(eng[e] || {})) emit(`${k} = ${tomlScalar(v)}\n`)
         }
+        const sb = this.config.sandbox || {}
+        if (Object.keys(sb).length) {
+            emit(`\n[sandbox]\n`)
+            for (const [k, v] of Object.entries(sb)) emit(`${k} = ${tomlScalar(v)}\n`)
+        }
 
-        const names = name ? [name].filter((n) => this.config.models[n]) : Object.keys(this.config.models).sort()
+        const names = name ? [name].filter((n) => this.config.model[n]) : Object.keys(this.config.model).sort()
         for (const n of names) {
-            const m = this.config.models[n]
-            emit(`\n[models.${tomlKey(n)}]\n`)
+            const m = this.config.model[n]
+            emit(`\n[model.${tomlKey(n)}]\n`)
             emit(`engine = ${tomlScalar(m.engine)}\n`)
             const a = m.args || []
             if (a.length === 0) emit(`args = []\n`)
@@ -229,6 +235,9 @@ export class Lui {
     async remote(host) {
         await sshSetupUse(this, host)
     }
+    async sandbox(harnessName, harnessArgs) {
+        await runSandbox(this, harnessName, harnessArgs)
+    }
 
     async websearch() {
         this.web = await startWebServer(this)
@@ -251,11 +260,11 @@ export class Lui {
     resolveModel(name) {
         const wanted = name || this.config.activeModelName
         if (!wanted) {
-            const all = Object.keys(this.config.models)
+            const all = Object.keys(this.config.model)
             if (all.length === 0) return null
             return null
         }
-        const m = this.config.models[wanted]
+        const m = this.config.model[wanted]
         if (!m) return null
         return { name: wanted, engine: m.engine, args: m.args || [] }
     }
@@ -400,7 +409,7 @@ export class Lui {
 
     // Returns the list of harnesses currently enabled for this lui's config.
     enabledHarnesses() {
-        const cfg = this.config.global.harness || {}
+        const cfg = this.config.harness || {}
         return harnesses.filter((h) => cfg[h.name]?.enabled ?? h.defaultEnabled)
     }
 }

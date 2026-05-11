@@ -26,10 +26,10 @@ export const engines = {
 }
 
 // Resolve the engine binary path. Order:
-//   1. [global.engines.<engine>].binary, if set (absolute or relative)
+//   1. [engine.<name>].binary, if set (absolute or relative)
 //   2. engine.defaultBinary on $PATH
 function resolveBinary(lui, engineModule, binaryHint) {
-    const override = lui.config.global?.engines?.[engineModule.name]?.binary
+    const override = lui.config.engine?.[engineModule.name]?.binary
     const candidate = override || binaryHint || engineModule.defaultBinary
 
     if (candidate.includes(path.sep) || candidate.startsWith(".")) {

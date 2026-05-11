@@ -1,5 +1,5 @@
 // Config IO. Loads ~/.config/lui.toml via smol-toml into the runtime
-// shape (lui.config.global.*, lui.config.models.*); saves it back with
+// shape (lui.config.global.*, lui.config.model.*); saves it back with
 // an atomic tmp+rename. TOML emission is bespoke so `args` arrays
 // render one-entry-per-line for diff-friendly storage.
 
@@ -20,14 +20,18 @@ export class Config {
     constructor(data = {}) {
         const g = data.global ?? {}
         this.global = {
-            engine_port: g.engine_port ?? DEFAULTS.engine_port,
-            web_port: g.web_port ?? DEFAULTS.web_port,
-            websearch: g.websearch ?? DEFAULTS.websearch,
-            ...(g.active_model != null ? { active_model: g.active_model } : {}),
-            harness: g.harness ?? {},
-            engines: g.engines ?? {}
+            engine_port: DEFAULTS.engine_port,
+            web_port: DEFAULTS.web_port,
+            websearch: DEFAULTS.websearch,
+            ...g
         }
-        this.models = data.models ?? {}
+        // Top-level catalogs / tuning tables. Each is its own root in
+        // the TOML — [harness.opencode], [engine.llama-server],
+        // [sandbox], [model.phi] — so they sit visually as peers.
+        this.harness = data.harness ?? {}
+        this.engine = data.engine ?? {}
+        this.sandbox = data.sandbox ?? {}
+        this.model = data.model ?? {}
     }
 
     static load() {
@@ -76,32 +80,54 @@ export class Config {
 
 function serialize(cfg) {
     const out = []
-    out.push(...emitTable("global", cfg.global, ["harness", "engines"]))
 
-    const harness = cfg.global?.harness || {}
-    for (const name of Object.keys(harness).sort()) {
-        const sub = harness[name]
-        if (sub && typeof sub === "object" && !Array.isArray(sub)) {
-            out.push("")
-            out.push(...emitTable(`global.harness.${tomlKey(name)}`, sub))
-        }
+    // [global] is scalars only. Any object-valued child accidentally
+    // landing here gets emitted as its own sub-table — but the new
+    // shape has nothing object-valued under global, so this is purely
+    // belt-and-suspenders.
+    const globalNested = []
+    for (const [k, v] of Object.entries(cfg.global || {})) {
+        if (v && typeof v === "object" && !Array.isArray(v)) globalNested.push(k)
     }
+    out.push(...emitTable("global", cfg.global, globalNested))
 
-    const engines = cfg.global?.engines || {}
-    for (const name of Object.keys(engines).sort()) {
-        const sub = engines[name]
-        if (sub && typeof sub === "object" && !Array.isArray(sub)) {
-            out.push("")
-            out.push(...emitTable(`global.engines.${tomlKey(name)}`, sub))
-        }
-    }
-
-    for (const name of Object.keys(cfg.models).sort()) {
+    for (const groupKey of globalNested.sort()) {
+        const group = cfg.global[groupKey]
+        if (!group || Object.keys(group).length === 0) continue
         out.push("")
-        out.push(...emitTable(`models.${tomlKey(name)}`, cfg.models[name]))
+        out.push(...emitTable(`global.${groupKey}`, group))
     }
+
+    out.push(...emitTopLevelTable(cfg, "harness"))
+    out.push(...emitTopLevelTable(cfg, "engine"))
+    out.push(...emitTopLevelTable(cfg, "sandbox"))
+    out.push(...emitTopLevelTable(cfg, "model"))
 
     return out.join("\n") + "\n"
+}
+
+// `harness`, `engines`, `models` are *maps-of-tables* (each inner key
+// is itself a table) → emit one `[NAME.INNER]` section per entry.
+// `sandbox` is a *leaf table* of scalars + arrays → emit a single
+// `[sandbox]` section. Detect by inspecting the inner entries so
+// future top-level tables of either shape just work.
+function emitTopLevelTable(cfg, rootKey) {
+    const obj = cfg[rootKey]
+    if (!obj || typeof obj !== "object") return []
+    const inner = Object.entries(obj)
+    if (inner.length === 0) return []
+    const allInnerAreTables = inner.every(([, v]) => v && typeof v === "object" && !Array.isArray(v))
+    const out = []
+    if (allInnerAreTables) {
+        for (const name of Object.keys(obj).sort()) {
+            out.push("")
+            out.push(...emitTable(`${rootKey}.${tomlKey(name)}`, obj[name]))
+        }
+    } else {
+        out.push("")
+        out.push(...emitTable(rootKey, obj))
+    }
+    return out
 }
 
 function emitTable(header, obj, skipNested = []) {

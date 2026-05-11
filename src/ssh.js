@@ -32,7 +32,7 @@ export async function sshSetupShare(lui, spec) {
     const websearch = lui.config.global.websearch !== false
 
     for (const h of harnesses) {
-        const enabled = (lui.config.global.harness?.[h.name]?.enabled ?? h.defaultEnabled) === true
+        const enabled = (lui.config.harness?.[h.name]?.enabled ?? h.defaultEnabled) === true
         if (!enabled) continue
         if (h.preflight) {
             const ok = await sshPreflight(target, h)

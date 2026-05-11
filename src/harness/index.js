@@ -27,7 +27,7 @@ export function applyAllLocal(lui) {
 }
 
 function isEnabled(lui, harness) {
-    const sub = lui.config.global.harness?.[harness.name]
+    const sub = lui.config.harness?.[harness.name]
     if (sub && typeof sub.enabled === "boolean") return sub.enabled
     return harness.defaultEnabled
 }

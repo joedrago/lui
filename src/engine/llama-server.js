@@ -480,7 +480,7 @@ function extractMib(line) {
 // lui.state.llamaVersion. Best-effort; non-fatal if it fails.
 async function probeVersion(lui) {
     return new Promise((resolve) => {
-        const bin = lui.config.global?.engines?.[engine.name]?.binary || engine.defaultBinary
+        const bin = lui.config.engine?.[engine.name]?.binary || engine.defaultBinary
         let stderr = ""
         const child = spawn(bin, ["--version"], { stdio: ["ignore", "ignore", "pipe"] })
         child.stderr.setEncoding("utf8")
