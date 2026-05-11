@@ -125,9 +125,9 @@ export class Lui {
         process.stdout.write(`Removed "${name}".\n`)
     }
 
-    clone(newName, oldName) {
+    cp(oldName, newName) {
         if (newName === oldName) {
-            process.stderr.write(`lui: clone needs a different NEWNAME than OLDNAME.\n`)
+            process.stderr.write(`lui: cp needs a different NEWNAME than OLDNAME.\n`)
             process.exit(1)
         }
         const src = this.config.model[oldName]
@@ -141,7 +141,7 @@ export class Lui {
         }
         this.config.model[newName] = { engine: src.engine, args: [...(src.args || [])] }
         this.config.save()
-        process.stdout.write(`Cloned "${oldName}" → "${newName}" (engine ${src.engine}).\n`)
+        process.stdout.write(`Copied "${oldName}" → "${newName}" (engine ${src.engine}).\n`)
     }
 
     printModels({ indent = "" } = {}) {

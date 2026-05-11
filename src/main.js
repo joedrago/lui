@@ -26,27 +26,32 @@ const HEADER_STYLE = { fg: [120, 100, 180] }
 const PATH_STYLE = { fg: [230, 200, 140] }
 const VAL_STYLE = { fg: [210, 150, 255] }
 
-const SUBCOMMANDS = new Set(["run", "add", "set", "clone", "rm", "ssh", "remote", "websearch", "sandbox", "config"])
+const SUBCOMMANDS = new Set(["run", "add", "cp", "set", "rm", "ssh", "remote", "websearch", "sandbox", "config"])
 
 function printHelp() {
     process.stdout.write(`lui — a friendly TUI wrapper for LLM engines.
 
 USAGE
   lui                              print this help
+
   lui run [NAME]                   run a model by name (resumes last if absent)
+
   lui add NAME ENGINE ARGS...      create a model (ARGS go to the engine)
   lui set NAME ARGS...             replace ARGS for a model
-  lui clone NEWNAME OLDNAME        copy a model under a new name
+  lui cp OLDNAME NEWNAME           copy a model under a new name
   lui rm NAME                      delete a model
-  lui ssh USER@HOST                configure a remote client
-  lui remote HOST[:PORT]           connect TUI to a remote lui
-  lui websearch                    run only the websearch server
-  lui sandbox HARNESS [ARGS...]    launch HARNESS under nono — every
-                                   token after HARNESS is passed
-                                   verbatim
+
   lui config                       settings + models + resolved commandlines
   lui config set PATH VALUE        set a config value (appends for array paths)
   lui config clear PATH            remove a config value (or whole array)
+
+  lui remote HOST[:PORT]           connect TUI to a remote lui
+  lui ssh USER@HOST                configure a remote client
+  lui websearch                    run only the websearch server
+
+  lui sandbox HARNESS [ARGS...]    launch HARNESS under nono — every
+                                   token after HARNESS is passed
+                                   verbatim
 
 `)
 }
@@ -362,9 +367,9 @@ async function main() {
         return
     }
 
-    if (verb === "clone") {
-        if (rest.length !== 2) fatal("clone requires NEWNAME OLDNAME")
-        lui.clone(rest[0], rest[1])
+    if (verb === "cp") {
+        if (rest.length !== 2) fatal("cp requires OLDNAME NEWNAME")
+        lui.cp(rest[0], rest[1])
         return
     }
 
