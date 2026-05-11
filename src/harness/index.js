@@ -12,11 +12,14 @@ import { harness as pi } from "./pi.js"
 
 export const harnesses = [opencode, pi]
 
+// Walk every shipped harness on each invocation — not just the enabled
+// ones — so a harness the user *just disabled* gets its stale
+// lui-web-search SKILL.md cleaned up. Config-file edits are still gated
+// on `enabled`. Matches the Rust update_all_local flow.
 export function applyAllLocal(lui) {
-    const enabled = lui.enabledHarnesses ? lui.enabledHarnesses() : harnesses.filter((h) => isEnabled(lui, h))
-    for (const h of enabled) {
+    for (const h of harnesses) {
         try {
-            applyOneLocal(lui, h)
+            applyOneLocal(lui, h, isEnabled(lui, h))
         } catch (e) {
             process.stderr.write(`lui: harness "${h.name}" apply failed: ${e.message}\n`)
         }
@@ -29,10 +32,35 @@ function isEnabled(lui, harness) {
     return harness.defaultEnabled
 }
 
-function applyOneLocal(lui, harness) {
+function applyOneLocal(lui, harness, enabled) {
     const dir = expandTilde(harness.configDir)
-    fs.mkdirSync(dir, { recursive: true })
+    const websearch = lui.config.global.websearch !== false
+    const wantSkill = enabled && websearch
 
+    // Skill add/remove runs regardless of `enabled` so a just-disabled
+    // harness has its stale SKILL.md swept. Skip creating the parent
+    // dir purely for a remove — if the harness was never installed
+    // there's nothing to remove.
+    const skillDir = path.join(dir, "skills", "lui-web-search")
+    const skillPath = path.join(skillDir, "SKILL.md")
+    if (wantSkill) {
+        fs.mkdirSync(skillDir, { recursive: true })
+        const body = renderWebsearchSkill(lui.config.global.web_port)
+        if (!fs.existsSync(skillPath) || fs.readFileSync(skillPath, "utf8") !== body) {
+            fs.writeFileSync(skillPath, body)
+        }
+    } else if (fs.existsSync(skillPath)) {
+        fs.unlinkSync(skillPath)
+        try {
+            fs.rmdirSync(skillDir)
+        } catch {
+            // ignore — directory not empty or already gone
+        }
+    }
+
+    if (!enabled) return
+
+    fs.mkdirSync(dir, { recursive: true })
     const file = pickConfigFile(dir, harness.configCandidates)
     const existing = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : ""
 
@@ -49,25 +77,6 @@ function applyOneLocal(lui, harness) {
         const tmp = file + ".tmp"
         fs.writeFileSync(tmp, next)
         fs.renameSync(tmp, file)
-    }
-
-    // Skill lives under <configDir>/skills/lui-web-search/SKILL.md — that's
-    // where both opencode and pi look for installed skills.
-    const skillDir = path.join(dir, "skills", "lui-web-search")
-    const skillPath = path.join(skillDir, "SKILL.md")
-    if (lui.config.global.websearch !== false) {
-        fs.mkdirSync(skillDir, { recursive: true })
-        const body = renderWebsearchSkill(lui.config.global.web_port)
-        if (!fs.existsSync(skillPath) || fs.readFileSync(skillPath, "utf8") !== body) {
-            fs.writeFileSync(skillPath, body)
-        }
-    } else if (fs.existsSync(skillPath)) {
-        fs.unlinkSync(skillPath)
-        try {
-            fs.rmdirSync(skillDir)
-        } catch {
-            // ignore — directory not empty or already gone
-        }
     }
 }
 

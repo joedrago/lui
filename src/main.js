@@ -33,7 +33,7 @@ const VALUE_FLAGS = new Set(["--debug", "--engine-port", "--web-port"])
 // a `--harness-NAME` / `--no-harness-NAME` pair so a user can flip the
 // toggle from the command line; the override is written back to TOML so
 // it sticks across runs.
-const BOOL_FLAGS = new Set(["--public"])
+const BOOL_FLAGS = new Set(["--public", "--websearch", "--no-websearch"])
 const HARNESS_FLAGS = new Set()
 for (const h of harnesses) {
     HARNESS_FLAGS.add(`--harness-${h.name}`)
@@ -42,8 +42,11 @@ for (const h of harnesses) {
 for (const f of HARNESS_FLAGS) BOOL_FLAGS.add(f)
 
 const RUN_FLAGS = new Set([...VALUE_FLAGS, ...BOOL_FLAGS])
-const WEBSEARCH_FLAGS = new Set(["--web-port", "--public", ...HARNESS_FLAGS])
-const SSH_FLAGS = new Set([...HARNESS_FLAGS])
+// `lui websearch` doesn't accept `--no-websearch` (turning it off would
+// leave nothing to do); the bare `--websearch` is a no-op here but
+// accepted for symmetry.
+const WEBSEARCH_FLAGS = new Set(["--web-port", "--public", "--websearch", ...HARNESS_FLAGS])
+const SSH_FLAGS = new Set(["--websearch", "--no-websearch", ...HARNESS_FLAGS])
 
 function printHelp() {
     process.stdout.write(`lui — a friendly TUI wrapper for LLM engines.
@@ -66,6 +69,8 @@ RUN-TIME FLAGS (lui run, or bare lui)
   --engine-port N                  override [global].engine_port
   --web-port N                     override [global].web_port
   --public                         bind 0.0.0.0 instead of 127.0.0.1
+  --websearch                      enable browser-mediated /bsearch (persists)
+  --no-websearch                   disable it (persists)
 
 HARNESS FLAGS (lui run / lui ssh / lui websearch)
 ${harnesses.map((h) => `  --harness-${h.name.padEnd(20)} enable the ${h.name} harness (persists to TOML)\n  --no-harness-${h.name.padEnd(17)} disable it`).join("\n")}
@@ -122,6 +127,8 @@ function applyRunFlags(lui, flags) {
         lui.publicBind = true
         lui.config.global.public = true
     }
+    if (flags.websearch) lui.config.global.websearch = true
+    if (flags["no-websearch"]) lui.config.global.websearch = false
     applyHarnessFlags(lui, flags)
 }
 
