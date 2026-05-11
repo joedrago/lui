@@ -1,3 +1,8 @@
-/target
-/debug.log
+node_modules/
+npm-debug.log*
+.DS_Store
+*.log
+
+# Old Rust build artifacts (the old/ tree is reference-only)
+old/
 .claude
