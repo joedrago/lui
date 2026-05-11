@@ -436,7 +436,7 @@ fn handle_flag(
                     Some(SettingValue::StringArray(v)) => v.clone(),
                     _ => Vec::new(),
                 };
-                if !cur.contains(&raw) {
+                if !setting.dedupe || !cur.contains(&raw) {
                     cur.push(raw);
                 }
                 store.set(setting.name, SettingValue::StringArray(cur));
@@ -445,7 +445,7 @@ fn handle_flag(
                     Some(SettingValue::StringArray(v)) => v.clone(),
                     _ => Vec::new(),
                 };
-                if !cur.contains(&raw) {
+                if !setting.dedupe || !cur.contains(&raw) {
                     cur.push(raw);
                 }
                 config

@@ -105,7 +105,7 @@ impl Store {
             };
             match value::from_toml(setting.kind, v) {
                 Some(mut val) => {
-                    if setting.cli_repeatable {
+                    if setting.dedupe {
                         if let Value::StringArray(a) = &mut val {
                             dedup_in_place(a);
                         }
@@ -145,7 +145,7 @@ impl Store {
             };
             match value::from_toml(setting.kind, v) {
                 Some(mut val) => {
-                    if setting.cli_repeatable {
+                    if setting.dedupe {
                         if let Value::StringArray(a) = &mut val {
                             dedup_in_place(a);
                         }
@@ -165,9 +165,12 @@ impl Store {
 }
 
 /// Drop duplicate entries from a StringArray while preserving the first
-/// occurrence's order. Used for `cli_repeatable` settings where the array
-/// is semantically a set (paths, domains) — duplicates are pure noise and
-/// would emit the same flag twice on the resolved llama-server / nono argv.
+/// occurrence's order. Used for settings declared `.dedupe(true)`, where
+/// the array is semantically a set (paths, domains) — duplicates are
+/// pure noise and would emit the same flag twice on the resolved
+/// llama-server / nono argv. Not used for ordered argv tails like
+/// `extra_args` / `sandbox_extra`, where a "duplicate" token can be a
+/// neighbouring flag's value.
 fn dedup_in_place(v: &mut Vec<String>) {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     v.retain(|s| seen.insert(s.clone()));
@@ -453,7 +456,7 @@ impl<'a> Effective<'a> {
         if self
             .registry
             .get(name)
-            .map(|s| s.cli_repeatable)
+            .map(|s| s.dedupe)
             .unwrap_or(false)
         {
             dedup_in_place(&mut out);

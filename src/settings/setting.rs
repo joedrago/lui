@@ -133,6 +133,17 @@ pub struct Setting {
     /// kinds.
     pub cli_repeatable: bool,
 
+    /// `StringArray`-only: when true, the array is treated as set-like —
+    /// duplicate entries are collapsed on TOML load, after merging
+    /// global+per-model layers, and on each CLI append. Off by default,
+    /// because the conservative read is "preserve what the user typed."
+    /// Turn this on for arrays whose entries are independent atoms
+    /// (paths, domains). Leave it off for arrays that are positional
+    /// argv tails (`extra_args`, `sandbox_extra`) — there a duplicate
+    /// token can be a flag's value, not a redundant entry, and dropping
+    /// it silently corrupts the resolved argv.
+    pub dedupe: bool,
+
     /// Top-level TOML table this setting persists in for global-scope
     /// settings. Default `"server"` matches the historical layout.
     /// Per-model settings always land in `[models."<key>"]` regardless.
@@ -173,6 +184,7 @@ impl Setting {
             ui_format: None,
             ui_unset: None,
             cli_repeatable: false,
+            dedupe: false,
             toml_section: "server",
             toml_key_override: None,
         }
@@ -257,6 +269,10 @@ impl Setting {
     }
     pub fn cli_repeatable(mut self, b: bool) -> Self {
         self.cli_repeatable = b;
+        self
+    }
+    pub fn dedupe(mut self, b: bool) -> Self {
+        self.dedupe = b;
         self
     }
     pub fn toml_section(mut self, s: &'static str) -> Self {
