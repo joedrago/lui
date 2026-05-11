@@ -1,10 +1,5 @@
-// ANSI rendering primitives. Compiles a wire-format palette into SGR
-// prefix strings, paints palette-encoded text, measures visible widths,
-// and renders progress bars.
-//
-// The palette switch chars are Private Use Area code points
-// U+E000..U+E0FF; the renderer treats them as zero-width and translates
-// each one to an SGR sequence at paint time.
+// ANSI primitives: palette compile + paint, width / wrap / truncate,
+// terminal mode controls, and one-shot styled strings.
 
 const ESC = "\x1b["
 const RESET = ESC + "0m"
@@ -47,9 +42,8 @@ const NAMED_BG = {
     bright_white: 107
 }
 
-// Detect what the terminal can do. Truecolor when COLORTERM is
-// truecolor/24bit; 256 colors when TERM contains "256"; otherwise the
-// basic 16. The renderer downgrades on its own — engines never see this.
+// Truecolor when COLORTERM=truecolor/24bit, 256 when TERM has "256",
+// else 16. Renderer downgrades automatically.
 function detectDepth() {
     const ct = process.env.COLORTERM || ""
     if (ct === "truecolor" || ct === "24bit") return "truecolor"
@@ -105,16 +99,12 @@ function colorRefToSgr(ref, isBg) {
     return null
 }
 
-// Compile each palette entry to a complete SGR sequence that establishes
-// the absolute state for that entry. Renderer prepends a hard reset
-// before painting any switch so the SGR is always self-contained.
+// SGR prefix per palette entry. Renderer emits a hard reset before each
+// switch so the SGR is self-contained.
 export function compilePalette(palette) {
     return palette.map((entry) => compileEntry(entry || {}))
 }
 
-// Public so callers outside this module can produce one-off styled text
-// without standing up a whole palette. `styled(text, entry)` wraps the
-// text in the entry's SGR + RESET.
 export function compileEntry(entry) {
     const parts = []
     if (entry.bold) parts.push("1")
@@ -129,10 +119,7 @@ export function compileEntry(entry) {
     return ESC + parts.join(";") + "m"
 }
 
-// One-shot styled string. Caller passes the same PaletteEntry shape
-// engines/views use everywhere else; ansi.js handles the SGR
-// translation. Returns the text untouched when the entry is empty or
-// null.
+// One-shot styled string. Returns text untouched for an empty entry.
 export function styled(text, entry) {
     if (!entry) return text
     const sgr = compileEntry(entry)
@@ -140,9 +127,8 @@ export function styled(text, entry) {
     return sgr + text + RESET
 }
 
-// Terminal mode controls (not styles). Switching to the alternate
-// screen buffer preserves the user's main scrollback; line-wrap-off
-// keeps the renderer in charge of when content wraps.
+// Terminal mode controls. Alt-screen preserves the user's scrollback;
+// line-wrap-off lets the renderer own wrapping.
 export function enterAltScreen() {
     return ESC + "?1049h"
 }
@@ -156,10 +142,8 @@ export function enableLineWrap() {
     return ESC + "?7h"
 }
 
-// Strip terminal SGR / OSC / single-char escape sequences out of an
-// arbitrary string. Used by engines to clean up llama-server's stdout
-// before parsing it; complements `stripStyle` which strips lui's own
-// inline PUA palette switches.
+// Strip SGR / OSC / single-char escape sequences. Complements
+// `stripStyle` which strips lui's own PUA palette switches.
 const ANSI_STREAM_RE = (() => {
     // eslint-disable-next-line no-control-regex
     return /\x1b\[[\x20-\x3f]*[\x40-\x7e]|\x1b\][\x20-\x7e]*(?:\x07|\x1b\\)|\x1b[\x20-\x2f]*[\x30-\x7e]/g
@@ -172,9 +156,7 @@ function isSwitchChar(code) {
     return code >= 0xe000 && code <= 0xe0ff
 }
 
-// Walk a text string and emit ANSI'd output. Each switch char becomes
-// a hard reset followed by the compiled SGR for that palette entry; the
-// default entry (index 0) is `""`, so a reset alone clears style.
+// Expand inline PUA switch chars into SGR sequences.
 export function paint(text, compiled) {
     let out = ""
     for (let i = 0; i < text.length; i++) {
@@ -190,11 +172,8 @@ export function paint(text, compiled) {
     return out + RESET
 }
 
-// Visible width: count printable code units; skip switch chars (they're
-// zero-width). This is a glyph approximation — full Unicode width
-// handling (wide CJK, emoji ZWJ, combining marks) would need a heavier
-// implementation; the panels are mostly ASCII so the approximation is
-// fine.
+// Visible width approximation: count code units, skip PUA switch chars.
+// Doesn't handle wide CJK / emoji / combining marks.
 export function vwidth(text) {
     let n = 0
     for (let i = 0; i < text.length; i++) {
@@ -205,8 +184,7 @@ export function vwidth(text) {
     return n
 }
 
-// Strip palette switches and produce plain text (used for non-TTY
-// output of `lui cmd` / `lui show`).
+// Strip PUA palette switches for plain-text output.
 export function stripStyle(text) {
     let out = ""
     for (let i = 0; i < text.length; i++) {
@@ -216,9 +194,8 @@ export function stripStyle(text) {
     return out
 }
 
-// Iterate visible chars and collect their (codepoint, currentStyleIdx).
-// Used by the wrapping path to know which palette index is active when
-// a wrap point is chosen — so the continuation row can re-emit the SGR.
+// Yields { style, text } runs so wrapStyled can re-emit the active
+// palette switch at the start of each continuation row.
 export function* visibleRuns(text) {
     let style = 0
     let buf = ""
@@ -237,10 +214,8 @@ export function* visibleRuns(text) {
     if (buf) yield { style, text: buf }
 }
 
-// Wrap a palette-encoded string to `width` columns. Returns an array of
-// strings, each already palette-encoded with a leading switch char that
-// reasserts the active style at the start of the row. Word-break
-// preferred; mid-token break if a single token exceeds width.
+// Word-wrap a palette-encoded string at `width` columns. Each returned
+// row carries a leading switch char to re-assert the active style.
 export function wrapStyled(text, width) {
     if (width <= 0) return [text]
     const rows = []
@@ -325,10 +300,8 @@ function switchCharSafe(idx) {
     return String.fromCharCode(0xe000 + idx)
 }
 
-// Right-truncate from the LEFT with a leading "…" when content exceeds
-// width. Style switch chars are zero-width — we just walk the visible
-// runs in reverse to find the cut point, then re-emit the chunks we
-// kept with their style switches.
+// Left-truncate with a leading "…". Re-emits style switches for the
+// retained tail.
 export function truncateLeft(text, width) {
     if (width <= 0) return ""
     if (vwidth(text) <= width) return text
@@ -376,17 +349,12 @@ export function reset() {
     return RESET
 }
 
-// Render a single-row progress bar. Returns a palette-encoded string of
-// exactly `width` visible columns:
-//   "label [█████░░░░░] text"
-// Label and text already carry their own palette switches; the bar
-// itself is uncolored — keep it simple.
+// Single-row progress bar: "label [█████░░░░░] text".
 export function renderBar(width, label, value, max, text) {
     const frac = max ? Math.max(0, Math.min(1, value / max)) : Math.max(0, Math.min(1, value))
     const labelW = vwidth(label || "")
     const textStr = text == null ? "" : String(text)
     const textW = vwidth(textStr)
-    // structure: label + " [" + bar + "] " + text
     const overhead = labelW + 4 + textW + (textW ? 1 : 0)
     const inner = Math.max(1, width - overhead)
     const filled = Math.round(frac * inner)

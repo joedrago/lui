@@ -1,20 +1,3 @@
-// argv parser + subcommand dispatcher. Hand-rolled — no commander, no
-// minimist. lui has no flags at all: every persistent knob lives in
-// the TOML and is tuned via `lui config set/clear`. The grammar:
-//
-//   lui                            → print help
-//   lui run [NAME]                 → run a model (resumes last if absent)
-//   lui add NAME ENGINE ARGS...    → create a model (ARGS go verbatim)
-//   lui set NAME ARGS...           → replace ARGS for a model (verbatim)
-//   lui rm NAME                    → delete a model
-//   lui ssh USER@HOST              → configure a remote client
-//   lui remote HOST[:PORT]         → connect TUI to a remote lui
-//   lui websearch                  → run only the websearch server
-//   lui sandbox HARNESS [ARGS...]  → launch HARNESS under nono (verbatim)
-//   lui config                     → settings + models + commandlines
-//   lui config set PATH VALUE      → set a config value
-//   lui config clear PATH          → remove a config value
-
 import process from "node:process"
 
 import { Lui } from "./lui.js"
@@ -61,11 +44,6 @@ function fatal(msg, code = 2) {
     process.exit(code)
 }
 
-// Bare `lui config`: one comprehensive view. Three sections:
-//   Settings:     flat path/value listing of every persisted knob
-//   Models:       the rich per-model view
-//   Engine cmd:   what `llama-server …` would run for the active model
-//   Sandbox cmd:  what `lui sandbox HARNESS` would run, with HARNESS placeholder
 function runConfigDump(lui) {
     const tty = process.stdout.isTTY
     const header = (label) => process.stdout.write((tty ? styled(label, HEADER_STYLE) : label) + "\n")
@@ -78,7 +56,7 @@ function runConfigDump(lui) {
     writeDefaultConfig(setPaths, "  ")
 
     process.stdout.write("\n")
-    header("Models:")  // already capitalized; keep
+    header("Models:")
     lui.printModels({ indent: "  " })
 
     process.stdout.write("\n")
@@ -86,16 +64,13 @@ function runConfigDump(lui) {
     process.stdout.write("\n")
 }
 
-// Path warm amber (same hue as STYLE.SEGMENT_USER in the engine
-// commandline), value lavender. Lets the eye sweep down the left
-// column for paths and across to lavender for values.
 function emitPair(out, indent, path, value, tty) {
     if (tty) out.push(`${indent}${styled(path, PATH_STYLE)} ${styled(value, VAL_STYLE)}\n`)
     else out.push(`${indent}${path} ${value}\n`)
 }
 
-// Sort by path, then by value as a tiebreaker so multi-value arrays
-// (e.g. `sandbox.allow`) read in stable alphabetical order too.
+// Sort by path, then by value — keeps multi-value arrays grouped and in
+// stable alphabetical order.
 function comparePairs(a, b) {
     if (a.path < b.path) return -1
     if (a.path > b.path) return 1
@@ -126,9 +101,6 @@ function writeFlatConfig(lui, indent = "") {
     return setPaths
 }
 
-// "Default settings" lists every schema-known path the user hasn't
-// overridden yet, alongside its default — so a skim of the section is
-// a list of `lui config set PATH …` candidates.
 function writeDefaultConfig(setPaths, indent = "") {
     const out = []
     const tty = process.stdout.isTTY
@@ -139,9 +111,6 @@ function writeDefaultConfig(setPaths, indent = "") {
     process.stdout.write(out.join(""))
 }
 
-// The known persistent settings + their defaults. Built from the live
-// harness and engine registries so adding either grows the list
-// automatically.
 function schemaDefaults() {
     const out = []
     out.push({ path: "engine_port", value: "8080" })
@@ -195,26 +164,10 @@ function formatLeaf(v) {
     return String(v)
 }
 
-// `lui config` family. Two operations:
-//   set   PATH VALUE   — write a scalar, or append to a known array path
-//   clear PATH         — remove the key (or the whole array)
-//
-// PATH is dot-separated. If the first segment isn't a known top-level
-// table, the path is rooted under "global." (so `engine_port` is the
-// same as `global.engine_port` but `harness.opencode.enabled` lands at
-// the top level).
 const TOP_LEVEL_KEYS = new Set(["global", "model", "harness", "engine", "sandbox"])
 
-// Paths that are known string-array fields. `set` on one of these
-// appends rather than overwriting; `clear` removes the whole list.
-// Replacing an array means `clear` then `set`.
-const ARRAY_PATHS = new Set([
-    "sandbox.allow",
-    "sandbox.read",
-    "sandbox.write",
-    "sandbox.allow_domain",
-    "sandbox.extra"
-])
+// `set` on these paths appends; `clear` removes the whole list.
+const ARRAY_PATHS = new Set(["sandbox.allow", "sandbox.read", "sandbox.write", "sandbox.allow_domain", "sandbox.extra"])
 
 function isArrayPath(path) {
     return ARRAY_PATHS.has(path.join("."))
@@ -229,8 +182,6 @@ function resolveConfigPath(pathStr) {
     return ["global", ...parts]
 }
 
-// `global` is implicit when a path doesn't name another top-level table
-// — strip it from messages so they read the way the user typed it.
 function displayPath(path) {
     return path[0] === "global" ? path.slice(1).join(".") : path.join(".")
 }
@@ -348,9 +299,6 @@ async function main() {
     }
 
     if (verb === "add") {
-        // Verbatim passthrough after NAME ENGINE — same convention as
-        // `lui sandbox HARNESS`. Tolerate a leading `--` for muscle
-        // memory from the older grammar.
         if (rest.length < 2) fatal("add requires NAME and ENGINE")
         const [name, engineName, ...tail] = rest
         const args = tail[0] === "--" ? tail.slice(1) : tail
@@ -392,9 +340,6 @@ async function main() {
     }
 
     if (verb === "sandbox") {
-        // No flag parsing. Everything after `sandbox` is HARNESS plus
-        // verbatim args for it — `alias opencode='lui sandbox opencode'`
-        // relies on `--help` etc. reaching opencode, not lui.
         if (rest.length < 1) fatal("sandbox requires HARNESS [args...]")
         const harnessName = rest[0]
         const harnessArgs = rest.slice(1)

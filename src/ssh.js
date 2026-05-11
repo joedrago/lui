@@ -1,12 +1,6 @@
-// `lui ssh USER@HOST` (setup-share): configure each enabled harness on a
-// remote client so it talks to this machine's llama-server through a
-// reverse SSH tunnel; print the `ssh -R ...` command the user runs in
-// another terminal to bring the tunnel up.
-//
-// `lui remote HOST[:PORT]`: this machine is a client; fetch /config from
-// a server running with --public, write local opencode/pi config
-// pointing at the server, run a local web server for bsearch, then run
-// the TUI which polls the server's /data.
+// `lui ssh USER@HOST` configures harnesses on a remote client for a
+// reverse-tunneled connection to this machine. `lui remote HOST[:PORT]`
+// is the inverse — this client fetches /config from a --public server.
 
 import http from "node:http"
 import process from "node:process"
@@ -68,16 +62,7 @@ export async function sshSetupUse(lui, hostSpec) {
         process.exit(1)
     }
 
-    // The client's opencode/pi point directly at the server's llama-server
-    // over the network; our local web server only serves bsearch/setup so the
-    // browser-mediated search lives on this box where the user's real browser
-    // is.
     const llamaBaseURL = `http://${target.host}:${cfg.engine_port}/v1`
-
-    // Synthesize a Lui-side "active model" so the harnesses know how to set
-    // ctx_size, and point engineBaseURL at the remote llama-server so
-    // harness.apply uses the remote URL instead of the default localhost
-    // form.
     lui.activeModel = { name: cfg.active_model || "lui", engine: "remote", args: [] }
     lui.engineBaseURL = llamaBaseURL
     const enabled = lui.config.global.websearch !== false
@@ -183,7 +168,6 @@ async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remote
         }
     }
 
-    // Use a synthetic lui for the harness's apply that points at the remote-side ports.
     const remoteLui = {
         config: {
             global: {

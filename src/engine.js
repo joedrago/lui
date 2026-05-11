@@ -1,12 +1,6 @@
-// Engine runner + registry. Each engine module exports an `engine`
-// object (see REWRITE.md §8); this file imports them, exposes the
-// `engines` map keyed by `engine.name`, and provides `runEngine()`
-// which spawns the child and pipes its stdout through the engine's
-// `parseLine` line-by-line.
-//
-// STYLE.SEGMENT_* are shared PaletteEntry conventions so every engine
-// paints its argv segments with a coherent look. Engines are free to
-// use plain inline PaletteEntry objects instead.
+// Engine registry + runEngine(). Each engine module exports `engine`
+// (see REWRITE.md §8). STYLE.SEGMENT_* are shared per-segment palette
+// conventions; engines can use plain inline PaletteEntry objects too.
 
 import { spawn } from "node:child_process"
 import fs from "node:fs"
@@ -25,9 +19,7 @@ export const engines = {
     [llamaServer.name]: llamaServer
 }
 
-// Resolve the engine binary path. Order:
-//   1. [engine.<name>].binary, if set (absolute or relative)
-//   2. engine.defaultBinary on $PATH
+// [engine.<name>].binary if set, else engine.defaultBinary on $PATH.
 function resolveBinary(lui, engineModule, binaryHint) {
     const override = lui.config.engine?.[engineModule.name]?.binary
     const candidate = override || binaryHint || engineModule.defaultBinary
@@ -36,7 +28,6 @@ function resolveBinary(lui, engineModule, binaryHint) {
         return candidate
     }
 
-    // PATH lookup
     const pathDirs = (process.env.PATH || "").split(path.delimiter)
     for (const dir of pathDirs) {
         if (!dir) continue
@@ -51,8 +42,8 @@ function resolveBinary(lui, engineModule, binaryHint) {
     return candidate
 }
 
-// Spawn the engine child, wire stdout/stderr → parseLine, tee raw output
-// to [global].debug_log if set. Returns the ChildProcess.
+// Spawn the engine; line-pipe stdout/stderr to parseLine; tee raw to
+// [global].debug_log if set.
 export function runEngine(lui, binary, segments) {
     const argv = segments.flatMap((s) => s.args)
     const bin = resolveBinary(lui, lui.engineModule, binary)

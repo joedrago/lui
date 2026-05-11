@@ -1,7 +1,4 @@
-// Config IO. Loads ~/.config/lui.toml via smol-toml into the runtime
-// shape (lui.config.global.*, lui.config.model.*); saves it back with
-// an atomic tmp+rename. TOML emission is bespoke so `args` arrays
-// render one-entry-per-line for diff-friendly storage.
+// Config IO at ~/.config/lui.toml. Atomic tmp+rename on save.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -68,8 +65,6 @@ export class Config {
         fs.renameSync(tmp, p)
     }
 
-    // Convenience accessors used elsewhere — keeping them as methods is
-    // cleaner than reaching into nested objects from every call site.
     get activeModelName() {
         return this.global.active_model || null
     }
@@ -81,10 +76,7 @@ export class Config {
 function serialize(cfg) {
     const out = []
 
-    // [global] is scalars only. Any object-valued child accidentally
-    // landing here gets emitted as its own sub-table — but the new
-    // shape has nothing object-valued under global, so this is purely
-    // belt-and-suspenders.
+    // Belt-and-braces: catch any object-valued child of [global].
     const globalNested = []
     for (const [k, v] of Object.entries(cfg.global || {})) {
         if (v && typeof v === "object" && !Array.isArray(v)) globalNested.push(k)
@@ -106,11 +98,8 @@ function serialize(cfg) {
     return out.join("\n") + "\n"
 }
 
-// `harness`, `engines`, `models` are *maps-of-tables* (each inner key
-// is itself a table) → emit one `[NAME.INNER]` section per entry.
-// `sandbox` is a *leaf table* of scalars + arrays → emit a single
-// `[sandbox]` section. Detect by inspecting the inner entries so
-// future top-level tables of either shape just work.
+// `harness` / `engine` / `model` are map-of-tables; `sandbox` is a leaf
+// table. Detect from the children's shape so new top-levels just work.
 function emitTopLevelTable(cfg, rootKey) {
     const obj = cfg[rootKey]
     if (!obj || typeof obj !== "object") return []

@@ -1,11 +1,3 @@
-// The Lui class: orchestrator and shared state bag. main.js parses argv,
-// instantiates one Lui, and dispatches the chosen subcommand. Engines,
-// web.js, display.js, and the harnesses all read from this object.
-//
-// Engines write their bag of running state under `lui.state.*`; lui's
-// own fields (config, warnings, web, activeModel, …) live on `lui`
-// directly so the two namespaces never collide.
-
 import process from "node:process"
 
 import { Config } from "./config.js"
@@ -41,8 +33,6 @@ export class Lui {
         this.exitCode = 0
     }
 
-    // ---------- subcommand methods ----------
-
     async run(name) {
         const model = this.resolveModel(name)
         if (!model) {
@@ -53,9 +43,7 @@ export class Lui {
         this.config.setActiveModel(model.name)
         this.config.save()
 
-        // Harnesses read lui.activeModel for the chosen model name and its
-        // args (e.g. `-c 262144` for opencode's context-window field), so
-        // populate it before applyAllLocal runs.
+        // applyAllLocal reads lui.activeModel for harness configs.
         this.activeModel = model
         applyAllLocal(this)
 
@@ -191,9 +179,6 @@ export class Lui {
         emitPaintedLines(built, indent)
     }
 
-    // Just the sandbox preview line, segmented like the engine
-    // commandline and with magenta-bold overlays on every HARNESS
-    // placeholder slot.
     printSandboxCommandline() {
         const v = View()
         const p = v.panel("")
@@ -245,8 +230,6 @@ export class Lui {
             })
         })
     }
-
-    // ---------- engine lifecycle ----------
 
     resolveModel(name) {
         const wanted = name || this.config.activeModelName
@@ -322,10 +305,6 @@ export class Lui {
         process.exit(this.exitCode)
     }
 
-    // Print a short banner on the main screen after the TUI has handed
-    // the terminal back. Always includes the reason — even for clean
-    // quits, so the user sees what just happened ("user pressed q" vs.
-    // "engine exited with code 1").
     printShutdownSummary() {
         const LAVENDER_BOLD = { fg: [180, 150, 255], bold: true }
         const LABEL = { fg: [120, 100, 180] }
@@ -353,8 +332,6 @@ export class Lui {
         out.push("\n")
         process.stdout.write(out.join(""))
     }
-
-    // ---------- View composition ----------
 
     appendLuiPanel(v) {
         // The engine's own appendPanels already emits the top "lui — llm ui"
@@ -397,7 +374,6 @@ export class Lui {
         this.websearchCount += 1
     }
 
-    // Returns the list of harnesses currently enabled for this lui's config.
     enabledHarnesses() {
         const cfg = this.config.harness || {}
         return harnesses.filter((h) => cfg[h.name]?.enabled ?? h.defaultEnabled)
@@ -415,12 +391,9 @@ function formatDuration(ms) {
     return rm ? `${h}h${rm}m` : `${h}h`
 }
 
-// Render a built View to stdout, honoring per-Line `indent` (panel
-// content area) plus an optional outer indent (used to nest a model
-// listing or commandline block under a section header). On a TTY,
-// long lines wrap at the available width with a hanging indent
-// matching the line's own start column — so a 300-char engine
-// commandline reads as a tidy paragraph under its header.
+// Per-Line `indent` plus an optional outer indent. Long lines wrap at
+// the terminal width with continuation rows aligned at the same start
+// column; non-TTY skips the wrap.
 function emitPaintedLines(built, outerIndent = "") {
     const lines = built.panels[0]?.lines ?? []
     const tty = process.stdout.isTTY

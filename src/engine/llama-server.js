@@ -1,9 +1,5 @@
-// llama.cpp engine. Builds an argv (binding + policy + user), parses
-// llama-server's stdout for status fields, emits Model / Performance /
-// Server Log panels.
-//
-// Behavior ported from old/src/server.rs (parseLine, ServerState) and
-// old/src/display.rs (Model and Performance panel rendering).
+// llama.cpp engine. parseLine + appendPanels ported from
+// old/src/server.rs and old/src/display.rs.
 
 import { spawn } from "node:child_process"
 import os from "node:os"
@@ -11,11 +7,6 @@ import os from "node:os"
 import { STYLE } from "../engine.js"
 import { stripAnsi } from "../ansi.js"
 
-// Palette ported from old/src/display.rs:
-//   MUTED_PURPLE   (120,100,180)  – labels (Model:, llamacpp:, …)
-//   COLOR_NUMBER   (210,150,255)  – numeric/value spans + active markers
-//   COLOR_ALIASES  (220,215,230)  – soft off-white for alias names
-//   WARNING_AMBER  (230,180,80)   – the "(update available)" hint
 const MUTED_PURPLE = { fg: [120, 100, 180] }
 const NUMBER = { fg: [210, 150, 255] }
 const ALIAS = { fg: [220, 215, 230] }
@@ -27,11 +18,8 @@ const TEXT = {}
 
 const POLICY_ARGS = ["--metrics", "--jinja", "--log-colors", "off", "-v", "-fa", "on", "--cache-reuse", "256", "-kvu"]
 
-// Per-model defaults the engine fills in when the user didn't supply
-// the equivalent flag in `model.args`. Each entry lists every flag form
-// that should suppress injection — both lui's own form (the first one
-// passed to llama-server) and any other spelling llama-server itself
-// accepts, so a user-typed `--gpu-layers 20` still wins over `-ngl -1`.
+// Per-flag defaults injected when the user didn't supply any of these
+// aliases — so `--gpu-layers 20` suppresses `-ngl -1`.
 const DEFAULT_HINTS = [
     { flags: ["-ngl", "--gpu-layers", "--n-gpu-layers"], emit: () => ["-ngl", "-1"] },
     { flags: ["-np", "--parallel"], emit: () => ["-np", "1"] },
@@ -52,7 +40,7 @@ const LOG_RING_SIZE = 200
 const MAX_RECENT_REQUESTS = 3
 const SETUP_URL_BRIGHT_MS = 5000
 
-// Flags the engine will not let the user override — lui owns these.
+// Flags the engine won't let the user override.
 const RESERVED_FLAGS = new Set(["--host", "--port"])
 
 export const engine = {
@@ -470,8 +458,6 @@ function extractMib(line) {
     return m ? parseFloat(m[1]) : null
 }
 
-// One-shot `llama-server --version`; writes the parsed version into
-// lui.state.llamaVersion. Best-effort; non-fatal if it fails.
 async function probeVersion(lui) {
     return new Promise((resolve) => {
         const bin = lui.config.engine?.[engine.name]?.binary || engine.defaultBinary
@@ -516,7 +502,6 @@ function appendModelPanel(v, lui) {
         p.line({ align: "right" }).style(urlStyle).text(`http://${host}:${webPort}/setup`)
     }
 
-    // Memory line
     const gpuTotal = s.gpuMemMib + s.kvCacheMib + s.computeBufMib
     const cpuTotal = s.cpuMemMib + s.cpuRepackMib + s.cpuComputeMib
     if (gpuTotal > 0 || cpuTotal > 0) {
@@ -567,7 +552,6 @@ function appendModelPanel(v, lui) {
 
     p.line()
 
-    // Model line
     const modelDisplay = s.quantization ? `${s.modelName} (${s.quantization})` : s.modelName
     const aliasName = lui.activeModel?.name ?? ""
     const ln = p
@@ -580,7 +564,6 @@ function appendModelPanel(v, lui) {
         ln.style(MUTED_PURPLE).text(" — ").style(ALIAS).style(BOLD).text(aliasName).style()
     }
 
-    // Source line (--hf X or -m PATH). Inferred from model.args.
     const src = inferSource(lui.activeModel?.args || [])
     if (src) p.line({ indent: 15 }).style(DIM).text(src)
 
@@ -608,7 +591,6 @@ function appendModelPanel(v, lui) {
 
     p.line()
 
-    // llamacpp status
     const uptimeSec = Math.floor((Date.now() - (s.startedAt || Date.now())) / 1000)
     const ln2 = p.line().style(MUTED_PURPLE).text("llamacpp : ").style()
     if (s.exited) {
@@ -627,10 +609,7 @@ function appendModelPanel(v, lui) {
 
     if (s.listenUrl) p.line({ indent: 15 }).style(DIM).text(s.listenUrl)
 
-    // Full resolved argv as one dim line. The per-segment colors are
-    // useful in `lui cmd` (one-shot audit) but in the live panel they
-    // compete with the labelled fields above; keep everything muted so
-    // the status reads as supporting detail.
+    // Full resolved argv, all dim — colors compete with labels above.
     if (lui.activeModel) {
         const { binary, segments } = engine.buildArgv(lui.activeModel, lui)
         const ln = p.line({ indent: 15 }).style(DIM).text(binary)

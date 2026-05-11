@@ -1,12 +1,5 @@
-// TUI loop. Polls http://127.0.0.1:<web_port>/data every 250 ms, paints
-// the panels, repaints on terminal resize. Style is encoded inline in
-// strings as Private Use Area switch chars; ansi.compilePalette turns
-// the payload's palette into SGR sequences, and ansi.paint expands the
-// switches at render time.
-//
-// The renderer takes over the screen with the alternate-screen buffer
-// so the terminal's scrollback is preserved. Stdin is put into raw mode
-// while the TUI runs so a bare `q` or Ctrl-C quits without echoing.
+// TUI loop. Polls /data every 250 ms in the alt-screen buffer; `q` or
+// Ctrl-C quits via raw stdin.
 
 import http from "node:http"
 import process from "node:process"
@@ -33,31 +26,19 @@ import {
 
 const POLL_MS = 250
 const GUTTER = 2
-// Windows Terminal truncates characters written to the last column(s)
-// (e.g. the trailing "p" of "/setup" disappears). Treat the usable width
-// as 2 columns shy of reported width on every platform so rules, the
-// right-aligned setup URL, and header fills all stay inside the safe
-// zone. The same constant as the Rust version's saturating_sub(2).
+// Windows Terminal truncates the last column(s); shave 2 off for safety.
 const RIGHT_MARGIN = 2
 
-// Renderer-owned styles for the chrome (panel dividers, bar fill/empty,
-// bar inline text). Engines pick their own colors for the body text;
-// these only style what the renderer itself emits.
-const TITLE_STYLE = { fg: [120, 100, 180] } // MUTED_PURPLE
-const BAR_FILLED_STYLE = { fg: [180, 150, 255] } // LAVENDER
-const BAR_EMPTY_STYLE = { fg: [120, 100, 180] } // MUTED_PURPLE
-const BAR_TEXT_STYLE = { fg: [210, 150, 255] } // COLOR_NUMBER
+const TITLE_STYLE = { fg: [120, 100, 180] }
+const BAR_FILLED_STYLE = { fg: [180, 150, 255] }
+const BAR_EMPTY_STYLE = { fg: [120, 100, 180] }
+const BAR_TEXT_STYLE = { fg: [210, 150, 255] }
 
-// Alt-screen + line-wrap off + cursor off. The matching exit sequence
-// appears in stop().
 const ENTER_ALT = enterAltScreen() + disableLineWrap() + hideCursor() + cursorTo(1, 1)
 const LEAVE_ALT = showCursor() + enableLineWrap() + leaveAltScreen()
 
 export function startTui(lui) {
-    if (!process.stdout.isTTY) {
-        // No TTY: paint nothing. Useful for `lui run > log` style tests.
-        return { stop() {} }
-    }
+    if (!process.stdout.isTTY) return { stop() {} }
 
     let stopped = false
     let lastPayload = null
@@ -69,7 +50,6 @@ export function startTui(lui) {
 
     process.stdout.write(ENTER_ALT)
 
-    // Raw stdin so 'q' / Ctrl-C don't echo and we get them without Enter.
     const rawWasOn = process.stdin.isRaw
     try {
         if (process.stdin.isTTY && process.stdin.setRawMode) {
@@ -216,10 +196,6 @@ function paintLine(line, cols, compiled) {
     return wrapped.map((r) => " ".repeat(startCol) + paint(r, compiled) + reset())
 }
 
-// Renderer-side bar. Bar.label and bar.text may carry inline palette
-// switches and get expanded through `paint`; the filled and empty
-// segments are colored uniformly with the renderer's own LAVENDER /
-// MUTED_PURPLE so bars match the panel dividers visually.
 function paintBar(bar, width, compiled) {
     const frac = bar.max ? Math.max(0, Math.min(1, bar.value / bar.max)) : Math.max(0, Math.min(1, bar.value || 0))
     const label = bar.label ?? ""
@@ -244,9 +220,7 @@ function paintBar(bar, width, compiled) {
     return out
 }
 
-// renderBar from ansi.js is no longer the path the TUI takes for bars,
-// but the import lives there for tests / programmatic callers.
-void renderBar
+void renderBar // kept exported from ansi.js for programmatic callers
 
 function fetchData(port) {
     return new Promise((resolve, reject) => {

@@ -1,7 +1,5 @@
-// Harness registry and shared machinery. Each harness module exports a
-// `harness` object (see REWRITE.md §9). This file imports them, exposes
-// the `harnesses` array, and provides the shared apply-local flow and
-// the lui-web-search SKILL.md generator.
+// Harness registry + shared apply-local flow + lui-web-search SKILL.md.
+// Each harness module exports `harness` (see REWRITE.md §9).
 
 import fs from "node:fs"
 import path from "node:path"
@@ -12,10 +10,8 @@ import { harness as pi } from "./pi.js"
 
 export const harnesses = [opencode, pi]
 
-// Walk every shipped harness on each invocation — not just the enabled
-// ones — so a harness the user *just disabled* gets its stale
-// lui-web-search SKILL.md cleaned up. Config-file edits are still gated
-// on `enabled`. Matches the Rust update_all_local flow.
+// Walks every shipped harness so just-disabled ones get their stale
+// SKILL.md swept; config edits stay gated on `enabled`.
 export function applyAllLocal(lui) {
     for (const h of harnesses) {
         try {
@@ -37,10 +33,7 @@ function applyOneLocal(lui, harness, enabled) {
     const websearch = lui.config.global.websearch !== false
     const wantSkill = enabled && websearch
 
-    // Skill add/remove runs regardless of `enabled` so a just-disabled
-    // harness has its stale SKILL.md swept. Skip creating the parent
-    // dir purely for a remove — if the harness was never installed
-    // there's nothing to remove.
+    // Skill add/remove runs regardless of `enabled` (sweep stale files).
     const skillDir = path.join(dir, "skills", "lui-web-search")
     const skillPath = path.join(skillDir, "SKILL.md")
     if (wantSkill) {

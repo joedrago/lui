@@ -1,15 +1,4 @@
-// HTTP server. Single raw node:http instance with a small route
-// dispatcher. Endpoints:
-//
-//   GET  /data      → wire-format View (one fresh View per request,
-//                     lui + engine append into it, .build() serializes)
-//   GET  /config    → small JSON the `lui remote` client uses to discover
-//                     ports / model name / version
-//   GET  /setup     → the lui-grab bookmarklet installer page
-//   GET  /bsearch   → browser-mediated web search; opens a Google tab and
-//                     blocks (up to 120s) until the bookmarklet POSTs
-//                     results to /results, or returns 504 on timeout
-//   POST /results   → the bookmarklet's callback; unblocks /bsearch
+// HTTP server: /data /config /setup /bsearch /results.
 
 import http from "node:http"
 import os from "node:os"

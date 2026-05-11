@@ -1,8 +1,5 @@
-// View builder for the /data wire format.
-//
-// Callers (lui and every engine) write panels onto a single shared View
-// per /data response. Styled text is encoded inline using Private Use
-// Area code points U+E000..U+E0FF, each one a switch to palette[index].
+// View builder for the /data wire format. Style is encoded inline as
+// PUA code points U+E000..U+E0FF indexing into a per-View palette.
 // palette[0] is always {} (the default style), so emitting  is
 // the implicit "back to default" reset.
 //

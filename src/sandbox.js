@@ -1,14 +1,5 @@
-// `lui sandbox HARNESS [args...]`: launch the chosen harness wrapped in
-// nono (https://nono.sh). Everything after HARNESS reaches the harness
-// verbatim — so `alias opencode='lui sandbox opencode'` works and
-// `opencode --help` ends up at the right place.
-//
-// All knobs live under `[sandbox]` in lui.toml (allow_cwd,
-// block_net, allow_gpu, rollback, silent, profile, bin, dev_tools, plus
-// the repeatable string arrays allow/read/write/allow_domain/extra).
-// Defaults chosen to make "lui sandbox HARNESS just works" the common
-// case for agentic harnesses: cwd granted R+W, dev toolchains auto-
-// allowed, GPU off, network on, no auto-rollback.
+// `lui sandbox HARNESS [args...]`: launch HARNESS under nono
+// (https://nono.sh). Knobs live under [sandbox] in lui.toml.
 
 import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs"
@@ -21,9 +12,6 @@ import { STYLE } from "./engine.js"
 const PROFILE_OPT_OUT = "none"
 const FALLBACK_PROFILE = "default"
 
-// Segment styles. The HARNESS placeholder is overlaid on top of these
-// per-token by the printer, so the magenta only lands on the actual
-// placeholder slots.
 const SEG_VERB = STYLE.SEGMENT_POLICY
 const SEG_PROFILE = STYLE.SEGMENT_BINDING
 const SEG_POLICY = STYLE.SEGMENT_POLICY
@@ -86,15 +74,8 @@ function nonoProfileExists(bin, name) {
     }
 }
 
-// Static preview of what `lui sandbox HARNESS` would run, with the
-// literal string "HARNESS" standing in everywhere the actual harness
-// name would land — both as the profile (when auto-detect is in play)
-// and as the binary after `--`. Used by `lui cmd` so users can audit
-// the sandbox invocation without launching anything. No nono probe.
-//
-// Returns styled segments (matching the engine commandline shape) so
-// the renderer can color-code each role the same way it does the
-// llama-server argv.
+// Styled-segment preview of `lui sandbox HARNESS`; "HARNESS" stands in
+// wherever the real harness name would land. No nono probe.
 export function previewSandboxArgs(lui) {
     const cfg = lui.config.sandbox || {}
     const bin = cfg.bin || "nono"
@@ -111,12 +92,6 @@ export function previewSandboxArgs(lui) {
     return { bin, segments }
 }
 
-// Group nono args by semantic role so the renderer can color them:
-//   verb       → "run"                               (policy dim)
-//   profile    → "-p PROFILE"                        (cyan; PROFILE may be HARNESS)
-//   policy     → -s / --allow . / --allow-cwd / --allow-gpu / --block-net / --rollback
-//   defaults   → --allow $CARGO_HOME … (auto-detected dev tools)
-//   user       → --allow / --read / --write / --allow-domain / extra (user-configured)
 function buildNonoSegments(cfg, profile) {
     const segments = []
     segments.push({ name: "verb", style: SEG_VERB, args: ["run"] })
@@ -125,12 +100,8 @@ function buildNonoSegments(cfg, profile) {
 
     const policy = []
     if (cfg.silent) policy.push("-s")
-    if (cfg.allow_cwd !== false) {
-        // `--allow .` is R+W on the cwd; `--allow-cwd` skips nono's
-        // first-run prompt for the same path. Pair them so an agent can
-        // both read and write the project tree without friction.
-        policy.push("--allow", ".", "--allow-cwd")
-    }
+    // `--allow .` is R+W cwd; `--allow-cwd` skips nono's first-run prompt.
+    if (cfg.allow_cwd !== false) policy.push("--allow", ".", "--allow-cwd")
     if (cfg.allow_gpu === true) policy.push("--allow-gpu")
     if (cfg.block_net) policy.push("--block-net")
     if (cfg.rollback) policy.push("--rollback")
@@ -153,11 +124,8 @@ function buildNonoSegments(cfg, profile) {
     return segments
 }
 
-// Canonical toolchain directories an agent typically needs to invoke
-// cargo / go / npm / bun / pnpm / pip / etc. Granted as `--allow`
-// (R+W) since these tools write caches on first use; read-only would
-// silently break fetches. Skip non-existing paths so the preview stays
-// tight.
+// Toolchain dirs (cargo, go, npm, bun, pnpm, pip, …) granted R+W so
+// first-run fetches can populate caches. Non-existing paths skipped.
 function existingDevToolDirs() {
     const home = os.homedir()
     const envOrHome = (envKey, rel) => {
