@@ -112,7 +112,10 @@ export function compilePalette(palette) {
     return palette.map((entry) => compileEntry(entry || {}))
 }
 
-function compileEntry(entry) {
+// Public so callers outside this module can produce one-off styled text
+// without standing up a whole palette. `styled(text, entry)` wraps the
+// text in the entry's SGR + RESET.
+export function compileEntry(entry) {
     const parts = []
     if (entry.bold) parts.push("1")
     if (entry.dim) parts.push("2")
@@ -124,6 +127,45 @@ function compileEntry(entry) {
     if (bg) parts.push(bg)
     if (parts.length === 0) return ""
     return ESC + parts.join(";") + "m"
+}
+
+// One-shot styled string. Caller passes the same PaletteEntry shape
+// engines/views use everywhere else; ansi.js handles the SGR
+// translation. Returns the text untouched when the entry is empty or
+// null.
+export function styled(text, entry) {
+    if (!entry) return text
+    const sgr = compileEntry(entry)
+    if (!sgr) return text
+    return sgr + text + RESET
+}
+
+// Terminal mode controls (not styles). Switching to the alternate
+// screen buffer preserves the user's main scrollback; line-wrap-off
+// keeps the renderer in charge of when content wraps.
+export function enterAltScreen() {
+    return ESC + "?1049h"
+}
+export function leaveAltScreen() {
+    return ESC + "?1049l"
+}
+export function disableLineWrap() {
+    return ESC + "?7l"
+}
+export function enableLineWrap() {
+    return ESC + "?7h"
+}
+
+// Strip terminal SGR / OSC / single-char escape sequences out of an
+// arbitrary string. Used by engines to clean up llama-server's stdout
+// before parsing it; complements `stripStyle` which strips lui's own
+// inline PUA palette switches.
+const ANSI_STREAM_RE = (() => {
+    // eslint-disable-next-line no-control-regex
+    return /\x1b\[[\x20-\x3f]*[\x40-\x7e]|\x1b\][\x20-\x7e]*(?:\x07|\x1b\\)|\x1b[\x20-\x2f]*[\x30-\x7e]/g
+})()
+export function stripAnsi(s) {
+    return s.replace(ANSI_STREAM_RE, "")
 }
 
 function isSwitchChar(code) {

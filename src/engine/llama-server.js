@@ -9,6 +9,7 @@ import { spawn } from "node:child_process"
 import os from "node:os"
 
 import { STYLE } from "../engine.js"
+import { stripAnsi } from "../ansi.js"
 
 // Palette ported from old/src/display.rs:
 //   MUTED_PURPLE   (120,100,180)  – labels (Model:, llamacpp:, …)
@@ -53,13 +54,6 @@ const SETUP_URL_BRIGHT_MS = 5000
 
 // Flags the engine will not let the user override — lui owns these.
 const RESERVED_FLAGS = new Set(["--host", "--port"])
-
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[\x20-\x3f]*[\x40-\x7e]|\x1b\][\x20-\x7e]*(?:\x07|\x1b\\)|\x1b[\x20-\x2f]*[\x30-\x7e]/g
-
-function stripAnsi(s) {
-    return s.replace(ANSI_RE, "")
-}
 
 export const engine = {
     name: "llama-server",

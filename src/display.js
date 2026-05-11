@@ -13,7 +13,9 @@ import process from "node:process"
 
 import {
     compilePalette,
+    compileEntry,
     paint,
+    styled,
     vwidth,
     cursorTo,
     clearLine,
@@ -22,7 +24,11 @@ import {
     reset,
     wrapStyled,
     truncateLeft,
-    renderBar
+    renderBar,
+    enterAltScreen,
+    leaveAltScreen,
+    disableLineWrap,
+    enableLineWrap
 } from "./ansi.js"
 
 const POLL_MS = 250
@@ -34,19 +40,18 @@ const GUTTER = 2
 // zone. The same constant as the Rust version's saturating_sub(2).
 const RIGHT_MARGIN = 2
 
-// Renderer-owned colors for the chrome (panel dividers, bar fill/empty,
+// Renderer-owned styles for the chrome (panel dividers, bar fill/empty,
 // bar inline text). Engines pick their own colors for the body text;
 // these only style what the renderer itself emits.
-const SGR_RESET = "\x1b[0m"
-const TITLE_SGR = "\x1b[38;2;120;100;180m" // MUTED_PURPLE
-const BAR_FILLED_SGR = "\x1b[38;2;180;150;255m" // LAVENDER
-const BAR_EMPTY_SGR = "\x1b[38;2;120;100;180m" // MUTED_PURPLE
-const BAR_TEXT_SGR = "\x1b[38;2;210;150;255m" // COLOR_NUMBER
+const TITLE_STYLE = { fg: [120, 100, 180] } // MUTED_PURPLE
+const BAR_FILLED_STYLE = { fg: [180, 150, 255] } // LAVENDER
+const BAR_EMPTY_STYLE = { fg: [120, 100, 180] } // MUTED_PURPLE
+const BAR_TEXT_STYLE = { fg: [210, 150, 255] } // COLOR_NUMBER
 
-// Alt-screen + bracketed-paste off + cursor off. The matching exit
-// sequence appears in stop().
-const ENTER_ALT = "\x1b[?1049h\x1b[?7l" + hideCursor() + cursorTo(1, 1)
-const LEAVE_ALT = showCursor() + "\x1b[?7h\x1b[?1049l"
+// Alt-screen + line-wrap off + cursor off. The matching exit sequence
+// appears in stop().
+const ENTER_ALT = enterAltScreen() + disableLineWrap() + hideCursor() + cursorTo(1, 1)
+const LEAVE_ALT = showCursor() + enableLineWrap() + leaveAltScreen()
 
 export function startTui(lui) {
     if (!process.stdout.isTTY) {
@@ -121,17 +126,17 @@ export function startTui(lui) {
             const isLast = pi === lastPanelIdx
 
             // Title divider: "  ── TITLE ─────…─" in muted purple, full
-            // width to the right edge.
+            // width to the right edge. paint() ends with a hard reset
+            // so we have to re-establish the title style on each side
+            // of the inline title.
+            const titleSgr = compileEntry(TITLE_STYLE)
             buf += cursorTo(row, 1) + clearLine()
-            buf += " ".repeat(GUTTER) + TITLE_SGR + "── "
+            buf += " ".repeat(GUTTER) + titleSgr + "── "
             const title = panel.title || ""
-            // Title text may carry inline palette switches; paint() expands
-            // them and a hard reset at the end means our title-style SGR
-            // gets clobbered, so we re-apply it before the trailing dashes.
-            buf += paint(title, compiled) + TITLE_SGR + " "
+            buf += paint(title, compiled) + titleSgr + " "
             const titleVw = vwidth(title)
             const dashRoom = Math.max(0, cols - GUTTER - 4 - titleVw)
-            buf += "─".repeat(dashRoom) + SGR_RESET
+            buf += "─".repeat(dashRoom) + reset()
             row += 1
 
             for (const line of panel.lines || []) {
@@ -150,7 +155,7 @@ export function startTui(lui) {
                 const startCol = GUTTER + indent
                 buf += cursorTo(row, 1) + clearLine() + " ".repeat(startCol)
                 buf += paintBar(bar, Math.max(1, cols - startCol), compiled)
-                buf += SGR_RESET
+                buf += reset()
                 row += 1
             }
 
@@ -181,7 +186,7 @@ export function startTui(lui) {
             // ignore
         }
         process.stdout.off?.("resize", onResize)
-        process.stdout.write(LEAVE_ALT + SGR_RESET)
+        process.stdout.write(LEAVE_ALT + reset())
     }
 
     setTimeout(tick, 0)
@@ -230,12 +235,12 @@ function paintBar(bar, width, compiled) {
     const empty = Math.max(0, inner - filled)
 
     let out = ""
-    if (label) out += paint(label, compiled) + SGR_RESET + " "
+    if (label) out += paint(label, compiled) + reset() + " "
     out += "["
-    out += BAR_FILLED_SGR + "█".repeat(filled)
-    out += BAR_EMPTY_SGR + "░".repeat(empty)
-    out += SGR_RESET + "]"
-    if (text) out += " " + BAR_TEXT_SGR + paint(text, compiled) + SGR_RESET
+    out += styled("█".repeat(filled), BAR_FILLED_STYLE)
+    out += styled("░".repeat(empty), BAR_EMPTY_STYLE)
+    out += "]"
+    if (text) out += " " + styled(paint(text, compiled), BAR_TEXT_STYLE)
     return out
 }
 

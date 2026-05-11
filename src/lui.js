@@ -10,7 +10,7 @@ import process from "node:process"
 
 import { Config } from "./config.js"
 import { View } from "./wire.js"
-import { stripStyle, compilePalette, paint, wrapStyled, vwidth } from "./ansi.js"
+import { stripStyle, compilePalette, paint, wrapStyled, vwidth, styled } from "./ansi.js"
 import { engines, runEngine } from "./engine.js"
 import { startWebServer } from "./web.js"
 import { startTui } from "./display.js"
@@ -327,11 +327,10 @@ export class Lui {
     // quits, so the user sees what just happened ("user pressed q" vs.
     // "engine exited with code 1").
     printShutdownSummary() {
-        const LAVENDER = "\x1b[38;2;180;150;255m"
-        const MUTED = "\x1b[38;2;120;100;180m"
-        const RED = "\x1b[38;2;230;100;100m"
-        const RESET = "\x1b[0m"
-        const BOLD = "\x1b[1m"
+        const LAVENDER_BOLD = { fg: [180, 150, 255], bold: true }
+        const LABEL = { fg: [120, 100, 180] }
+        const FATAL_LABEL = { fg: [230, 100, 100], bold: true }
+        const FATAL_BODY = { fg: [230, 100, 100] }
 
         const uptimeMs = Date.now() - this.startedAt
         const uptime = formatDuration(uptimeMs)
@@ -341,15 +340,15 @@ export class Lui {
 
         const out = []
         out.push("\n")
-        out.push(`${BOLD}${LAVENDER}lui${RESET} shutting down\n`)
-        if (model) out.push(`  ${MUTED}Model   :${RESET} ${model}\n`)
-        out.push(`  ${MUTED}Uptime  :${RESET} ${uptime}\n`)
+        out.push(`${styled("lui", LAVENDER_BOLD)} shutting down\n`)
+        if (model) out.push(`  ${styled("Model   :", LABEL)} ${model}\n`)
+        out.push(`  ${styled("Uptime  :", LABEL)} ${uptime}\n`)
         if (this.state?.requestCount != null) {
-            out.push(`  ${MUTED}Requests:${RESET} ${this.state.requestCount}\n`)
+            out.push(`  ${styled("Requests:", LABEL)} ${this.state.requestCount}\n`)
         }
-        out.push(`  ${MUTED}Reason  :${RESET} ${reason}\n`)
+        out.push(`  ${styled("Reason  :", LABEL)} ${reason}\n`)
         if (fatal) {
-            out.push(`\n  ${BOLD}${RED}lui aborted:${RESET} ${RED}${fatal}${RESET}\n`)
+            out.push(`\n  ${styled("lui aborted:", FATAL_LABEL)} ${styled(fatal, FATAL_BODY)}\n`)
         }
         out.push("\n")
         process.stdout.write(out.join(""))

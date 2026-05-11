@@ -20,6 +20,11 @@ import process from "node:process"
 import { Lui } from "./lui.js"
 import { harnesses } from "./harness/index.js"
 import { engines } from "./engine.js"
+import { styled } from "./ansi.js"
+
+const HEADER_STYLE = { fg: [120, 100, 180] }
+const PATH_STYLE = { fg: [230, 200, 140] }
+const VAL_STYLE = { fg: [210, 150, 255] }
 
 const SUBCOMMANDS = new Set(["run", "add", "set", "clone", "rm", "ssh", "remote", "websearch", "sandbox", "config"])
 
@@ -58,9 +63,7 @@ function fatal(msg, code = 2) {
 //   Sandbox cmd:  what `lui sandbox HARNESS` would run, with HARNESS placeholder
 function runConfigDump(lui) {
     const tty = process.stdout.isTTY
-    const HEADER_SGR = tty ? "\x1b[38;2;120;100;180m" : ""
-    const RESET = tty ? "\x1b[0m" : ""
-    const header = (label) => process.stdout.write(`${HEADER_SGR}${label}${RESET}\n`)
+    const header = (label) => process.stdout.write((tty ? styled(label, HEADER_STYLE) : label) + "\n")
 
     header("Active Settings:")
     const setPaths = writeFlatConfig(lui, "  ")
@@ -81,12 +84,8 @@ function runConfigDump(lui) {
 // Path warm amber (same hue as STYLE.SEGMENT_USER in the engine
 // commandline), value lavender. Lets the eye sweep down the left
 // column for paths and across to lavender for values.
-const PATH_SGR = "\x1b[38;2;230;200;140m"
-const VAL_SGR = "\x1b[38;2;210;150;255m"
-const SGR_RESET = "\x1b[0m"
-
 function emitPair(out, indent, path, value, tty) {
-    if (tty) out.push(`${indent}${PATH_SGR}${path}${SGR_RESET} ${VAL_SGR}${value}${SGR_RESET}\n`)
+    if (tty) out.push(`${indent}${styled(path, PATH_STYLE)} ${styled(value, VAL_STYLE)}\n`)
     else out.push(`${indent}${path} ${value}\n`)
 }
 
@@ -160,11 +159,11 @@ function schemaDefaults() {
     out.push({ path: "sandbox.dev_tools", value: "true" })
     out.push({ path: "sandbox.profile", value: "(auto-detected from harness name)" })
     out.push({ path: "sandbox.bin", value: "nono" })
-    out.push({ path: "sandbox.allow", value: "(empty list)" })
-    out.push({ path: "sandbox.read", value: "(empty list)" })
-    out.push({ path: "sandbox.write", value: "(empty list)" })
-    out.push({ path: "sandbox.allow_domain", value: "(empty list)" })
-    out.push({ path: "sandbox.extra", value: "(empty list)" })
+    out.push({ path: "sandbox.allow", value: "[]" })
+    out.push({ path: "sandbox.read", value: "[]" })
+    out.push({ path: "sandbox.write", value: "[]" })
+    out.push({ path: "sandbox.allow_domain", value: "[]" })
+    out.push({ path: "sandbox.extra", value: "[]" })
 
     return out
 }
