@@ -16,8 +16,20 @@ import path from "node:path"
 import os from "node:os"
 import process from "node:process"
 
+import { STYLE } from "./engine.js"
+
 const PROFILE_OPT_OUT = "none"
 const FALLBACK_PROFILE = "default"
+
+// Segment styles. The HARNESS placeholder is overlaid on top of these
+// per-token by the printer, so the magenta only lands on the actual
+// placeholder slots.
+const SEG_VERB = STYLE.SEGMENT_POLICY
+const SEG_PROFILE = STYLE.SEGMENT_BINDING
+const SEG_POLICY = STYLE.SEGMENT_POLICY
+const SEG_DEFAULTS = STYLE.SEGMENT_DEFAULTS
+const SEG_USER = STYLE.SEGMENT_USER
+const SEG_SEP = STYLE.SEGMENT_POLICY
 
 export async function runSandbox(lui, harnessName, harnessArgs) {
     if (!harnessName) {
@@ -27,7 +39,8 @@ export async function runSandbox(lui, harnessName, harnessArgs) {
     const cfg = lui.config.sandbox || {}
     const bin = cfg.bin || "nono"
     const profile = resolveProfile(cfg, bin, harnessName)
-    const nonoArgs = buildNonoArgs(cfg, profile)
+    const segments = buildNonoSegments(cfg, profile)
+    const nonoArgs = segments.flatMap((s) => s.args)
     const argv = [...nonoArgs, "--", harnessName, ...harnessArgs]
 
     const child = spawn(bin, argv, { stdio: "inherit" })
@@ -78,6 +91,10 @@ function nonoProfileExists(bin, name) {
 // name would land — both as the profile (when auto-detect is in play)
 // and as the binary after `--`. Used by `lui cmd` so users can audit
 // the sandbox invocation without launching anything. No nono probe.
+//
+// Returns styled segments (matching the engine commandline shape) so
+// the renderer can color-code each role the same way it does the
+// llama-server argv.
 export function previewSandboxArgs(lui) {
     const cfg = lui.config.sandbox || {}
     const bin = cfg.bin || "nono"
@@ -88,39 +105,52 @@ export function previewSandboxArgs(lui) {
     } else {
         profile = "HARNESS"
     }
-    const args = buildNonoArgs(cfg, profile)
-    args.push("--", "HARNESS")
-    return { bin, args }
+    const segments = buildNonoSegments(cfg, profile)
+    segments.push({ name: "separator", style: SEG_SEP, args: ["--"] })
+    segments.push({ name: "harness", style: SEG_USER, args: ["HARNESS"] })
+    return { bin, segments }
 }
 
-function buildNonoArgs(cfg, profile) {
-    const out = ["run"]
-    if (profile) out.push("-p", profile)
+// Group nono args by semantic role so the renderer can color them:
+//   verb       → "run"                               (policy dim)
+//   profile    → "-p PROFILE"                        (cyan; PROFILE may be HARNESS)
+//   policy     → -s / --allow . / --allow-cwd / --allow-gpu / --block-net / --rollback
+//   defaults   → --allow $CARGO_HOME … (auto-detected dev tools)
+//   user       → --allow / --read / --write / --allow-domain / extra (user-configured)
+function buildNonoSegments(cfg, profile) {
+    const segments = []
+    segments.push({ name: "verb", style: SEG_VERB, args: ["run"] })
 
-    if (cfg.silent) out.push("-s")
+    if (profile) segments.push({ name: "profile", style: SEG_PROFILE, args: ["-p", profile] })
 
+    const policy = []
+    if (cfg.silent) policy.push("-s")
     if (cfg.allow_cwd !== false) {
         // `--allow .` is R+W on the cwd; `--allow-cwd` skips nono's
         // first-run prompt for the same path. Pair them so an agent can
         // both read and write the project tree without friction.
-        out.push("--allow", ".", "--allow-cwd")
+        policy.push("--allow", ".", "--allow-cwd")
     }
-
-    if (cfg.allow_gpu === true) out.push("--allow-gpu")
-    if (cfg.block_net) out.push("--block-net")
-    if (cfg.rollback) out.push("--rollback")
+    if (cfg.allow_gpu === true) policy.push("--allow-gpu")
+    if (cfg.block_net) policy.push("--block-net")
+    if (cfg.rollback) policy.push("--rollback")
+    if (policy.length) segments.push({ name: "policy", style: SEG_POLICY, args: policy })
 
     if (cfg.dev_tools !== false) {
-        for (const dir of existingDevToolDirs()) out.push("--allow", dir)
+        const devArgs = []
+        for (const dir of existingDevToolDirs()) devArgs.push("--allow", dir)
+        if (devArgs.length) segments.push({ name: "defaults", style: SEG_DEFAULTS, args: devArgs })
     }
 
-    for (const dir of cfg.allow || []) out.push("--allow", dir)
-    for (const dir of cfg.read || []) out.push("--read", dir)
-    for (const dir of cfg.write || []) out.push("--write", dir)
-    for (const dom of cfg.allow_domain || []) out.push("--allow-domain", dom)
-    for (const tok of cfg.extra || []) out.push(tok)
+    const userArgs = []
+    for (const dir of cfg.allow || []) userArgs.push("--allow", dir)
+    for (const dir of cfg.read || []) userArgs.push("--read", dir)
+    for (const dir of cfg.write || []) userArgs.push("--write", dir)
+    for (const dom of cfg.allow_domain || []) userArgs.push("--allow-domain", dom)
+    for (const tok of cfg.extra || []) userArgs.push(tok)
+    if (userArgs.length) segments.push({ name: "user", style: SEG_USER, args: userArgs })
 
-    return out
+    return segments
 }
 
 // Canonical toolchain directories an agent typically needs to invoke

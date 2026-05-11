@@ -6,3 +6,4 @@ npm-debug.log*
 # Old Rust build artifacts (the old/ tree is reference-only)
 old/
 .claude
+package-lock.json

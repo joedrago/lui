@@ -52,17 +52,18 @@ function resolveBinary(lui, engineModule, binaryHint) {
 }
 
 // Spawn the engine child, wire stdout/stderr → parseLine, tee raw output
-// to lui.debugLogPath if set. Returns the ChildProcess.
+// to [global].debug_log if set. Returns the ChildProcess.
 export function runEngine(lui, binary, segments) {
     const argv = segments.flatMap((s) => s.args)
     const bin = resolveBinary(lui, lui.engineModule, binary)
 
     let debugFd = null
-    if (lui.debugLogPath) {
+    const debugPath = lui.config.global?.debug_log
+    if (debugPath) {
         try {
-            debugFd = fs.openSync(lui.debugLogPath, "w")
+            debugFd = fs.openSync(debugPath, "w")
         } catch (e) {
-            lui.addWarning(`--debug: cannot open ${lui.debugLogPath}: ${e.message}`)
+            lui.addWarning(`debug_log: cannot open ${debugPath}: ${e.message}`)
         }
     }
 

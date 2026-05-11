@@ -10,7 +10,7 @@ import process from "node:process"
 
 import { Config } from "./config.js"
 import { View } from "./wire.js"
-import { stripStyle } from "./ansi.js"
+import { stripStyle, compilePalette, paint, wrapStyled, vwidth } from "./ansi.js"
 import { engines, runEngine } from "./engine.js"
 import { startWebServer } from "./web.js"
 import { startTui } from "./display.js"
@@ -36,9 +36,6 @@ export class Lui {
 
         this.web = null
         this.tui = null
-
-        this.debugLogPath = null
-        this.publicBind = false
 
         this.shuttingDown = false
         this.exitCode = 0
@@ -128,120 +125,99 @@ export class Lui {
         process.stdout.write(`Removed "${name}".\n`)
     }
 
-    ls() {
+    clone(newName, oldName) {
+        if (newName === oldName) {
+            process.stderr.write(`lui: clone needs a different NEWNAME than OLDNAME.\n`)
+            process.exit(1)
+        }
+        const src = this.config.model[oldName]
+        if (!src) {
+            process.stderr.write(`lui: model "${oldName}" not found.\n`)
+            process.exit(1)
+        }
+        if (this.config.model[newName]) {
+            process.stderr.write(`lui: model "${newName}" already exists. Use \`lui rm ${newName}\` first.\n`)
+            process.exit(1)
+        }
+        this.config.model[newName] = { engine: src.engine, args: [...(src.args || [])] }
+        this.config.save()
+        process.stdout.write(`Cloned "${oldName}" → "${newName}" (engine ${src.engine}).\n`)
+    }
+
+    printModels({ indent = "" } = {}) {
         const names = Object.keys(this.config.model).sort()
         if (!names.length) {
-            process.stdout.write("(no models — try `lui add NAME ENGINE -- ARGS`)\n")
+            process.stdout.write(`${indent}(no models — try \`lui add NAME ENGINE ARGS...\`)\n`)
             return
         }
         const active = this.config.activeModelName
-        for (const name of names) {
+
+        const v = View()
+        const p = v.panel("")
+        const ACTIVE_DOT = { fg: [230, 200, 140], bold: true }
+        const NAME = { bold: true }
+        const ENGINE_NAME = { fg: "cyan" }
+        const DIM_TEXT = { dim: true }
+
+        for (let i = 0; i < names.length; i++) {
+            const name = names[i]
             const m = this.config.model[name]
-            const star = name === active ? "*" : " "
-            const args = (m.args || []).join(" ")
-            process.stdout.write(`${star} ${name}  [${m.engine}]  ${args}\n`)
+            const isActive = name === active
+
+            // Header: ● name  engine
+            const ln = p.line()
+            if (isActive) ln.style(ACTIVE_DOT).text("● ").style()
+            else ln.style(DIM_TEXT).text("○ ").style()
+            ln.style(NAME).text(name).style().text("  ").style(ENGINE_NAME).text(m.engine).style()
+
+            // Body: the model's full resolved engine commandline, with
+            // per-segment colors (binding/policy/defaults/user). This
+            // is the same payload `lui run NAME` would spawn.
+            const engineModule = engines[m.engine]
+            if (engineModule) {
+                const model = { name, engine: m.engine, args: m.args || [] }
+                const { binary, segments } = engineModule.buildArgv(model, this)
+                const cmdLine = p.line({ indent: 4 }).text(binary)
+                for (const seg of segments) {
+                    if (!seg.args.length) continue
+                    cmdLine.text(" ").style(seg.style ?? {}).text(seg.args.join(" ")).style()
+                }
+            }
+
+            if (i < names.length - 1) p.line()
         }
-        process.stdout.write("\n(use `lui show NAME` for full details)\n")
+
+        const built = v.build()
+        emitPaintedLines(built, indent)
     }
 
-    show(name) {
-        const out = []
-        const tty = process.stdout.isTTY
-        const emit = (s) => out.push(tty ? s : stripStyle(s))
-
-        emit("[global]\n")
-        for (const [k, v] of Object.entries(this.config.global)) {
-            if (k === "harness" || k === "engine") continue
-            emit(`${k} = ${tomlScalar(v)}\n`)
-        }
-        const harness = this.config.harness || {}
-        for (const h of Object.keys(harness).sort()) {
-            emit(`\n[harness.${h}]\n`)
-            for (const [k, v] of Object.entries(harness[h] || {})) emit(`${k} = ${tomlScalar(v)}\n`)
-        }
-        const eng = this.config.engine || {}
-        for (const e of Object.keys(eng).sort()) {
-            emit(`\n[engine.${e}]\n`)
-            for (const [k, v] of Object.entries(eng[e] || {})) emit(`${k} = ${tomlScalar(v)}\n`)
-        }
-        const sb = this.config.sandbox || {}
-        if (Object.keys(sb).length) {
-            emit(`\n[sandbox]\n`)
-            for (const [k, v] of Object.entries(sb)) emit(`${k} = ${tomlScalar(v)}\n`)
-        }
-
-        const names = name ? [name].filter((n) => this.config.model[n]) : Object.keys(this.config.model).sort()
-        for (const n of names) {
-            const m = this.config.model[n]
-            emit(`\n[model.${tomlKey(n)}]\n`)
-            emit(`engine = ${tomlScalar(m.engine)}\n`)
-            const a = m.args || []
-            if (a.length === 0) emit(`args = []\n`)
-            else emit(`args = [\n${a.map((x) => `    ${tomlScalar(x)}`).join(",\n")}\n]\n`)
-        }
-        if (name && !names.length) {
-            process.stderr.write(`lui: model "${name}" not found.\n`)
-            process.exit(1)
-        }
-        process.stdout.write(out.join(""))
-    }
-
-    cmd(name) {
-        const model = this.resolveModel(name)
-        if (!model) {
-            process.stderr.write(`lui: no model to print. Add one with \`lui add NAME ENGINE -- ARGS\`.\n`)
-            process.exit(1)
-        }
-        const engineModule = engines[model.engine]
-        if (!engineModule) {
-            process.stderr.write(`lui: model "${model.name}" has unknown engine "${model.engine}".\n`)
-            process.exit(1)
-        }
-        const { binary, segments, errors } = engineModule.buildArgv(model, this)
-        if (errors?.length) {
-            for (const e of errors) process.stderr.write(`lui: ${e}\n`)
-            process.exit(1)
-        }
-
+    // Just the sandbox preview line, segmented like the engine
+    // commandline and with magenta-bold overlays on every HARNESS
+    // placeholder slot.
+    printSandboxCommandline() {
         const v = View()
         const p = v.panel("")
         const HEADER = { fg: [120, 100, 180] }
         const HARNESS = { fg: "magenta", bold: true }
-        const INDENT = "    "
 
-        p.line().style(HEADER).text("Engine commandline:")
-        const engineLine = p.line().text(INDENT + binary)
-        for (const seg of segments) {
-            if (!seg.args.length) continue
-            engineLine.text(" ").style(seg.style ?? {}).text(seg.args.join(" ")).style()
-        }
-
-        p.line()
-
-        // Sandbox preview with `HARNESS` standing in for the harness
-        // name in both the profile slot (when auto-detected) and the
-        // trailing binary slot. Highlighted in magenta so the
-        // substitution points are visible at a glance.
-        p.line().style(HEADER).text("Sandbox commandline:")
+        p.line().style(HEADER).text("Sandbox Commandline:")
         const sb = previewSandboxArgs(this)
-        const sandboxLine = p.line().text(INDENT + sb.bin)
-        for (const tok of sb.args) {
-            sandboxLine.text(" ")
-            if (tok === "HARNESS") sandboxLine.style(HARNESS).text(tok).style()
-            else sandboxLine.text(tok)
+        // Indent 6 so the body aligns with the Models section's wrapped
+        // engine commandlines (which sit at outer indent 2 + line
+        // indent 4). The View's `indent` property — not text-prefixed
+        // spaces — so wrapStyled honors it on continuation rows.
+        const sandboxLine = p.line({ indent: 6 }).text(sb.bin)
+        for (const seg of sb.segments) {
+            if (!seg.args.length) continue
+            for (const tok of seg.args) {
+                sandboxLine.text(" ")
+                if (tok === "HARNESS") sandboxLine.style(HARNESS).text(tok).style()
+                else sandboxLine.style(seg.style ?? {}).text(tok).style()
+            }
         }
 
         const built = v.build()
-        const lines = built.panels[0]?.lines ?? []
-        const tty = process.stdout.isTTY
-        if (tty) {
-            import("./ansi.js").then(({ compilePalette, paint }) => {
-                const compiled = compilePalette(built.palette)
-                for (const l of lines) process.stdout.write(paint(l.text, compiled) + "\n")
-            })
-        } else {
-            for (const l of lines) process.stdout.write(stripStyle(l.text) + "\n")
-        }
+        emitPaintedLines(built)
     }
 
     async ssh(target) {
@@ -440,15 +416,33 @@ function formatDuration(ms) {
     return rm ? `${h}h${rm}m` : `${h}h`
 }
 
-function tomlScalar(v) {
-    if (typeof v === "string") return `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
-    if (typeof v === "boolean") return v ? "true" : "false"
-    if (typeof v === "number") return String(v)
-    if (Array.isArray(v)) return `[${v.map(tomlScalar).join(", ")}]`
-    return JSON.stringify(v)
+// Render a built View to stdout, honoring per-Line `indent` (panel
+// content area) plus an optional outer indent (used to nest a model
+// listing or commandline block under a section header). On a TTY,
+// long lines wrap at the available width with a hanging indent
+// matching the line's own start column — so a 300-char engine
+// commandline reads as a tidy paragraph under its header.
+function emitPaintedLines(built, outerIndent = "") {
+    const lines = built.panels[0]?.lines ?? []
+    const tty = process.stdout.isTTY
+    const compiled = tty ? compilePalette(built.palette) : null
+    const cols = tty ? process.stdout.columns || 80 : Infinity
+    const RIGHT_MARGIN = 2
+
+    for (const l of lines) {
+        const indent = outerIndent + (l.indent ? " ".repeat(l.indent) : "")
+        const text = l.text || ""
+        const available = cols - indent.length - RIGHT_MARGIN
+
+        if (!tty || available <= 0 || vwidth(text) <= available) {
+            const body = tty ? paint(text, compiled) : stripStyle(text)
+            process.stdout.write(indent + body + "\n")
+            continue
+        }
+
+        for (const row of wrapStyled(text, available)) {
+            process.stdout.write(indent + paint(row, compiled) + "\n")
+        }
+    }
 }
 
-function tomlKey(k) {
-    if (/^[A-Za-z0-9_-]+$/.test(k)) return k
-    return tomlScalar(k)
-}

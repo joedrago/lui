@@ -1,23 +1,19 @@
 // argv parser + subcommand dispatcher. Hand-rolled — no commander, no
-// minimist. The grammar is small:
+// minimist. lui has no flags at all: every persistent knob lives in
+// the TOML and is tuned via `lui config set/clear`. The grammar:
 //
-//   lui                       → resume (implicit `run`)
-//   lui --flag                → resume with run-time flags
-//   lui run [NAME] [flags]    → run a model
-//   lui add NAME ENGINE -- ARGS...
-//   lui set NAME -- ARGS...
-//   lui ls
-//   lui rm NAME
-//   lui cmd [NAME]
-//   lui show [NAME]
-//   lui ssh USER@HOST
-//   lui remote HOST[:PORT]
-//   lui websearch
-//   lui -h | --help
-//
-// Subcommand dispatch rule: if the first positional is a known verb, that
-// subcommand handles the rest. Otherwise fall through to `run`. Flags
-// can appear before or after positionals.
+//   lui                            → print help
+//   lui run [NAME]                 → run a model (resumes last if absent)
+//   lui add NAME ENGINE ARGS...    → create a model (ARGS go verbatim)
+//   lui set NAME ARGS...           → replace ARGS for a model (verbatim)
+//   lui rm NAME                    → delete a model
+//   lui ssh USER@HOST              → configure a remote client
+//   lui remote HOST[:PORT]         → connect TUI to a remote lui
+//   lui websearch                  → run only the websearch server
+//   lui sandbox HARNESS [ARGS...]  → launch HARNESS under nono (verbatim)
+//   lui config                     → settings + models + commandlines
+//   lui config set PATH VALUE      → set a config value
+//   lui config clear PATH          → remove a config value
 
 import process from "node:process"
 
@@ -25,49 +21,28 @@ import { Lui } from "./lui.js"
 import { harnesses } from "./harness/index.js"
 import { engines } from "./engine.js"
 
-const SUBCOMMANDS = new Set(["run", "add", "set", "rm", "ls", "cmd", "show", "ssh", "remote", "websearch", "sandbox", "config"])
-
-// The only flags lui itself reads at runtime. Every other knob lives in
-// the TOML and is tuned via `lui config set/clear/add`.
-const VALUE_FLAGS = new Set(["--debug", "--engine-port", "--web-port"])
-const BOOL_FLAGS = new Set(["--public"])
-
-const RUN_FLAGS = new Set([...VALUE_FLAGS, ...BOOL_FLAGS])
-const WEBSEARCH_FLAGS = new Set(["--web-port", "--public"])
+const SUBCOMMANDS = new Set(["run", "add", "set", "clone", "rm", "ssh", "remote", "websearch", "sandbox", "config"])
 
 function printHelp() {
     process.stdout.write(`lui — a friendly TUI wrapper for LLM engines.
 
 USAGE
-  lui                              resume the last model
-  lui run [NAME]                   run a model by name
-  lui add NAME ENGINE -- ARGS...   create a model
-  lui set NAME -- ARGS...          replace ARGS for a model
-  lui ls                           list models
+  lui                              print this help
+  lui run [NAME]                   run a model by name (resumes last if absent)
+  lui add NAME ENGINE ARGS...      create a model (ARGS go to the engine)
+  lui set NAME ARGS...             replace ARGS for a model
+  lui clone NEWNAME OLDNAME        copy a model under a new name
   lui rm NAME                      delete a model
-  lui cmd [NAME]                   print the spawn command
-  lui show [NAME]                  dump resolved config
   lui ssh USER@HOST                configure a remote client
   lui remote HOST[:PORT]           connect TUI to a remote lui
   lui websearch                    run only the websearch server
   lui sandbox HARNESS [ARGS...]    launch HARNESS under nono — every
                                    token after HARNESS is passed
-                                   verbatim, including --
-  lui config set PATH VALUE        set a persistent config value
-  lui config clear PATH            remove a persistent config value
-  lui config add PATH VALUE        append VALUE to a config array
+                                   verbatim
+  lui config                       settings + models + resolved commandlines
+  lui config set PATH VALUE        set a config value (appends for array paths)
+  lui config clear PATH            remove a config value (or whole array)
 
-CONFIG EXAMPLES
-${configExamples()}
-  Paths are dot-separated. A path that doesn't start with one of
-  (global, model, harness, engine, sandbox) is rooted under [global.…].
-  Display always strips the implicit "global." prefix.
-
-RUN-TIME FLAGS (lui run, or bare lui)
-  --debug PATH                     tee raw engine stdout to PATH
-  --engine-port N                  override engine_port for this run
-  --web-port N                     override web_port for this run
-  --public                         bind 0.0.0.0 instead of 127.0.0.1
 `)
 }
 
@@ -76,103 +51,170 @@ function fatal(msg, code = 2) {
     process.exit(code)
 }
 
-// Build a comprehensive CONFIG EXAMPLES block from the live harness +
-// engine registries and the spec'd sandbox keys. Adding a new harness
-// or engine grows this block automatically.
-function configExamples() {
-    const lines = []
-    const push = (s) => lines.push(`  ${s}`)
-    const section = (label) => {
-        if (lines.length) lines.push("")
-        push(`# ${label}`)
+// Bare `lui config`: one comprehensive view. Three sections:
+//   Settings:     flat path/value listing of every persisted knob
+//   Models:       the rich per-model view
+//   Engine cmd:   what `llama-server …` would run for the active model
+//   Sandbox cmd:  what `lui sandbox HARNESS` would run, with HARNESS placeholder
+function runConfigDump(lui) {
+    const tty = process.stdout.isTTY
+    const HEADER_SGR = tty ? "\x1b[38;2;120;100;180m" : ""
+    const RESET = tty ? "\x1b[0m" : ""
+    const header = (label) => process.stdout.write(`${HEADER_SGR}${label}${RESET}\n`)
+
+    header("Active Settings:")
+    const setPaths = writeFlatConfig(lui, "  ")
+
+    process.stdout.write("\n")
+    header("Available Settings:")
+    writeDefaultConfig(setPaths, "  ")
+
+    process.stdout.write("\n")
+    header("Models:")  // already capitalized; keep
+    lui.printModels({ indent: "  " })
+
+    process.stdout.write("\n")
+    lui.printSandboxCommandline()
+    process.stdout.write("\n")
+}
+
+// Path warm amber (same hue as STYLE.SEGMENT_USER in the engine
+// commandline), value lavender. Lets the eye sweep down the left
+// column for paths and across to lavender for values.
+const PATH_SGR = "\x1b[38;2;230;200;140m"
+const VAL_SGR = "\x1b[38;2;210;150;255m"
+const SGR_RESET = "\x1b[0m"
+
+function emitPair(out, indent, path, value, tty) {
+    if (tty) out.push(`${indent}${PATH_SGR}${path}${SGR_RESET} ${VAL_SGR}${value}${SGR_RESET}\n`)
+    else out.push(`${indent}${path} ${value}\n`)
+}
+
+// Sort by path, then by value as a tiebreaker so multi-value arrays
+// (e.g. `sandbox.allow`) read in stable alphabetical order too.
+function comparePairs(a, b) {
+    if (a.path < b.path) return -1
+    if (a.path > b.path) return 1
+    const av = String(a.value)
+    const bv = String(b.value)
+    if (av < bv) return -1
+    if (av > bv) return 1
+    return 0
+}
+
+function writeFlatConfig(lui, indent = "") {
+    const pairs = []
+    visit(pairs, "", lui.config.global)
+    visit(pairs, "harness", lui.config.harness)
+    visit(pairs, "engine", lui.config.engine)
+    visit(pairs, "sandbox", lui.config.sandbox)
+
+    pairs.sort(comparePairs)
+
+    const setPaths = new Set()
+    const out = []
+    const tty = process.stdout.isTTY
+    for (const { path, value } of pairs) {
+        setPaths.add(path)
+        emitPair(out, indent, path, value, tty)
     }
+    process.stdout.write(out.join(""))
+    return setPaths
+}
 
-    section("Server ports + bind")
-    push(`lui config set engine_port 8080`)
-    push(`lui config set web_port 8081`)
-    push(`lui config set public false`)
+// "Default settings" lists every schema-known path the user hasn't
+// overridden yet, alongside its default — so a skim of the section is
+// a list of `lui config set PATH …` candidates.
+function writeDefaultConfig(setPaths, indent = "") {
+    const out = []
+    const tty = process.stdout.isTTY
+    const sorted = schemaDefaults()
+        .filter(({ path }) => !setPaths.has(path))
+        .sort(comparePairs)
+    for (const { path, value } of sorted) emitPair(out, indent, path, value, tty)
+    process.stdout.write(out.join(""))
+}
 
-    section("Browser-mediated web search")
-    push(`lui config set websearch true`)
+// The known persistent settings + their defaults. Built from the live
+// harness and engine registries so adding either grows the list
+// automatically.
+function schemaDefaults() {
+    const out = []
+    out.push({ path: "engine_port", value: "8080" })
+    out.push({ path: "web_port", value: "8081" })
+    out.push({ path: "websearch", value: "true" })
+    out.push({ path: "public", value: "false" })
+    out.push({ path: "debug_log", value: "(unset)" })
 
-    section("Harness toggles")
-    for (const h of harnesses) push(`lui config set harness.${h.name}.enabled true`)
+    for (const h of harnesses) out.push({ path: `harness.${h.name}.enabled`, value: String(h.defaultEnabled) })
 
-    section("Engine binary overrides (defaults to PATH lookup)")
     for (const name of Object.keys(engines)) {
-        push(`lui config set engine.${name}.binary /path/to/${name}`)
-        push(`lui config clear engine.${name}.binary`)
+        out.push({ path: `engine.${name}.binary`, value: `(PATH: ${engines[name].defaultBinary})` })
     }
 
-    section("Sandbox tuning (used by `lui sandbox HARNESS`)")
-    const sbBool = ["allow_cwd", "block_net", "allow_gpu", "rollback", "silent", "dev_tools"]
-    for (const k of sbBool) push(`lui config set sandbox.${k} true`)
-    push(`lui config set sandbox.profile opencode`)
-    push(`lui config set sandbox.bin /usr/local/bin/nono`)
-    const sbArr = ["allow", "read", "write", "allow_domain", "extra"]
-    for (const k of sbArr) push(`lui config add sandbox.${k} ./value`)
-    push(`lui config clear sandbox.allow`)
+    out.push({ path: "sandbox.allow_cwd", value: "true" })
+    out.push({ path: "sandbox.block_net", value: "false" })
+    out.push({ path: "sandbox.allow_gpu", value: "false" })
+    out.push({ path: "sandbox.rollback", value: "false" })
+    out.push({ path: "sandbox.silent", value: "false" })
+    out.push({ path: "sandbox.dev_tools", value: "true" })
+    out.push({ path: "sandbox.profile", value: "(auto-detected from harness name)" })
+    out.push({ path: "sandbox.bin", value: "nono" })
+    out.push({ path: "sandbox.allow", value: "(empty list)" })
+    out.push({ path: "sandbox.read", value: "(empty list)" })
+    out.push({ path: "sandbox.write", value: "(empty list)" })
+    out.push({ path: "sandbox.allow_domain", value: "(empty list)" })
+    out.push({ path: "sandbox.extra", value: "(empty list)" })
 
-    return lines.join("\n") + "\n"
+    return out
 }
 
-// Split argv at the first `--` separator. Everything before is parsed
-// normally; everything after is captured verbatim as `passthrough`.
-function splitAtDoubleDash(argv) {
-    const i = argv.indexOf("--")
-    if (i < 0) return { pre: argv.slice(), passthrough: null }
-    return { pre: argv.slice(0, i), passthrough: argv.slice(i + 1) }
-}
-
-// Walk pre-argv, separating positionals from flags. Flags listed in
-// `accepted` may take a value; others are bare booleans. Unknown flags
-// are an error in this small grammar.
-function parseFlags(pre, accepted) {
-    const positionals = []
-    const flags = {}
-    for (let i = 0; i < pre.length; i++) {
-        const tok = pre[i]
-        if (tok === "-h" || tok === "--help") {
-            flags.help = true
-            continue
+function visit(pairs, prefix, obj) {
+    if (!obj || typeof obj !== "object") return
+    for (const k of Object.keys(obj).sort()) {
+        const v = obj[k]
+        if (v == null) continue
+        const path = prefix ? `${prefix}.${k}` : k
+        if (Array.isArray(v)) {
+            if (v.length === 0) pairs.push({ path, value: "[]" })
+            else for (const item of v) pairs.push({ path, value: formatLeaf(item) })
+        } else if (typeof v === "object") {
+            visit(pairs, path, v)
+        } else {
+            pairs.push({ path, value: formatLeaf(v) })
         }
-        if (tok.startsWith("--")) {
-            if (!accepted.has(tok)) fatal(`unknown flag ${tok}`)
-            if (BOOL_FLAGS.has(tok)) {
-                flags[tok.slice(2)] = true
-                continue
-            }
-            const value = pre[i + 1]
-            if (value == null || value.startsWith("-")) fatal(`${tok} expects a value`)
-            flags[tok.slice(2)] = value
-            i += 1
-            continue
-        }
-        positionals.push(tok)
-    }
-    return { positionals, flags }
-}
-
-function applyRunFlags(lui, flags) {
-    if (flags.debug) lui.debugLogPath = flags.debug
-    if (flags["engine-port"]) lui.config.global.engine_port = parseInt(flags["engine-port"], 10) || lui.config.global.engine_port
-    if (flags["web-port"]) lui.config.global.web_port = parseInt(flags["web-port"], 10) || lui.config.global.web_port
-    if (flags.public) {
-        lui.publicBind = true
-        lui.config.global.public = true
     }
 }
 
-// `lui config` family. Three operations:
-//   set   PATH VALUE   — write a scalar (or replace an array)
-//   clear PATH         — remove the key
-//   add   PATH VALUE   — append to an array (creates it if absent)
+function formatLeaf(v) {
+    if (typeof v === "string") return v
+    return String(v)
+}
+
+// `lui config` family. Two operations:
+//   set   PATH VALUE   — write a scalar, or append to a known array path
+//   clear PATH         — remove the key (or the whole array)
 //
 // PATH is dot-separated. If the first segment isn't a known top-level
 // table, the path is rooted under "global." (so `engine_port` is the
 // same as `global.engine_port` but `harness.opencode.enabled` lands at
 // the top level).
 const TOP_LEVEL_KEYS = new Set(["global", "model", "harness", "engine", "sandbox"])
+
+// Paths that are known string-array fields. `set` on one of these
+// appends rather than overwriting; `clear` removes the whole list.
+// Replacing an array means `clear` then `set`.
+const ARRAY_PATHS = new Set([
+    "sandbox.allow",
+    "sandbox.read",
+    "sandbox.write",
+    "sandbox.allow_domain",
+    "sandbox.extra"
+])
+
+function isArrayPath(path) {
+    return ARRAY_PATHS.has(path.join("."))
+}
 
 function resolveConfigPath(pathStr) {
     if (!pathStr || pathStr.includes("..") || pathStr.startsWith(".") || pathStr.endsWith(".")) {
@@ -235,15 +277,25 @@ function deleteNested(root, path) {
 }
 
 function runConfigCommand(lui, args) {
-    if (args.length === 0) fatal("config requires one of: set, clear, add")
     const [op, ...rest] = args
     if (op === "set") {
         if (rest.length !== 2) fatal("config set PATH VALUE")
         const path = resolveConfigPath(rest[0])
         const value = parseConfigValue(rest[1])
-        setNested(lui.config, path, value)
-        lui.config.save()
-        process.stdout.write(`Set ${displayPath(path)} = ${formatConfigValue(value)}\n`)
+        if (isArrayPath(path)) {
+            const current = getNested(lui.config, path)
+            const arr = Array.isArray(current) ? current : []
+            arr.push(value)
+            setNested(lui.config, path, arr)
+            lui.config.save()
+            process.stdout.write(
+                `Added ${formatConfigValue(value)} to ${displayPath(path)} (now ${arr.length} item${arr.length === 1 ? "" : "s"})\n`
+            )
+        } else {
+            setNested(lui.config, path, value)
+            lui.config.save()
+            process.stdout.write(`Set ${displayPath(path)} = ${formatConfigValue(value)}\n`)
+        }
         return
     }
     if (op === "clear") {
@@ -255,115 +307,83 @@ function runConfigCommand(lui, args) {
         else process.stdout.write(`${displayPath(path)} was already unset\n`)
         return
     }
-    if (op === "add") {
-        if (rest.length !== 2) fatal("config add PATH VALUE")
-        const path = resolveConfigPath(rest[0])
-        const value = parseConfigValue(rest[1])
-        const current = getNested(lui.config, path)
-        if (current != null && !Array.isArray(current)) {
-            fatal(`config add: ${displayPath(path)} is not an array`)
-        }
-        const arr = Array.isArray(current) ? current : []
-        arr.push(value)
-        setNested(lui.config, path, arr)
-        lui.config.save()
-        process.stdout.write(`Added ${formatConfigValue(value)} to ${displayPath(path)} (now ${arr.length} item${arr.length === 1 ? "" : "s"})\n`)
-        return
-    }
-    fatal(`config: unknown operation ${JSON.stringify(op)} (try set, clear, add)`)
+    fatal(`config: unknown operation ${JSON.stringify(op)} (try set, clear)`)
 }
 
 async function main() {
     const argv = process.argv.slice(2)
 
-    const first = argv[0]
-    const isVerb = first && SUBCOMMANDS.has(first)
-    const verb = isVerb ? first : "run"
-    const rest = isVerb ? argv.slice(1) : argv.slice()
-
-    // sandbox passes every remaining token through to the harness, so
-    // `lui sandbox opencode --help` must NOT trigger lui's own help.
-    if (verb !== "sandbox" && (argv.includes("-h") || argv.includes("--help"))) {
+    if (argv.length === 0) {
         printHelp()
         return
     }
 
+    const first = argv[0]
+    if (!SUBCOMMANDS.has(first)) {
+        process.stderr.write(`lui: unknown subcommand "${first}". Run \`lui\` for usage.\n`)
+        process.exit(2)
+    }
+
+    const verb = first
+    const rest = argv.slice(1)
     const lui = new Lui()
 
     if (verb === "run") {
-        const { pre } = splitAtDoubleDash(rest)
-        const { positionals, flags } = parseFlags(pre, RUN_FLAGS)
-        if (positionals.length > 1) fatal(`run takes at most one NAME, got: ${positionals.join(" ")}`)
-        applyRunFlags(lui, flags)
-        await lui.run(positionals[0])
+        if (rest.length > 1) fatal(`run takes at most one NAME, got: ${rest.join(" ")}`)
+        await lui.run(rest[0])
         return
     }
 
     if (verb === "config") {
+        if (rest.length === 0) {
+            runConfigDump(lui)
+            return
+        }
         runConfigCommand(lui, rest)
         return
     }
 
     if (verb === "add") {
-        const { pre, passthrough } = splitAtDoubleDash(rest)
-        const { positionals } = parseFlags(pre, new Set())
-        if (positionals.length !== 2) fatal(`add requires NAME and ENGINE`)
-        const [name, engineName] = positionals
-        lui.add(name, engineName, passthrough ?? [])
+        // Verbatim passthrough after NAME ENGINE — same convention as
+        // `lui sandbox HARNESS`. Tolerate a leading `--` for muscle
+        // memory from the older grammar.
+        if (rest.length < 2) fatal("add requires NAME and ENGINE")
+        const [name, engineName, ...tail] = rest
+        const args = tail[0] === "--" ? tail.slice(1) : tail
+        lui.add(name, engineName, args)
         return
     }
 
     if (verb === "set") {
-        const { pre, passthrough } = splitAtDoubleDash(rest)
-        const { positionals } = parseFlags(pre, new Set())
-        if (positionals.length !== 1) fatal(`set requires NAME`)
-        if (passthrough == null) fatal(`set requires \`-- ARGS...\``)
-        lui.set(positionals[0], passthrough)
+        if (rest.length < 1) fatal("set requires NAME")
+        const [name, ...tail] = rest
+        if (tail.length === 0) fatal("set requires ARGS after NAME")
+        const args = tail[0] === "--" ? tail.slice(1) : tail
+        lui.set(name, args)
+        return
+    }
+
+    if (verb === "clone") {
+        if (rest.length !== 2) fatal("clone requires NEWNAME OLDNAME")
+        lui.clone(rest[0], rest[1])
         return
     }
 
     if (verb === "rm") {
-        const { pre } = splitAtDoubleDash(rest)
-        const { positionals } = parseFlags(pre, new Set())
-        if (positionals.length !== 1) fatal(`rm requires NAME`)
-        lui.rm(positionals[0])
-        return
-    }
-
-    if (verb === "ls") {
-        lui.ls()
-        return
-    }
-
-    if (verb === "cmd") {
-        const { pre } = splitAtDoubleDash(rest)
-        const { positionals } = parseFlags(pre, new Set())
-        if (positionals.length > 1) fatal(`cmd takes at most one NAME`)
-        lui.cmd(positionals[0])
-        return
-    }
-
-    if (verb === "show") {
-        const { pre } = splitAtDoubleDash(rest)
-        const { positionals } = parseFlags(pre, new Set())
-        if (positionals.length > 1) fatal(`show takes at most one NAME`)
-        lui.show(positionals[0])
+        if (rest.length !== 1) fatal("rm requires NAME")
+        lui.rm(rest[0])
         return
     }
 
     if (verb === "ssh") {
-        const { pre } = splitAtDoubleDash(rest)
-        const { positionals } = parseFlags(pre, new Set())
-        if (positionals.length !== 1) fatal(`ssh requires USER@HOST`)
-        await lui.ssh(positionals[0])
+        if (rest.length !== 1) fatal("ssh requires USER@HOST")
+        await lui.ssh(rest[0])
         return
     }
 
     if (verb === "remote") {
-        const { pre } = splitAtDoubleDash(rest)
-        const { positionals } = parseFlags(pre, new Set())
-        if (positionals.length !== 1) fatal(`remote requires HOST[:PORT]`)
-        await lui.remote(positionals[0])
+        if (rest.length !== 1) fatal("remote requires HOST[:PORT]")
+        await lui.remote(rest[0])
         return
     }
 
@@ -379,9 +399,7 @@ async function main() {
     }
 
     if (verb === "websearch") {
-        const { pre } = splitAtDoubleDash(rest)
-        const { flags } = parseFlags(pre, WEBSEARCH_FLAGS)
-        applyRunFlags(lui, flags)
+        if (rest.length > 0) fatal("websearch takes no arguments")
         await lui.websearch()
         return
     }
