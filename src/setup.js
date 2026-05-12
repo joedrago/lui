@@ -116,7 +116,7 @@ function printInformation(lui, enabledHarnesses) {
     if (enabledHarnesses.has("pi")) {
         w("  " + styled("pi", STYLE.HARNESS_NAME) + "\n")
         w(row("install", cmd("npm install -g @earendil-works/pi-coding-agent"), W))
-        w(row("docs", url("https://github.com/block/pi"), W))
+        w(row("docs", url("https://pi.dev"), W))
         w(row("enable sandbox", dim("alias pi='lui sandbox pi'"), W))
         w("\n")
     }
