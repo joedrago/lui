@@ -1,0 +1,127 @@
+// Subprocess plumbing shared by spawn-based engines (llama-server,
+// mlx-lm.server, vllm, …). Owns PATH lookup, stdio piping, line
+// buffering, debug-log tee, and the SIGTERM → grace → SIGKILL dance.
+//
+// Engine modules call spawnProcess() from inside their start(); they
+// keep ownership of argv composition, parseLine logic, state schema,
+// and panel rendering. Only the boilerplate lives here.
+
+import { spawn } from "node:child_process"
+import fs from "node:fs"
+import path from "node:path"
+import process from "node:process"
+
+// PATH lookup for a bare command name. An override with a separator
+// (absolute path or `./relative`) is returned as-is. Returns the
+// candidate unchanged if it isn't found; spawn will surface the
+// resulting ENOENT through onExit.
+export function resolveBinary(candidate) {
+    if (!candidate) return null
+    if (candidate.includes(path.sep) || candidate.startsWith(".")) return candidate
+    const pathDirs = (process.env.PATH || "").split(path.delimiter)
+    for (const dir of pathDirs) {
+        if (!dir) continue
+        const full = path.join(dir, candidate)
+        try {
+            fs.accessSync(full, fs.constants.X_OK)
+            return full
+        } catch {
+            // not here; try next
+        }
+    }
+    return candidate
+}
+
+const KILL_GRACE_MS = 5000
+
+// Spawn a subprocess; line-pipe stdout/stderr to parseLine; tee raw
+// bytes to `debugLog` if set. Returns { child, stop } where stop()
+// runs SIGTERM, waits up to KILL_GRACE_MS for exit, then SIGKILLs.
+//
+//   binary     — already PATH-resolved (engines call resolveBinary)
+//   argv       — flat string array
+//   parseLine  — (line: string) => void; called once per \n
+//   debugLog   — optional path to tee raw bytes
+//   onExit     — optional (code, signal) => void
+//   addWarning — optional (msg) => void for non-fatal issues
+//                (e.g. cannot open debug log)
+export function spawnProcess({ binary, argv, parseLine, debugLog, onExit, addWarning }) {
+    let debugFd = null
+    if (debugLog) {
+        try {
+            debugFd = fs.openSync(debugLog, "w")
+        } catch (e) {
+            addWarning?.(`debug_log: cannot open ${debugLog}: ${e.message}`)
+        }
+    }
+
+    const child = spawn(binary, argv, { stdio: ["ignore", "pipe", "pipe"] })
+
+    const buffers = { stdout: "", stderr: "" }
+    function drain(name, chunk) {
+        if (debugFd != null) {
+            try {
+                fs.writeSync(debugFd, chunk)
+            } catch {
+                // ignore
+            }
+        }
+        buffers[name] += chunk
+        let idx
+        while ((idx = buffers[name].indexOf("\n")) !== -1) {
+            const line = buffers[name].slice(0, idx).replace(/\r$/, "")
+            buffers[name] = buffers[name].slice(idx + 1)
+            try {
+                parseLine(line)
+            } catch (e) {
+                process.stderr.write(`lui: parseLine threw: ${e?.stack || e}\n`)
+            }
+        }
+    }
+
+    child.stdout.setEncoding("utf8")
+    child.stderr.setEncoding("utf8")
+    child.stdout.on("data", (c) => drain("stdout", c))
+    child.stderr.on("data", (c) => drain("stderr", c))
+
+    child.on("exit", (code, signal) => {
+        if (debugFd != null) {
+            try {
+                fs.closeSync(debugFd)
+            } catch {
+                // ignore
+            }
+        }
+        onExit?.(code, signal)
+    })
+
+    child.on("error", (err) => {
+        process.stderr.write(`lui: failed to spawn ${binary}: ${err.message}\n`)
+        onExit?.(1, null)
+    })
+
+    async function stop() {
+        if (child.exitCode != null) return
+        try {
+            child.kill("SIGTERM")
+        } catch {
+            return
+        }
+        await new Promise((res) => {
+            const t = setTimeout(() => {
+                try {
+                    child.kill("SIGKILL")
+                } catch {
+                    // ignore
+                }
+                res()
+            }, KILL_GRACE_MS)
+            child.once("exit", () => {
+                clearTimeout(t)
+                res()
+            })
+        })
+    }
+
+    return { child, stop }
+}

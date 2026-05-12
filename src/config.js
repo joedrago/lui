@@ -308,12 +308,8 @@ export function runConfigDump(lui) {
     const tty = process.stdout.isTTY
     const header = (label) => process.stdout.write((tty ? styled(label, STYLE.LABEL) : label) + "\n")
 
-    header("Active Settings:")
-    const setPaths = writeFlatConfig(lui, "  ")
-
-    process.stdout.write("\n")
-    header("Available Settings:")
-    writeDefaultConfig(setPaths, "  ")
+    header("Settings:")
+    writeAllSettings(lui, "  ")
 
     process.stdout.write("\n")
     header("Models:")
@@ -322,11 +318,6 @@ export function runConfigDump(lui) {
     process.stdout.write("\n")
     lui.printSandboxCommandline()
     process.stdout.write("\n")
-}
-
-function emitPair(out, indent, path, value, tty) {
-    if (tty) out.push(`${indent}${styled(path, STYLE.CONFIG_KEY)} ${styled(value, STYLE.VALUE)}\n`)
-    else out.push(`${indent}${path} ${value}\n`)
 }
 
 // Sort by path, then by value — keeps multi-value arrays grouped and in
@@ -341,37 +332,52 @@ function comparePairs(a, b) {
     return 0
 }
 
-function writeFlatConfig(lui, indent = "") {
-    const pairs = []
-    visit(pairs, "", lui.config.global)
+// Single sorted list of every known setting. Each row is marked `set`
+// when the current value differs from the schema default and `def`
+// otherwise (which is also where unseen schema entries land). Def
+// rows render dim so explicitly-configured values stay scannable
+// without splitting the table into two sections.
+function writeAllSettings(lui, indent = "") {
+    const tty = process.stdout.isTTY
+
+    const schemaByPath = new Map()
+    for (const { path, default: def } of allSchemaDefaults()) {
+        schemaByPath.set(path, formatDefault(def))
+    }
+
+    const present = []
+    visit(present, "", lui.config.global)
     for (const table of TOP_LEVEL_TABLES) {
-        // `global` is rendered flat above; `model` is user data, listed
-        // separately under "Models".
+        // `global` was just walked above; `model` is user data,
+        // rendered separately under "Models".
         if (table === "global" || table === "model") continue
-        visit(pairs, table, lui.config[table])
+        visit(present, table, lui.config[table])
     }
 
-    pairs.sort(comparePairs)
-
-    const setPaths = new Set()
-    const out = []
-    const tty = process.stdout.isTTY
-    for (const { path, value } of pairs) {
-        setPaths.add(path)
-        emitPair(out, indent, path, value, tty)
+    const presentPaths = new Set(present.map((p) => p.path))
+    const rows = present.map((p) => ({
+        ...p,
+        isDef: schemaByPath.has(p.path) && String(p.value) === schemaByPath.get(p.path)
+    }))
+    for (const [path, value] of schemaByPath) {
+        if (presentPaths.has(path)) continue
+        rows.push({ path, value, isDef: true })
     }
-    process.stdout.write(out.join(""))
-    return setPaths
-}
+    rows.sort(comparePairs)
 
-function writeDefaultConfig(setPaths, indent = "") {
     const out = []
-    const tty = process.stdout.isTTY
-    const sorted = allSchemaDefaults()
-        .filter(({ path }) => !setPaths.has(path))
-        .map(({ path, default: def }) => ({ path, value: formatDefault(def) }))
-        .sort(comparePairs)
-    for (const { path, value } of sorted) emitPair(out, indent, path, value, tty)
+    const DIM = { dim: true }
+    for (const { path, value, isDef } of rows) {
+        const marker = isDef ? "def" : "set"
+        if (tty) {
+            const m = isDef ? styled(marker, DIM) : marker
+            const k = styled(path, isDef ? DIM : STYLE.CONFIG_KEY)
+            const v = styled(value, isDef ? DIM : STYLE.VALUE)
+            out.push(`${indent}${m} ${k} ${v}\n`)
+        } else {
+            out.push(`${indent}${marker} ${path} ${value}\n`)
+        }
+    }
     process.stdout.write(out.join(""))
 }
 

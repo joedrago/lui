@@ -46,7 +46,11 @@ export const STYLE = {
     HARNESS_NAME: { fg: "magenta", bold: true },
 
     // Argv segment categories. Engines tag each segment with one so
-    // `lui config` colors the spawn command consistently.
+    // `lui config` colors the spawn command consistently. The binary
+    // segment (segment 0 of describe(), if present) is intentionally
+    // unstyled — matches how the sandbox command renders `nono`, and
+    // keeps a long resolved path from competing visually with the
+    // colored flag groups that follow.
     SEGMENT_BINDING: { fg: "cyan" },
     SEGMENT_POLICY: { dim: true },
     SEGMENT_DEFAULTS: { fg: [100, 170, 200] },

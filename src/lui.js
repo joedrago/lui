@@ -4,7 +4,7 @@ import { Config } from "./config.js"
 import { View } from "./wire.js"
 import { stripStyle, compilePalette, paint, wrapStyled, vwidth, styled } from "./ansi.js"
 import { STYLE } from "./theme.js"
-import { engines, runEngine } from "./engine.js"
+import { engines } from "./engine.js"
 import { startWebServer } from "./web.js"
 import { startTui } from "./display.js"
 import { sshSetupShare } from "./ssh.js"
@@ -21,15 +21,8 @@ export class Lui {
         this.warnings = []
 
         this.engineModule = null
-        this.engineChild = null
         this.activeModel = null
         this.state = {}
-
-        // Resolved spawn argv, populated by spawnEngine. Render paths
-        // read these instead of re-invoking buildArgv, which has side
-        // effects (PATH lookup, thread autodetect).
-        this.spawnBinary = null
-        this.spawnSegments = null
 
         this.web = null
         this.tui = null
@@ -90,7 +83,7 @@ export class Lui {
             process.exit(2)
         }
         const model = { name, engine: engineName, args: [...args] }
-        const probe = engines[engineName].buildArgv(model, this)
+        const probe = engines[engineName].describe(model, this)
         if (probe.errors?.length) {
             for (const e of probe.errors) process.stderr.write(`lui: ${e}\n`)
             process.exit(1)
@@ -108,7 +101,7 @@ export class Lui {
             process.stderr.write(`lui: model "${name}" has unknown engine "${engineName}".\n`)
             process.exit(1)
         }
-        const probe = engines[engineName].buildArgv({ name, engine: engineName, args: [...args] }, this)
+        const probe = engines[engineName].describe({ name, engine: engineName, args: [...args] }, this)
         if (probe.errors?.length) {
             for (const e of probe.errors) process.stderr.write(`lui: ${e}\n`)
             process.exit(1)
@@ -175,18 +168,22 @@ export class Lui {
             else ln.style({ dim: true }).text("○ ").style()
             ln.style({ bold: true }).text(name).style().text("  ").style(STYLE.ENGINE_NAME).text(m.engine).style()
 
-            // Body: the model's full resolved engine commandline, with
-            // per-segment colors (binding/policy/defaults/user). This
-            // is the same payload `lui run NAME` would spawn.
+            // Body: the model's full resolved commandline, with
+            // per-segment colors. Segment 0 (for subprocess engines)
+            // is the binary; non-subprocess engines like `remote` just
+            // skip that one and emit user-args directly. Either way
+            // this is the same payload `lui run NAME` would emit.
             const engineModule = engines[m.engine]
             if (engineModule) {
                 const model = { name, engine: m.engine, args: m.args || [] }
-                const { binary, segments } = engineModule.buildArgv(model, this)
-                const cmdLine = p.line({ indent: 4 }).text(binary)
+                const { segments } = engineModule.describe(model, this)
+                const cmdLine = p.line({ indent: 4 })
+                let first = true
                 for (const seg of segments) {
                     if (!seg.args.length) continue
+                    if (!first) cmdLine.text(" ")
+                    first = false
                     cmdLine
-                        .text(" ")
                         .style(seg.style ?? {})
                         .text(seg.args.join(" "))
                         .style()
@@ -278,24 +275,14 @@ export class Lui {
             process.exit(1)
         }
         this.state = {}
-        const { binary, segments, errors, warnings } = this.engineModule.buildArgv(model, this)
-        if (errors?.length) {
-            for (const e of errors) process.stderr.write(`lui: ${e}\n`)
+        const desc = this.engineModule.describe(model, this)
+        if (desc.errors?.length) {
+            for (const e of desc.errors) process.stderr.write(`lui: ${e}\n`)
             process.exit(1)
         }
-        for (const w of warnings ?? []) this.addWarning(w)
-        this.spawnBinary = binary
-        this.spawnSegments = segments
+        for (const w of desc.warnings ?? []) this.addWarning(w)
         this.engineModule.initState?.(this)
-
-        // Engines that own their own lifecycle (e.g. remote, which polls
-        // HTTP instead of spawning a binary) implement start(). The
-        // subprocess engines (llama-server) still go through runEngine.
-        if (this.engineModule.start) {
-            await this.engineModule.start(this, model)
-        } else {
-            this.engineChild = runEngine(this, binary, segments)
-        }
+        await this.engineModule.start(this, model)
     }
 
     onEngineExit(code, signal) {
@@ -316,27 +303,6 @@ export class Lui {
             await this.engineModule?.stop?.(this)
         } catch (e) {
             process.stderr.write(`lui: engine.stop threw: ${e?.stack || e}\n`)
-        }
-        if (this.engineChild && this.engineChild.exitCode == null) {
-            try {
-                this.engineChild.kill("SIGTERM")
-                await new Promise((res) => {
-                    const t = setTimeout(() => {
-                        try {
-                            this.engineChild.kill("SIGKILL")
-                        } catch {
-                            // ignore
-                        }
-                        res()
-                    }, 5000)
-                    this.engineChild.once("exit", () => {
-                        clearTimeout(t)
-                        res()
-                    })
-                })
-            } catch {
-                // ignore
-            }
         }
         await this.web?.close?.()
         try {

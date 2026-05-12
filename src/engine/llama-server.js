@@ -6,7 +6,9 @@ import os from "node:os"
 
 import { STYLE } from "../theme.js"
 import { stripAnsi } from "../ansi.js"
-import { resolveBinary } from "../util.js"
+import { resolveBinary, spawnProcess } from "../spawn.js"
+
+const BINARY_NAME = "llama-server"
 
 const DIM = { dim: true }
 const BOLD = { bold: true }
@@ -40,11 +42,10 @@ const RESERVED_FLAGS = new Set(["--host", "--port"])
 
 export const engine = {
     name: "llama-server",
-    defaultBinary: "llama-server",
 
     // Knobs that show up under "Available Settings" in `lui config`,
     // prefixed by the framework with `engine.<name>.`.
-    schema: [{ path: "binary", default: "llama-server" }],
+    schema: [{ path: "binary", default: BINARY_NAME }],
 
     // Best known context size. After Ready, state.ctxSize is the
     // authoritative value (lifted from `llama_context: n_ctx = …`).
@@ -85,7 +86,12 @@ export const engine = {
         return { host: null, port: lui.config.global.engine_port }
     },
 
-    buildArgv(model, lui) {
+    // describe() is how the framework asks an engine "what would your
+    // commandline look like for this model?" — used for `lui add`
+    // validation, `lui ls` rendering, and (internally) by start() to
+    // build the spawn argv. Segment 0 is the binary; the rest follow.
+    describe(model, lui) {
+        const binaryName = binaryNameFromConfig(lui)
         const host = lui.config.global.public ? "0.0.0.0" : "127.0.0.1"
         const port = lui.config.global.engine_port
         const userArgs = Array.isArray(model.args) ? [...model.args] : []
@@ -104,8 +110,8 @@ export const engine = {
         }
 
         return {
-            binary: this.defaultBinary,
             segments: [
+                { name: "binary", args: [binaryName] },
                 { name: "binding", style: STYLE.SEGMENT_BINDING, args: ["--host", host, "--port", String(port)] },
                 { name: "policy", style: STYLE.SEGMENT_POLICY, args: [...POLICY_ARGS] },
                 { name: "defaults", style: STYLE.SEGMENT_DEFAULTS, args: defaults },
@@ -116,9 +122,33 @@ export const engine = {
         }
     },
 
+    async start(lui, model) {
+        const desc = engine.describe(model, lui)
+        // Caller (lui.spawnEngine) already surfaced errors/warnings — we
+        // assume desc is valid here.
+        lui.state.argSegments = desc.segments
+        const [binarySeg, ...rest] = desc.segments
+        const binaryPath = resolveBinary(binarySeg.args[0])
+        const argv = rest.flatMap((s) => s.args)
+        lui.state.proc = spawnProcess({
+            binary: binaryPath,
+            argv,
+            parseLine: (line) => engine.parseLine(line, lui),
+            debugLog: lui.config.global.debug_log,
+            onExit: (code, signal) => lui.onEngineExit?.(code, signal),
+            addWarning: (m) => lui.addWarning(m)
+        })
+    },
+
+    async stop(lui) {
+        await lui.state?.proc?.stop?.()
+    },
+
     initState(lui) {
         const s = lui.state
         s.startedAt = Date.now()
+        s.argSegments = null
+        s.proc = null
         s.activeModelName = lui.activeModel?.name ?? ""
         s.modelName = ""
         s.quantization = ""
@@ -478,9 +508,13 @@ function extractMib(line) {
     return m ? parseFloat(m[1]) : null
 }
 
+function binaryNameFromConfig(lui) {
+    return lui.config.engine?.[engine.name]?.binary || BINARY_NAME
+}
+
 async function probeVersion(lui) {
     return new Promise((resolve) => {
-        const bin = resolveBinary(lui, engine)
+        const bin = resolveBinary(binaryNameFromConfig(lui))
         if (!bin) return resolve()
         let stderr = ""
         const child = spawn(bin, ["--version"], { stdio: ["ignore", "ignore", "pipe"] })
@@ -620,13 +654,10 @@ function appendEnginePanel(v, lui) {
     if (s.listenUrl) p.line({ indent: 15 }).style(DIM).text(s.listenUrl)
 
     // Full resolved argv, all dim — colors compete with labels above.
-    // Reads the segments lui stashed at spawn rather than recomputing.
-    if (lui.spawnSegments) {
-        const ln = p.line({ indent: 15 }).style(DIM).text(lui.spawnBinary)
-        for (const seg of lui.spawnSegments) {
-            if (!seg.args.length) continue
-            ln.text(" ").text(seg.args.join(" "))
-        }
+    // Reads the segments stashed at spawn rather than recomputing.
+    if (s.argSegments) {
+        const parts = s.argSegments.flatMap((seg) => seg.args)
+        p.line({ indent: 15 }).style(DIM).text(parts.join(" "))
     }
 
     // Active downloads as bars.

@@ -28,10 +28,9 @@ const DEFAULT_LUI_PORT = 8081
 
 export const engine = {
     name: "remote",
-    defaultBinary: null,
     schema: [],
 
-    buildArgv(model) {
+    describe(model) {
         const args = Array.isArray(model.args) ? model.args : []
         const errors = []
         if (args.length !== 1) {
@@ -40,7 +39,6 @@ export const engine = {
             errors.push(`remote: invalid HOST[:PORT] ${JSON.stringify(args[0])}`)
         }
         return {
-            binary: null,
             segments: [{ name: "user", style: STYLE.SEGMENT_USER, args: args.slice(0, 1) }],
             warnings: [],
             errors
