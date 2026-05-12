@@ -1,9 +1,12 @@
 // ANSI primitives: palette compile + paint, width / wrap / truncate,
 // terminal mode controls, and one-shot styled strings.
 
+/** @import { PaletteEntry } from "./types.js" */
+
 const ESC = "\x1b["
 const RESET = ESC + "0m"
 
+/** @type {Record<string, number>} */
 const NAMED_FG = {
     black: 30,
     red: 31,
@@ -23,6 +26,7 @@ const NAMED_FG = {
     bright_white: 97
 }
 
+/** @type {Record<string, number>} */
 const NAMED_BG = {
     black: 40,
     red: 41,
@@ -44,6 +48,7 @@ const NAMED_BG = {
 
 // Truecolor when COLORTERM=truecolor/24bit, 256 when TERM has "256",
 // else 16. Renderer downgrades automatically.
+/** @returns {"truecolor" | "256" | "16"} */
 function detectDepth() {
     const ct = process.env.COLORTERM || ""
     if (ct === "truecolor" || ct === "24bit") return "truecolor"
@@ -54,32 +59,38 @@ function detectDepth() {
 
 let DEPTH = detectDepth()
 
+/** @param {"truecolor" | "256" | "16"} d */
 export function setColorDepth(d) {
     DEPTH = d
 }
 
+/** @param {number} r @param {number} g @param {number} b @returns {string} */
 function rgbToFg(r, g, b) {
     if (DEPTH === "truecolor") return `38;2;${r};${g};${b}`
     if (DEPTH === "256") return `38;5;${rgbTo256(r, g, b)}`
     return String(rgbToBasic16(r, g, b))
 }
 
+/** @param {number} r @param {number} g @param {number} b @returns {string} */
 function rgbToBg(r, g, b) {
     if (DEPTH === "truecolor") return `48;2;${r};${g};${b}`
     if (DEPTH === "256") return `48;5;${rgbTo256(r, g, b)}`
     return String(rgbToBasic16(r, g, b) + 10)
 }
 
+/** @param {number} r @param {number} g @param {number} b @returns {number} */
 function rgbTo256(r, g, b) {
     if (r === g && g === b) {
         if (r < 8) return 16
         if (r > 248) return 231
         return 232 + Math.round(((r - 8) / 247) * 24)
     }
+    /** @param {number} v */
     const conv = (v) => Math.round((v / 255) * 5)
     return 16 + 36 * conv(r) + 6 * conv(g) + conv(b)
 }
 
+/** @param {number} r @param {number} g @param {number} b @returns {number} */
 function rgbToBasic16(r, g, b) {
     const bright = r > 170 || g > 170 || b > 170
     let code = 30
@@ -89,6 +100,7 @@ function rgbToBasic16(r, g, b) {
     return bright ? code + 60 : code
 }
 
+/** @param {string | [number, number, number] | null | undefined} ref @param {boolean} isBg @returns {string | null} */
 function colorRefToSgr(ref, isBg) {
     if (ref == null || ref === "default") return null
     if (typeof ref === "string") return String(isBg ? NAMED_BG[ref] : (NAMED_FG[ref] ?? ""))
@@ -101,10 +113,12 @@ function colorRefToSgr(ref, isBg) {
 
 // SGR prefix per palette entry. Renderer emits a hard reset before each
 // switch so the SGR is self-contained.
+/** @param {PaletteEntry[]} palette @returns {string[]} */
 export function compilePalette(palette) {
     return palette.map((entry) => compileEntry(entry || {}))
 }
 
+/** @param {PaletteEntry} entry @returns {string} */
 export function compileEntry(entry) {
     const parts = []
     if (entry.bold) parts.push("1")
@@ -120,6 +134,7 @@ export function compileEntry(entry) {
 }
 
 // One-shot styled string. Returns text untouched for an empty entry.
+/** @param {string} text @param {PaletteEntry} [entry] @returns {string} */
 export function styled(text, entry) {
     if (!entry) return text
     const sgr = compileEntry(entry)
@@ -148,15 +163,18 @@ const ANSI_STREAM_RE = (() => {
     // eslint-disable-next-line no-control-regex
     return /\x1b\[[\x20-\x3f]*[\x40-\x7e]|\x1b\][\x20-\x7e]*(?:\x07|\x1b\\)|\x1b[\x20-\x2f]*[\x30-\x7e]/g
 })()
+/** @param {string} s @returns {string} */
 export function stripAnsi(s) {
     return s.replace(ANSI_STREAM_RE, "")
 }
 
+/** @param {number} code @returns {boolean} */
 function isSwitchChar(code) {
     return code >= 0xe000 && code <= 0xe0ff
 }
 
 // Expand inline PUA switch chars into SGR sequences.
+/** @param {string} text @param {string[]} compiled @returns {string} */
 export function paint(text, compiled) {
     let out = ""
     for (let i = 0; i < text.length; i++) {
@@ -174,6 +192,7 @@ export function paint(text, compiled) {
 
 // Visible width approximation: count code units, skip PUA switch chars.
 // Doesn't handle wide CJK / emoji / combining marks.
+/** @param {string} text @returns {number} */
 export function vwidth(text) {
     let n = 0
     for (let i = 0; i < text.length; i++) {
@@ -185,6 +204,7 @@ export function vwidth(text) {
 }
 
 // Strip PUA palette switches for plain-text output.
+/** @param {string} text @returns {string} */
 export function stripStyle(text) {
     let out = ""
     for (let i = 0; i < text.length; i++) {
@@ -196,6 +216,7 @@ export function stripStyle(text) {
 
 // Yields { style, text } runs so wrapStyled can re-emit the active
 // palette switch at the start of each continuation row.
+/** @param {string} text @returns {Generator<{ style: number, text: string }>} */
 export function* visibleRuns(text) {
     let style = 0
     let buf = ""
@@ -216,6 +237,7 @@ export function* visibleRuns(text) {
 
 // Word-wrap a palette-encoded string at `width` columns. Each returned
 // row carries a leading switch char to re-assert the active style.
+/** @param {string} text @param {number} width @returns {string[]} */
 export function wrapStyled(text, width) {
     if (width <= 0) return [text]
     const rows = []
@@ -224,8 +246,10 @@ export function wrapStyled(text, width) {
     let style = 0
     let rowStyle = 0
 
+    /** @type {{ style: number, text: string, space: boolean }[]} */
     const tokens = []
     let active = ""
+    /** @type {boolean | null} */
     let activeIsSpace = null
 
     for (const run of visibleRuns(text)) {
@@ -235,7 +259,7 @@ export function wrapStyled(text, width) {
             const isSpace = ch === " " || ch === "\t"
             if (activeIsSpace === null) activeIsSpace = isSpace
             if (isSpace !== activeIsSpace || active.length === 0) {
-                if (active.length > 0) tokens.push({ style: run.style, text: active, space: activeIsSpace })
+                if (active.length > 0) tokens.push({ style: run.style, text: active, space: !!activeIsSpace })
                 active = ch
                 activeIsSpace = isSpace
             } else {
@@ -244,7 +268,7 @@ export function wrapStyled(text, width) {
             i++
         }
         if (active.length > 0) {
-            tokens.push({ style: run.style, text: active, space: activeIsSpace })
+            tokens.push({ style: run.style, text: active, space: !!activeIsSpace })
             active = ""
             activeIsSpace = null
         }
@@ -296,12 +320,14 @@ export function wrapStyled(text, width) {
     return rows
 }
 
+/** @param {number} idx @returns {string} */
 function switchCharSafe(idx) {
     return String.fromCharCode(0xe000 + idx)
 }
 
 // Left-truncate with a leading "…". Re-emits style switches for the
 // retained tail.
+/** @param {string} text @param {number} width @returns {string} */
 export function truncateLeft(text, width) {
     if (width <= 0) return ""
     if (vwidth(text) <= width) return text
@@ -325,6 +351,7 @@ export function truncateLeft(text, width) {
     return "…" + kept
 }
 
+/** @param {number} row @param {number} col @returns {string} */
 export function cursorTo(row, col) {
     return `${ESC}${row};${col}H`
 }

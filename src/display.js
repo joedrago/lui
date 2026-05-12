@@ -1,6 +1,9 @@
 // TUI loop. Polls /data every 250 ms in the alt-screen buffer; `q` or
 // Ctrl-C quits via raw stdin.
 
+/** @import { ViewBar, ViewLine, BuiltView } from "./types.js" */
+/** @import { Lui } from "./lui.js" */
+
 import http from "node:http"
 import process from "node:process"
 
@@ -33,10 +36,12 @@ const RIGHT_MARGIN = 2
 const ENTER_ALT = enterAltScreen() + disableLineWrap() + hideCursor() + cursorTo(1, 1)
 const LEAVE_ALT = showCursor() + enableLineWrap() + leaveAltScreen()
 
+/** @param {Lui} lui @returns {{ stop: () => void, repaint?: () => void }} */
 export function startTui(lui) {
     if (!process.stdout.isTTY) return { stop() {} }
 
     let stopped = false
+    /** @type {BuiltView | null} */
     let lastPayload = null
 
     function onResize() {
@@ -57,8 +62,9 @@ export function startTui(lui) {
     process.stdin.resume()
     process.stdin.on("data", onStdin)
 
+    /** @param {Buffer | string} chunk */
     function onStdin(chunk) {
-        for (const byte of chunk) {
+        for (const byte of Buffer.from(chunk)) {
             if (byte === 0x71 || byte === 0x51 /* q or Q */) {
                 lui.quitReason = "user pressed q"
                 lui.shutdown(0)
@@ -77,6 +83,7 @@ export function startTui(lui) {
         // /data carries the server-side panels (warnings + engine).
         // The lui-panel is local to this machine — bookmarklet URL, etc.
         // — so it gets prepended here, not over the wire.
+        /** @type {import("./types.js").ViewPanel[]} */
         let serverPanels = []
         try {
             const payload = await fetchData(lui.config.global.web_port)
@@ -93,6 +100,7 @@ export function startTui(lui) {
         setTimeout(tick, POLL_MS)
     }
 
+    /** @param {BuiltView} payload */
     function paintScreen(payload) {
         const rows = process.stdout.rows || 24
         const rawCols = process.stdout.columns || 80
@@ -173,9 +181,10 @@ export function startTui(lui) {
     }
 
     setTimeout(tick, 0)
-    return { stop, repaint: () => (lastPayload ? paintScreen(lastPayload) : null) }
+    return { stop, repaint: () => (lastPayload ? paintScreen(lastPayload) : undefined) }
 }
 
+/** @param {ViewLine} line @param {number} cols @param {string[]} compiled @returns {string[]} */
 function paintLine(line, cols, compiled) {
     const text = line.text || ""
     const align = line.align || "left"
@@ -207,6 +216,7 @@ function paintLine(line, cols, compiled) {
 const BAR_RIGHT_FRACTION = 0.5
 const BAR_MIN_RIGHT_WIDTH = 12
 
+/** @param {ViewBar} bar @param {number} width @param {string[]} compiled @returns {string} */
 function paintBar(bar, width, compiled) {
     const frac = bar.max ? Math.max(0, Math.min(1, bar.value / bar.max)) : Math.max(0, Math.min(1, bar.value || 0))
     const label = bar.label ?? ""
@@ -248,6 +258,7 @@ function paintBar(bar, width, compiled) {
     return left + right
 }
 
+/** @param {number} port @returns {Promise<BuiltView>} */
 function fetchData(port) {
     return new Promise((resolve, reject) => {
         const req = http.get({ host: "127.0.0.1", port, path: "/data", timeout: 1500 }, (res) => {

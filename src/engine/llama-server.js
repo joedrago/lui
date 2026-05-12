@@ -1,6 +1,9 @@
 // llama.cpp engine. parseLine + appendPanels ported from
 // old/src/server.rs and old/src/display.rs.
 
+/** @import { Engine, Model, ViewBuilder } from "../types.js" */
+/** @import { Lui } from "../lui.js" */
+
 import { spawn } from "node:child_process"
 import os from "node:os"
 
@@ -26,11 +29,13 @@ const DEFAULT_HINTS = [
     { flags: ["--chat-template-kwargs"], emit: () => ["--chat-template-kwargs", '{"preserve_thinking":true}'] }
 ]
 
+/** @returns {number} */
 function autoThreads() {
     const n = (os.availableParallelism?.() ?? os.cpus().length) - 2
     return Math.max(1, n)
 }
 
+/** @param {string[]} args @param {string[]} flags @returns {boolean} */
 function userSuppliedAny(args, flags) {
     return args.some((a) => flags.includes(a))
 }
@@ -41,6 +46,7 @@ const MAX_RECENT_REQUESTS = 3
 // Flags the engine won't let the user override.
 const RESERVED_FLAGS = new Set(["--host", "--port"])
 
+/** @type {Engine} */
 export const engine = {
     name: "llama-server",
 
@@ -188,12 +194,12 @@ export const engine = {
         lui.state.argSegments = desc.segments
         const [binarySeg, ...rest] = desc.segments
         const binaryName = binarySeg.args[0]
-        const binaryPath = resolveBinary(binaryName)
+        const binaryPath = resolveBinary(binaryName) ?? binaryName
         const argv = rest.flatMap((s) => s.args)
         lui.state.proc = spawnProcess({
             binary: binaryPath,
             argv,
-            parseLine: (line) => engine.parseLine(line, lui),
+            parseLine: (line) => engine.parseLine?.(line, lui),
             debugLog: lui.config.global.debug_log,
             onExit: (code, signal) => lui.onEngineExit?.(code, signal),
             onSpawnError: (err) => {
@@ -300,11 +306,13 @@ export const engine = {
     }
 }
 
+/** @param {any} s @param {string} line */
 function pushLog(s, line) {
     if (s.logLines.length >= LOG_RING_SIZE) s.logLines.shift()
     s.logLines.push(line)
 }
 
+/** @param {string} line @param {Lui} lui */
 function parseLoadLine(line, lui) {
     const s = lui.state
 
@@ -438,6 +446,7 @@ function parseLoadLine(line, lui) {
     }
 }
 
+/** @param {string} line @param {Lui} lui */
 function parseRuntimeLine(line, lui) {
     const s = lui.state
 
@@ -550,48 +559,55 @@ function parseRuntimeLine(line, lui) {
     }
 }
 
+/** @param {string} line @returns {[number, number] | null} */
 function extractSlotTask(line) {
     const m = /id\s+(\d+)\s*\|\s*task\s+(-?\d+)/.exec(line)
     if (!m) return null
     return [parseInt(m[1], 10), parseInt(m[2], 10) || 0]
 }
 
+/** @param {string} line @returns {boolean} */
 function isKvLine(line) {
     return line.includes("llama_model_loader:") && line.includes("kv")
 }
 
+/** @param {string} line @returns {string | null} */
 function afterEq(line) {
     const i = line.indexOf(" = ")
     if (i < 0) return null
     return line.slice(i + 3).trim()
 }
 
+/** @param {string} line @returns {number | null} */
 function extractMib(line) {
     const m = /(\d+\.?\d*)\s+MiB/.exec(line)
     return m ? parseFloat(m[1]) : null
 }
 
+/** @param {Lui} lui @returns {string} */
 function binaryNameFromConfig(lui) {
     return lui.config.engine?.[engine.name]?.binary || BINARY_NAME
 }
 
+/** @param {Lui} lui @returns {Promise<void>} */
 async function probeVersion(lui) {
     return new Promise((resolve) => {
         const bin = resolveBinary(binaryNameFromConfig(lui))
-        if (!bin) return resolve()
+        if (!bin) return resolve(undefined)
         let stderr = ""
         const child = spawn(bin, ["--version"], { stdio: ["ignore", "ignore", "pipe"] })
-        child.stderr.setEncoding("utf8")
-        child.stderr.on("data", (c) => (stderr += c))
-        child.on("error", () => resolve())
+        child.stderr?.setEncoding("utf8")
+        child.stderr?.on("data", (c) => (stderr += c))
+        child.on("error", () => resolve(undefined))
         child.on("exit", () => {
             const line = stderr.split(/\r?\n/).find((l) => l.startsWith("version:"))
             if (line) lui.state.llamaVersion = line.slice("version:".length).trim()
-            resolve()
+            resolve(undefined)
         })
     })
 }
 
+/** @param {ViewBuilder} v @param {Lui} lui */
 function appendEnginePanel(v, lui) {
     const s = lui.state
     const p = v.panel("llama-server")
@@ -706,7 +722,7 @@ function appendEnginePanel(v, lui) {
     // Full resolved argv, all dim — colors compete with labels above.
     // Reads the segments stashed at spawn rather than recomputing.
     if (s.argSegments) {
-        const parts = s.argSegments.flatMap((seg) => seg.args)
+        const parts = s.argSegments.flatMap(/** @param {import("../types.js").Segment} seg */ (seg) => seg.args)
         p.line({ indent: 15 }).style(DIM).text(parts.join(" "))
     }
 
@@ -716,6 +732,7 @@ function appendEnginePanel(v, lui) {
     }
 }
 
+/** @param {ViewBuilder} v @param {Lui} lui */
 function appendPerformancePanel(v, lui) {
     const s = lui.state
     const p = v.panel("Performance")
@@ -764,6 +781,7 @@ function appendPerformancePanel(v, lui) {
     }
 }
 
+/** @param {ViewBuilder} v @param {Lui} lui */
 function appendServerLogPanel(v, lui) {
     const s = lui.state
     const p = v.panel("Server Log")
@@ -775,6 +793,7 @@ function appendServerLogPanel(v, lui) {
     }
 }
 
+/** @param {string[]} args @returns {string | null} */
 function inferSource(args) {
     for (let i = 0; i < args.length; i++) {
         if (args[i] === "--hf" && i + 1 < args.length) return `--hf ${args[i + 1]}`

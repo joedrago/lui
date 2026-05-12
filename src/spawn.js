@@ -6,6 +6,8 @@
 // keep ownership of argv composition, parseLine logic, state schema,
 // and panel rendering. Only the boilerplate lives here.
 
+/** @import { SpawnSpec, SpawnHandle } from "./types.js" */
+
 import { spawn } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
@@ -15,6 +17,7 @@ import process from "node:process"
 // (absolute path or `./relative`) is returned as-is. Returns the
 // candidate unchanged if it isn't found; spawn will surface the
 // resulting ENOENT through onExit.
+/** @param {string | null | undefined} candidate @returns {string | null} */
 export function resolveBinary(candidate) {
     if (!candidate) return null
     if (candidate.includes(path.sep) || candidate.startsWith(".")) return candidate
@@ -37,6 +40,7 @@ const KILL_GRACE_MS = 5000
 // Human-readable explanation of a spawn-time failure. ENOENT and
 // EACCES are the two errors the user can fix; everything else falls
 // through to the system message.
+/** @param {string} binaryName @param {NodeJS.ErrnoException | null | undefined} err @returns {string} */
 export function describeSpawnError(binaryName, err) {
     if (err?.code === "ENOENT") return `cannot find ${binaryName} on PATH`
     if (err?.code === "EACCES") return `${binaryName} is not executable`
@@ -65,19 +69,23 @@ export function describeSpawnError(binaryName, err) {
 //                  related vars (e.g. mlx_lm sets TQDM_POSITION=-1 to
 //                  un-suppress huggingface_hub's bytes bar in pipe
 //                  mode) pass an extended env here.
+/** @param {SpawnSpec} spec @returns {SpawnHandle} */
 export function spawnProcess({ binary, argv, parseLine, debugLog, onExit, onSpawnError, addWarning, env }) {
+    /** @type {number | null} */
     let debugFd = null
     if (debugLog) {
         try {
             debugFd = fs.openSync(debugLog, "w")
         } catch (e) {
-            addWarning?.(`debug_log: cannot open ${debugLog}: ${e.message}`)
+            addWarning?.(`debug_log: cannot open ${debugLog}: ${/** @type {Error} */ (e).message}`)
         }
     }
 
     const child = spawn(binary, argv, { stdio: ["ignore", "pipe", "pipe"], env: env ?? process.env })
 
+    /** @type {{ stdout: string, stderr: string }} */
     const buffers = { stdout: "", stderr: "" }
+    /** @param {"stdout" | "stderr"} name @param {string} chunk */
     function drain(name, chunk) {
         if (debugFd != null) {
             try {
@@ -103,15 +111,15 @@ export function spawnProcess({ binary, argv, parseLine, debugLog, onExit, onSpaw
             try {
                 parseLine(line)
             } catch (e) {
-                process.stderr.write(`lui: parseLine threw: ${e?.stack || e}\n`)
+                process.stderr.write(`lui: parseLine threw: ${/** @type {any} */ (e)?.stack || e}\n`)
             }
         }
     }
 
-    child.stdout.setEncoding("utf8")
-    child.stderr.setEncoding("utf8")
-    child.stdout.on("data", (c) => drain("stdout", c))
-    child.stderr.on("data", (c) => drain("stderr", c))
+    child.stdout?.setEncoding("utf8")
+    child.stderr?.setEncoding("utf8")
+    child.stdout?.on("data", (c) => drain("stdout", c))
+    child.stderr?.on("data", (c) => drain("stderr", c))
 
     child.on("exit", (code, signal) => {
         if (debugFd != null) {
@@ -137,20 +145,22 @@ export function spawnProcess({ binary, argv, parseLine, debugLog, onExit, onSpaw
         } catch {
             return
         }
-        await new Promise((res) => {
-            const t = setTimeout(() => {
-                try {
-                    child.kill("SIGKILL")
-                } catch {
-                    // ignore
-                }
-                res()
-            }, KILL_GRACE_MS)
-            child.once("exit", () => {
-                clearTimeout(t)
-                res()
+        await /** @type {Promise<void>} */ (
+            new Promise((res) => {
+                const t = setTimeout(() => {
+                    try {
+                        child.kill("SIGKILL")
+                    } catch {
+                        // ignore
+                    }
+                    res()
+                }, KILL_GRACE_MS)
+                child.once("exit", () => {
+                    clearTimeout(t)
+                    res()
+                })
             })
-        })
+        )
     }
 
     return { child, stop }

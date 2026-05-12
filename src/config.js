@@ -1,6 +1,9 @@
 // Config IO at ~/.config/lui.toml. Atomic tmp+rename on save.
 // Also: `lui config` dump + `lui config set/clear` command handlers.
 
+/** @import { SchemaEntry } from "./types.js" */
+/** @import { Lui } from "./lui.js" */
+
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -26,6 +29,7 @@ export const TOP_LEVEL_TABLES = ["global", "model", "harness", "engine", "sandbo
 // where `set` appends and `clear` drops the whole list. The default
 // values here are the single source of truth — Config.global is seeded
 // from them, and the "Available Settings" dump renders them in place.
+/** @returns {SchemaEntry[]} */
 export function globalSchemaDefaults() {
     return [
         { path: "engine_port", default: 8080 },
@@ -36,7 +40,9 @@ export function globalSchemaDefaults() {
     ]
 }
 
+/** @returns {Record<string, any>} */
 function globalDefaults() {
+    /** @type {Record<string, any>} */
     const out = {}
     for (const { path, default: def } of globalSchemaDefaults()) {
         if (def == null) continue
@@ -47,14 +53,20 @@ function globalDefaults() {
 }
 
 export class Config {
+    /** @param {Record<string, any>} [data] */
     constructor(data = {}) {
+        /** @type {Record<string, any>} */
         this.global = { ...globalDefaults(), ...(data.global ?? {}) }
         // Top-level catalogs / tuning tables. Each is its own root in
         // the TOML — [harness.opencode], [engine.llama-server],
         // [sandbox], [model.phi] — so they sit visually as peers.
+        /** @type {Record<string, any>} */
         this.harness = data.harness ?? {}
+        /** @type {Record<string, any>} */
         this.engine = data.engine ?? {}
+        /** @type {Record<string, any>} */
         this.sandbox = data.sandbox ?? {}
+        /** @type {Record<string, { engine: string, args: string[] }>} */
         this.model = data.model ?? {}
     }
 
@@ -62,20 +74,21 @@ export class Config {
         return Config.loadFrom(CONFIG_PATH)
     }
 
+    /** @param {string} p */
     static loadFrom(p) {
         if (!fs.existsSync(p)) return new Config()
         let text
         try {
             text = fs.readFileSync(p, "utf8")
         } catch (e) {
-            process.stderr.write(`lui: failed to read ${p}: ${e.message}\n`)
+            process.stderr.write(`lui: failed to read ${p}: ${/** @type {Error} */ (e).message}\n`)
             return new Config()
         }
         let data
         try {
             data = parse(text)
         } catch (e) {
-            process.stderr.write(`lui: failed to parse ${p}: ${e.message}\n`)
+            process.stderr.write(`lui: failed to parse ${p}: ${/** @type {Error} */ (e).message}\n`)
             return new Config()
         }
         return new Config(data)
@@ -85,6 +98,7 @@ export class Config {
         Config.saveTo(this, CONFIG_PATH)
     }
 
+    /** @param {Config} cfg @param {string} p */
     static saveTo(cfg, p) {
         fs.mkdirSync(path.dirname(p), { recursive: true })
         const tmp = p + ".tmp"
@@ -95,11 +109,13 @@ export class Config {
     get activeModelName() {
         return this.global.active_model || null
     }
+    /** @param {string} name */
     setActiveModel(name) {
         this.global.active_model = name
     }
 }
 
+/** @param {Config} cfg @returns {string} */
 function serialize(cfg) {
     const out = []
 
@@ -127,8 +143,9 @@ function serialize(cfg) {
 
 // `harness` / `engine` / `model` are map-of-tables; `sandbox` is a leaf
 // table. Detect from the children's shape so new top-levels just work.
+/** @param {Config} cfg @param {string} rootKey @returns {string[]} */
 function emitTopLevelTable(cfg, rootKey) {
-    const obj = cfg[rootKey]
+    const obj = /** @type {Record<string, any>} */ (/** @type {any} */ (cfg)[rootKey])
     if (!obj || typeof obj !== "object") return []
     const inner = Object.entries(obj)
     if (inner.length === 0) return []
@@ -146,6 +163,7 @@ function emitTopLevelTable(cfg, rootKey) {
     return out
 }
 
+/** @param {string} header @param {Record<string, any>} obj @param {string[]} [skipNested] @returns {string[]} */
 function emitTable(header, obj, skipNested = []) {
     const lines = [`[${header}]`]
     if (!obj || typeof obj !== "object") return lines
@@ -163,6 +181,7 @@ function emitTable(header, obj, skipNested = []) {
     return lines
 }
 
+/** @param {string} key @param {any[]} arr @returns {string[]} */
 function emitArrayLine(key, arr) {
     if (arr.length === 0) return [`${tomlKey(key)} = []`]
     const allStrings = arr.every((v) => typeof v === "string")
@@ -173,6 +192,7 @@ function emitArrayLine(key, arr) {
     return [`${tomlKey(key)} = [${arr.map(tomlScalar).join(", ")}]`]
 }
 
+/** @param {any} v @returns {string} */
 function tomlScalar(v) {
     if (typeof v === "string") return tomlString(v)
     if (typeof v === "boolean") return v ? "true" : "false"
@@ -181,6 +201,7 @@ function tomlScalar(v) {
     return tomlString(String(v))
 }
 
+/** @param {string} s @returns {string} */
 function tomlString(s) {
     return (
         '"' +
@@ -189,6 +210,7 @@ function tomlString(s) {
     )
 }
 
+/** @param {string} k @returns {string} */
 function tomlKey(k) {
     if (/^[A-Za-z0-9_-]+$/.test(k)) return k
     return tomlString(k)
@@ -196,22 +218,26 @@ function tomlKey(k) {
 
 // ─── `lui config` CLI ────────────────────────────────────────────────
 
+/** @returns {SchemaEntry[]} */
 function allSchemaDefaults() {
     return [...globalSchemaDefaults(), ...harnessSchemaDefaults(), ...engineSchemaDefaults(), ...sandboxSchemaDefaults()]
 }
 
 const TOP_LEVEL_KEYS = new Set(TOP_LEVEL_TABLES)
 
+/** @param {string[]} path @returns {boolean} */
 function isArrayPath(path) {
     const joined = path.join(".")
     return allSchemaDefaults().some((s) => s.isArray && s.path === joined)
 }
 
+/** @param {string} msg @param {number} [code] @returns {never} */
 function fatal(msg, code = 2) {
     process.stderr.write(`lui: ${msg}\n`)
     process.exit(code)
 }
 
+/** @param {string} pathStr @returns {string[]} */
 function resolveConfigPath(pathStr) {
     if (!pathStr || pathStr.includes("..") || pathStr.startsWith(".") || pathStr.endsWith(".")) {
         fatal(`config: invalid path ${JSON.stringify(pathStr)}`)
@@ -221,10 +247,12 @@ function resolveConfigPath(pathStr) {
     return ["global", ...parts]
 }
 
+/** @param {string[]} path @returns {string} */
 function displayPath(path) {
     return path[0] === "global" ? path.slice(1).join(".") : path.join(".")
 }
 
+/** @param {string} s @returns {any} */
 function parseConfigValue(s) {
     if (s === "true") return true
     if (s === "false") return false
@@ -233,12 +261,14 @@ function parseConfigValue(s) {
     return s
 }
 
+/** @param {any} v @returns {string} */
 function formatConfigValue(v) {
     if (typeof v === "string") return JSON.stringify(v)
     if (Array.isArray(v)) return JSON.stringify(v)
     return String(v)
 }
 
+/** @param {any} root @param {string[]} path @param {any} value */
 function setNested(root, path, value) {
     let cur = root
     for (let i = 0; i < path.length - 1; i++) {
@@ -249,6 +279,7 @@ function setNested(root, path, value) {
     cur[path[path.length - 1]] = value
 }
 
+/** @param {any} root @param {string[]} path @returns {any} */
 function getNested(root, path) {
     let cur = root
     for (const k of path) {
@@ -258,6 +289,7 @@ function getNested(root, path) {
     return cur
 }
 
+/** @param {any} root @param {string[]} path @returns {boolean} */
 function deleteNested(root, path) {
     let cur = root
     for (let i = 0; i < path.length - 1; i++) {
@@ -270,6 +302,7 @@ function deleteNested(root, path) {
     return true
 }
 
+/** @param {Lui} lui @param {string[]} args */
 export function runConfigCommand(lui, args) {
     const [op, ...rest] = args
     if (op === "set") {
@@ -304,8 +337,10 @@ export function runConfigCommand(lui, args) {
     fatal(`config: unknown operation ${JSON.stringify(op)} (try set, clear)`)
 }
 
+/** @param {Lui} lui */
 export function runConfigDump(lui) {
     const tty = process.stdout.isTTY
+    /** @param {string} label */
     const header = (label) => process.stdout.write((tty ? styled(label, STYLE.LABEL) : label) + "\n")
 
     header("Settings:")
@@ -322,6 +357,7 @@ export function runConfigDump(lui) {
 
 // Sort by path, then by value — keeps multi-value arrays grouped and in
 // stable alphabetical order.
+/** @param {{ path: string, value: any }} a @param {{ path: string, value: any }} b */
 function comparePairs(a, b) {
     if (a.path < b.path) return -1
     if (a.path > b.path) return 1
@@ -337,24 +373,28 @@ function comparePairs(a, b) {
 // otherwise (which is also where unseen schema entries land). Def
 // rows render dim so explicitly-configured values stay scannable
 // without splitting the table into two sections.
+/** @param {Lui} lui @param {string} [indent] */
 function writeAllSettings(lui, indent = "") {
     const tty = process.stdout.isTTY
 
+    /** @type {Map<string, string>} */
     const schemaByPath = new Map()
     for (const { path, default: def } of allSchemaDefaults()) {
         schemaByPath.set(path, formatDefault(def))
     }
 
+    /** @type {{ path: string, value: string }[]} */
     const present = []
     visit(present, "", lui.config.global)
     for (const table of TOP_LEVEL_TABLES) {
         // `global` was just walked above; `model` is user data,
         // rendered separately under "Models".
         if (table === "global" || table === "model") continue
-        visit(present, table, lui.config[table])
+        visit(present, table, /** @type {any} */ (lui.config)[table])
     }
 
     const presentPaths = new Set(present.map((p) => p.path))
+    /** @type {{ path: string, value: string, isDef: boolean }[]} */
     const rows = present.map((p) => ({
         ...p,
         isDef: schemaByPath.has(p.path) && String(p.value) === schemaByPath.get(p.path)
@@ -381,6 +421,7 @@ function writeAllSettings(lui, indent = "") {
     process.stdout.write(out.join(""))
 }
 
+/** @param {{ path: string, value: string }[]} pairs @param {string} prefix @param {any} obj */
 function visit(pairs, prefix, obj) {
     if (!obj || typeof obj !== "object") return
     for (const k of Object.keys(obj).sort()) {
@@ -398,11 +439,13 @@ function visit(pairs, prefix, obj) {
     }
 }
 
+/** @param {any} v @returns {string} */
 function formatLeaf(v) {
     if (typeof v === "string") return v
     return String(v)
 }
 
+/** @param {any} v @returns {string} */
 function formatDefault(v) {
     if (v == null) return "(unset)"
     if (Array.isArray(v)) return v.length === 0 ? "[]" : JSON.stringify(v)

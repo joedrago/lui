@@ -2,6 +2,9 @@
 // describe role, not color — so a future theme change happens in one
 // place. Each entry is a plain `PaletteEntry` (see wire.js).
 
+/** @import { PaletteEntry } from "./types.js" */
+
+/** @type {Record<string, PaletteEntry>} */
 export const STYLE = {
     // Inline field labels ("Memory   :") and panel title dividers.
     LABEL: { fg: [120, 100, 180] },

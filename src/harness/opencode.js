@@ -2,10 +2,13 @@
 // Inserts a `provider.lui` block pointing opencode at llama-server,
 // and a `permission.bash` curl allowlist for lui's web-search port.
 
+/** @import { Harness } from "../types.js" */
+
 import { modify, applyEdits, parseTree, findNodeAtLocation } from "jsonc-parser"
 
 const FORMAT = { tabSize: 2, insertSpaces: true, eol: "\n" }
 
+/** @type {Harness} */
 export const harness = {
     name: "opencode",
     configDir: "~/.config/opencode",
@@ -36,11 +39,12 @@ export const harness = {
             if (out.trim()) return { ok: true }
             return { ok: false, error: `opencode not found on ${target.user}@${target.host}. Install it there first.` }
         } catch (e) {
-            return { ok: false, error: `opencode preflight on ${target.user}@${target.host} failed: ${e.message}` }
+            return { ok: false, error: `opencode preflight on ${target.user}@${target.host} failed: ${/** @type {Error} */ (e).message}` }
         }
     }
 }
 
+/** @param {string} text @param {string} modelName @param {string} baseURL @param {number} ctxSize @returns {string} */
 function setProviderLui(text, modelName, baseURL, ctxSize) {
     const luiValue = {
         name: "lui",
@@ -61,6 +65,7 @@ function setProviderLui(text, modelName, baseURL, ctxSize) {
     return applyEdits(text, edits)
 }
 
+/** @param {string} text @param {number} webPort @param {boolean} websearch @returns {string} */
 function setPermissionBash(text, webPort, websearch) {
     const currentPattern = `curl*http://127.0.0.1:${webPort}/*`
     let cur = text

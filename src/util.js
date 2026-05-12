@@ -3,12 +3,14 @@
 import os from "node:os"
 import path from "node:path"
 
+/** @param {string} p @returns {string} */
 export function expandTilde(p) {
     if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2))
     if (p === "~") return os.homedir()
     return p
 }
 
+/** @param {number} ms @returns {string} */
 export function formatDurationMilliseconds(ms) {
     const s = Math.floor(ms / 1000)
     if (s < 60) return `${s}s`
@@ -20,6 +22,7 @@ export function formatDurationMilliseconds(ms) {
     return rm ? `${h}h${rm}m` : `${h}h`
 }
 
+/** @param {number} sec @returns {string} */
 export function formatDurationSeconds(sec) {
     if (sec < 60) return `<1m`
     const m = Math.floor(sec / 60)
@@ -29,6 +32,7 @@ export function formatDurationSeconds(sec) {
     return rm ? `${h}h${rm}m` : `${h}h`
 }
 
+/** @param {number | string} n @returns {string} */
 export function formatNumber(n) {
     return Number(n).toLocaleString("en-US")
 }

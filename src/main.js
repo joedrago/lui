@@ -6,6 +6,7 @@ import { runSetup } from "./setup.js"
 
 const SUBCOMMANDS = new Set(["run", "add", "cp", "set", "rm", "ssh", "websearch", "sandbox", "config", "setup"])
 
+/** @returns {void} */
 function printHelp() {
     process.stdout.write(`lui — a friendly TUI wrapper for LLM engines.
 
@@ -35,6 +36,7 @@ Tip: run \`lui setup\` for an interactive first-run wizard.
 `)
 }
 
+/** @param {string} msg @param {number} [code] @returns {never} */
 function fatal(msg, code = 2) {
     process.stderr.write(`lui: ${msg}\n`)
     process.exit(code)

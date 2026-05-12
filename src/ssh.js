@@ -3,6 +3,9 @@
 // running lui on a client that fetches its engine state from somewhere
 // else — is just the `remote` engine: `lui add NAME remote HOST[:PORT]`.
 
+/** @import { Lui } from "./lui.js" */
+/** @import { Harness, SshTarget, Transport, Endpoint } from "./types.js" */
+
 import http from "node:http"
 import process from "node:process"
 import { spawn } from "node:child_process"
@@ -26,6 +29,7 @@ const SSH_MUX_ARGS =
         ? []
         : ["-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/lui-cm-%C", "-o", "ControlPersist=60"]
 
+/** @param {Lui} lui @param {string} spec */
 export async function sshSetupShare(lui, spec) {
     const target = parseShareTarget(spec)
     if (!target) {
@@ -80,6 +84,7 @@ export async function sshSetupShare(lui, spec) {
     printShareSuccess(target, { engineEndpoint, localWebPort, remoteEnginePort, remoteWebPort, websearch })
 }
 
+/** @param {string} verb @returns {string} */
 function luiNeedsHarnessError(verb) {
     const all = harnesses.map((h) => h.name).join(", ")
     return (
@@ -89,12 +94,14 @@ function luiNeedsHarnessError(verb) {
     )
 }
 
+/** @param {string} s @returns {SshTarget | null} */
 function parseShareTarget(s) {
     const i = s.indexOf("@")
     if (i <= 0 || i >= s.length - 1) return null
     return { user: s.slice(0, i), host: s.slice(i + 1) }
 }
 
+/** @returns {number} */
 function pickRemotePort() {
     const base = 18000 + Math.floor(Math.random() * 11000)
     return base
@@ -106,13 +113,14 @@ const LOCAL_CONFIG_TIMEOUT_MS = 2000
 // what `lui ssh` needs to share — base_url, active model name, context
 // size. Anything else risks drifting from what the live session is
 // actually serving.
+/** @param {number} webPort @returns {Promise<any>} */
 async function fetchLocalConfig(webPort) {
     let cfg
     try {
         cfg = await httpGetLocalJSON(webPort, "/config", LOCAL_CONFIG_TIMEOUT_MS)
     } catch (e) {
         process.stderr.write(
-            `lui ssh: could not reach a running lui at 127.0.0.1:${webPort} (${e.message}).\n` +
+            `lui ssh: could not reach a running lui at 127.0.0.1:${webPort} (${/** @type {Error} */ (e).message}).\n` +
                 `Start one in another terminal first (e.g. \`lui run NAME\`), then re-run \`lui ssh\`.\n`
         )
         process.exit(1)
@@ -127,6 +135,7 @@ async function fetchLocalConfig(webPort) {
     return cfg
 }
 
+/** @param {string | null | undefined} baseURL @returns {Endpoint | null} */
 function parseEndpointFromBaseURL(baseURL) {
     if (!baseURL) return null
     try {
@@ -138,6 +147,7 @@ function parseEndpointFromBaseURL(baseURL) {
     }
 }
 
+/** @param {number} port @param {string} path @param {number} timeoutMs @returns {Promise<any>} */
 function httpGetLocalJSON(port, path, timeoutMs) {
     return new Promise((resolve, reject) => {
         const req = http.get({ host: "127.0.0.1", port, path, timeout: timeoutMs }, (res) => {
@@ -145,13 +155,14 @@ function httpGetLocalJSON(port, path, timeoutMs) {
             res.setEncoding("utf8")
             res.on("data", (c) => (body += c))
             res.on("end", () => {
-                if (res.statusCode < 200 || res.statusCode >= 300) {
-                    return reject(new Error(`HTTP ${res.statusCode} from ${path}`))
+                const status = res.statusCode ?? 0
+                if (status < 200 || status >= 300) {
+                    return reject(new Error(`HTTP ${status} from ${path}`))
                 }
                 try {
                     resolve(JSON.parse(body))
                 } catch (e) {
-                    reject(new Error(`unparseable JSON from ${path}: ${e.message}`))
+                    reject(new Error(`unparseable JSON from ${path}: ${/** @type {Error} */ (e).message}`))
                 }
             })
         })
@@ -160,10 +171,12 @@ function httpGetLocalJSON(port, path, timeoutMs) {
     })
 }
 
+/** @param {SshTarget} target @returns {string} */
 function sshTargetSpec(target) {
     return `${target.user}@${target.host}`
 }
 
+/** @param {SshTarget} target @param {string} command @param {string} [stdinText] @returns {Promise<string>} */
 async function sshRun(target, command, stdinText) {
     return new Promise((resolve, reject) => {
         const child = spawn("ssh", [...SSH_MUX_ARGS, sshTargetSpec(target), command], {
@@ -171,10 +184,10 @@ async function sshRun(target, command, stdinText) {
         })
         let stdout = ""
         let stderr = ""
-        child.stdout.setEncoding("utf8")
-        child.stderr.setEncoding("utf8")
-        child.stdout.on("data", (c) => (stdout += c))
-        child.stderr.on("data", (c) => (stderr += c))
+        child.stdout?.setEncoding("utf8")
+        child.stderr?.setEncoding("utf8")
+        child.stdout?.on("data", (c) => (stdout += c))
+        child.stderr?.on("data", (c) => (stderr += c))
         child.on("error", (e) => reject(new Error(`failed to spawn ssh: ${e.message}`)))
         child.on("exit", (code) => {
             if (code === 0) return resolve(stdout)
@@ -182,20 +195,23 @@ async function sshRun(target, command, stdinText) {
             reject(new Error(msg))
         })
         if (stdinText != null) {
-            child.stdin.end(stdinText)
+            child.stdin?.end(stdinText)
         } else {
-            child.stdin.end()
+            child.stdin?.end()
         }
     })
 }
 
 // SSH transport: paths stay as "~/..." since the remote shell expands ~.
+/** @param {SshTarget} target @returns {Transport} */
 function sshTransport(target) {
     // Tilde expansion only fires on an *unquoted* leading `~`, so a
     // naive `'~/foo'` ends up as a literal `~` directory in CWD. Pull
     // the `~/` outside the quotes; single-quote the rest to neutralize
     // any other metacharacters in the path.
+    /** @param {string} x */
     const sq = (x) => `'${String(x).replace(/'/g, `'\\''`)}'`
+    /** @param {string} s */
     const q = (s) => {
         if (s === "~") return "~"
         if (s.startsWith("~/")) return `~/${sq(s.slice(2))}`
@@ -240,6 +256,7 @@ function sshTransport(target) {
     }
 }
 
+/** @param {Lui} lui @param {SshTarget} target @param {Harness} harness @param {number} remoteEnginePort @param {number} remoteWebPort @param {{ name: string | null }} sessionModel @param {number | null} sessionCtxSize @param {string | null} sessionServedName */
 async function applyHarnessRemote(
     lui,
     target,
@@ -254,7 +271,7 @@ async function applyHarnessRemote(
     // tunnel terminates on the client side, so the client's traffic
     // routes through localhost:<remote port> back to this machine.
     const ctx = harnessContext({
-        activeModel: sessionModel,
+        activeModel: /** @type {any} */ (sessionModel),
         baseURL: `http://localhost:${remoteEnginePort}/v1`,
         webPort: remoteWebPort,
         websearch: lui.config.global.websearch,
@@ -264,6 +281,7 @@ async function applyHarnessRemote(
     await applyHarness(sshTransport(target), harness, ctx, { enabled: true })
 }
 
+/** @param {SshTarget} target @param {{ engineEndpoint: Endpoint, localWebPort: number, remoteEnginePort: number, remoteWebPort: number, websearch: boolean }} ports */
 function printShareSuccess(target, ports) {
     // engineEndpoint comes straight from the running lui's /config
     // base_url: for a llama-server session that's 127.0.0.1:engine_port;

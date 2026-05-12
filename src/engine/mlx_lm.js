@@ -5,6 +5,9 @@
 // accepting connections before its worker thread has finished
 // loading the model.
 
+/** @import { Engine, ViewBuilder } from "../types.js" */
+/** @import { Lui } from "../lui.js" */
+
 import http from "node:http"
 
 import { STYLE } from "../theme.js"
@@ -27,10 +30,12 @@ const RESERVED_FLAGS = new Set(["--host", "--port"])
 // no tok/s) so we bump to DEBUG so parseLine has something to chew on.
 const DEFAULT_HINTS = [{ flags: ["--log-level"], emit: () => ["--log-level", "DEBUG"] }]
 
+/** @param {string[]} args @param {string[]} flags @returns {boolean} */
 function userSuppliedAny(args, flags) {
     return args.some((a) => flags.includes(a))
 }
 
+/** @type {Engine} */
 export const engine = {
     name: "mlx_lm",
 
@@ -146,7 +151,7 @@ export const engine = {
         lui.state.argSegments = desc.segments
         const [binarySeg, ...rest] = desc.segments
         const binaryName = binarySeg.args[0]
-        const binaryPath = resolveBinary(binaryName)
+        const binaryPath = resolveBinary(binaryName) ?? binaryName
         const argv = rest.flatMap((s) => s.args)
         // TQDM_POSITION=-1 forces huggingface_hub's tqdm subclass to
         // emit progress bars even when stderr isn't a TTY (see
@@ -159,7 +164,7 @@ export const engine = {
             binary: binaryPath,
             argv,
             env,
-            parseLine: (line) => engine.parseLine(line, lui),
+            parseLine: (line) => engine.parseLine?.(line, lui),
             debugLog: lui.config.global.debug_log,
             onExit: (code, signal) => lui.onEngineExit?.(code, signal),
             onSpawnError: (err) => {
@@ -378,6 +383,7 @@ const OVERALL_KEY = "__overall__"
 // silently miss progress for repos with long shard names. Either
 // match suppresses the line from the log ring and the panel renders
 // an active bar instead.
+/** @param {any} s @param {string} line @returns {boolean} */
 function parseDownloadProgress(s, line) {
     const wrapper = /Fetching (\d+) files:\s+(\d+)%\|[^|]*\|\s*(\d+)\/(\d+)/.exec(line)
     if (wrapper) {
@@ -427,12 +433,13 @@ function parseDownloadProgress(s, line) {
 // the flag suppresses gen tracking inline, and the reset wipes any
 // state that slipped through pipe-ordering races between the HTTP
 // response and the final stderr log lines.
+/** @param {Lui} lui @returns {Promise<void>} */
 async function probeReady(lui) {
     const s = lui.state
     s.probeInProgress = true
 
     const port = lui.config.global.engine_port
-    const modelName = engine.servedModelName(s, lui.activeModel) || "default"
+    const modelName = engine.servedModelName?.(s, lui.activeModel) || "default"
     const body = JSON.stringify({
         model: modelName,
         messages: [{ role: "user", content: "." }],
@@ -453,35 +460,38 @@ async function probeReady(lui) {
         lui.markEngineReady()
     }
 
-    return new Promise((resolve) => {
-        const req = http.request(
-            {
-                host: "127.0.0.1",
-                port,
-                path: "/v1/chat/completions",
-                method: "POST",
-                headers: {
-                    "content-type": "application/json",
-                    "content-length": Buffer.byteLength(body)
+    return /** @type {Promise<void>} */ (
+        new Promise((resolve) => {
+            const req = http.request(
+                {
+                    host: "127.0.0.1",
+                    port,
+                    path: "/v1/chat/completions",
+                    method: "POST",
+                    headers: {
+                        "content-type": "application/json",
+                        "content-length": Buffer.byteLength(body)
+                    }
+                },
+                (res) => {
+                    res.on("data", () => {})
+                    res.on("end", () => {
+                        settle()
+                        resolve()
+                    })
                 }
-            },
-            (res) => {
-                res.on("data", () => {})
-                res.on("end", () => {
-                    settle()
-                    resolve()
-                })
-            }
-        )
-        req.on("error", () => {
-            settle()
-            resolve()
+            )
+            req.on("error", () => {
+                settle()
+                resolve()
+            })
+            req.write(body)
+            req.end()
         })
-        req.write(body)
-        req.end()
-    })
+    )
 }
 
+/** @param {any} s */
 function finalizeGen(s) {
     if (!s.gen || s.gen.tokens === 0 || s.gen.startMs == null) {
         s.gen = null
@@ -495,10 +505,12 @@ function finalizeGen(s) {
     s.gen = null
 }
 
+/** @param {string} line @returns {boolean} */
 function isLoggerPrefixed(line) {
     return /^\d{4}-\d{2}-\d{2} \S+ - (DEBUG|INFO|WARNING|ERROR) - /.test(line)
 }
 
+/** @param {string} line @returns {boolean} */
 function isAccessLog(line) {
     return /^\S+ - - \[[^\]]+\] "(POST|GET|OPTIONS) /.test(line)
 }
@@ -507,21 +519,25 @@ function isAccessLog(line) {
 // value as UTC since deltas are all we care about — picking a
 // timezone keeps offline replays of debug.log deterministic and
 // avoids any local-time skew between mlx_lm and lui.
+/** @param {string} line @returns {number | null} */
 function parseLineTimestamp(line) {
     const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}),(\d{3})/.exec(line)
     if (!m) return null
     return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], +m[7])
 }
 
+/** @param {any} s @param {string} line */
 function pushLog(s, line) {
     if (s.logLines.length >= LOG_RING_SIZE) s.logLines.shift()
     s.logLines.push(line)
 }
 
+/** @param {Lui} lui @returns {string} */
 function binaryNameFromConfig(lui) {
     return lui.config.engine?.[engine.name]?.binary || BINARY_NAME
 }
 
+/** @param {ViewBuilder} v @param {Lui} lui */
 function appendEnginePanel(v, lui) {
     const s = lui.state
     const p = v.panel("mlx_lm")
@@ -552,7 +568,7 @@ function appendEnginePanel(v, lui) {
     if (s.listenUrl) p.line({ indent: 15 }).style(DIM).text(s.listenUrl)
 
     if (s.argSegments) {
-        const parts = s.argSegments.flatMap((seg) => seg.args)
+        const parts = s.argSegments.flatMap(/** @param {import("../types.js").Segment} seg */ (seg) => seg.args)
         p.line({ indent: 15 }).style(DIM).text(parts.join(" "))
     }
 
@@ -581,6 +597,7 @@ function appendEnginePanel(v, lui) {
     }
 }
 
+/** @param {ViewBuilder} v @param {Lui} lui */
 function appendPerformancePanel(v, lui) {
     const s = lui.state
     const hasGen = s.gen || s.lastGen
@@ -654,6 +671,7 @@ function appendPerformancePanel(v, lui) {
     }
 }
 
+/** @param {ViewBuilder} v @param {Lui} lui */
 function appendServerLogPanel(v, lui) {
     const s = lui.state
     const p = v.panel("Server Log")
@@ -665,6 +683,7 @@ function appendServerLogPanel(v, lui) {
     }
 }
 
+/** @param {string[]} args @returns {string | null} */
 function inferSource(args) {
     for (let i = 0; i < args.length; i++) {
         if (args[i] === "--model" && i + 1 < args.length) return `--model ${args[i + 1]}`

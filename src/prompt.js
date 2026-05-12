@@ -3,6 +3,8 @@
 // `multiselect` and `confirm`. Both throw `PromptAborted` on Ctrl+C /
 // Esc so callers can clean up.
 
+/** @import { MultiselectItem } from "./types.js" */
+
 import process from "node:process"
 
 import { styled } from "./ansi.js"
@@ -19,12 +21,14 @@ const ESC = "\x1b"
 const HIDE_CURSOR = ESC + "[?25l"
 const SHOW_CURSOR = ESC + "[?25h"
 const CLEAR_LINE = ESC + "[2K"
+/** @param {number} n */
 const CURSOR_UP = (n) => ESC + `[${n}A`
 const CURSOR_LEFT = "\r"
 
 // Multi-select prompt: `items` is [{label, value, hint?, selected?}].
 // Returns the array of `value`s the user confirmed (Enter). Space toggles
 // the current row. Esc / Ctrl+C throw `PromptAborted`.
+/** @param {string} question @param {MultiselectItem[]} items @returns {Promise<any[]>} */
 export async function multiselect(question, items) {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
         throw new Error("multiselect requires a TTY")
@@ -78,12 +82,14 @@ export async function multiselect(question, items) {
 
 // Y/n confirm. `default` chooses the answer on bare Enter. Esc / Ctrl+C
 // throw `PromptAborted`.
+/** @param {string} question @param {boolean} [defaultYes] @returns {Promise<boolean>} */
 export async function confirm(question, defaultYes = true) {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
         throw new Error("confirm requires a TTY")
     }
     const hint = defaultYes ? "[Y/n]" : "[y/N]"
     let painted = 0
+    /** @param {boolean | null} answer */
     const render = (answer) => {
         const line =
             styled(question, STYLE.LABEL) +
@@ -116,6 +122,7 @@ export async function confirm(question, defaultYes = true) {
 
 // Shared raw-mode runner. `paint()` draws the initial frame; `onKey` is
 // called with a decoded key name plus the promise resolvers.
+/** @param {() => void} paint @param {(key: string, resolve: (v: any) => void, reject: (e: Error) => void) => void} onKey @returns {Promise<any>} */
 function runRawInput(paint, onKey) {
     return new Promise((resolve, reject) => {
         const stdin = process.stdin
@@ -132,8 +139,9 @@ function runRawInput(paint, onKey) {
             stdin.pause()
             process.stdout.write(SHOW_CURSOR)
         }
+        /** @param {Buffer | string} data */
         const onData = (data) => {
-            const key = decodeKey(data)
+            const key = decodeKey(String(data))
             onKey(
                 key,
                 (v) => {
@@ -150,6 +158,7 @@ function runRawInput(paint, onKey) {
     })
 }
 
+/** @param {string} data @returns {string} */
 function decodeKey(data) {
     if (data === "\x03" || data === "\x1b") return "abort"
     if (data === "\r" || data === "\n") return "enter"

@@ -2,6 +2,8 @@
 // lui-web-search SKILL.md text — harnesses that opt in (via skillsDir)
 // drop a copy under their skills directory so the agent can find it.
 
+/** @import { Lui } from "./lui.js" */
+
 import http from "node:http"
 import os from "node:os"
 import { spawn } from "node:child_process"
@@ -17,23 +19,30 @@ const CORS = {
 }
 
 let bsearchSeq = 0
+/** @returns {string} */
 function nextBsearchId() {
     bsearchSeq += 1
     return `${Date.now().toString(36)}-${bsearchSeq.toString(36)}`
 }
 
+/** @typedef {{ query: string, resolve: (payload: any) => void }} PendingSearch */
+
+/** @param {Lui} lui */
 export async function startWebServer(lui) {
     const port = lui.config.global.web_port
     const host = lui.config.global.public ? "0.0.0.0" : "127.0.0.1"
 
-    const pending = new Map() // id → { resolve, reject, query }
+    /** @type {Map<string, PendingSearch>} */
+    const pending = new Map()
 
     const server = http.createServer((req, res) => handleRequest(req, res, lui, pending))
 
-    await new Promise((resolve, reject) => {
-        server.once("error", reject)
-        server.listen(port, host, () => resolve())
-    })
+    await /** @type {Promise<void>} */ (
+        new Promise((resolve, reject) => {
+            server.once("error", reject)
+            server.listen(port, host, () => resolve())
+        })
+    )
 
     const externalHost = host === "0.0.0.0" ? (bestLanIp() ?? "127.0.0.1") : "127.0.0.1"
     const bookmarkletUrl = `http://${externalHost}:${port}/setup`
@@ -43,11 +52,12 @@ export async function startWebServer(lui) {
         port,
         bookmarkletUrl,
         async close() {
-            await new Promise((res) => server.close(() => res()))
+            await /** @type {Promise<void>} */ (new Promise((res) => server.close(() => res())))
         }
     }
 }
 
+/** @param {import("node:http").IncomingMessage} req @param {import("node:http").ServerResponse} res @param {Lui} lui @param {Map<string, PendingSearch>} pending */
 function handleRequest(req, res, lui, pending) {
     if (req.method === "OPTIONS") {
         res.writeHead(204, CORS)
@@ -55,7 +65,7 @@ function handleRequest(req, res, lui, pending) {
         return
     }
 
-    const url = new URL(req.url, "http://localhost")
+    const url = new URL(req.url ?? "/", "http://localhost")
     const path = url.pathname
 
     try {
@@ -66,7 +76,7 @@ function handleRequest(req, res, lui, pending) {
         if (path === "/results") return handleResults(req, res, lui, pending, url)
     } catch (e) {
         res.writeHead(500, { ...CORS, "content-type": "text/plain" })
-        res.end(`internal error: ${e.message}`)
+        res.end(`internal error: ${/** @type {Error} */ (e).message}`)
         return
     }
     res.writeHead(404, { ...CORS, "content-type": "text/plain" })
@@ -78,6 +88,7 @@ function handleRequest(req, res, lui, pending) {
 // produced server-side (engine spawn, harness apply, etc.) so they
 // travel with the engine state. The local TUI composes its own
 // lui-panel around the response.
+/** @param {import("node:http").IncomingMessage} _req @param {import("node:http").ServerResponse} res @param {Lui} lui */
 function handleData(_req, res, lui) {
     const v = View()
     lui.appendWarningsPanel(v)
@@ -92,6 +103,7 @@ function handleData(_req, res, lui) {
 // re-emits the base_url it learned from upstream, so a turtles→relay
 // →llm chain propagates llm's real URL all the way through. Web-port
 // and websearch are local concerns at every hop and don't travel.
+/** @param {import("node:http").IncomingMessage} req @param {import("node:http").ServerResponse} res @param {Lui} lui */
 function handleConfig(req, res, lui) {
     const body = JSON.stringify({
         version: CONFIG_VERSION,
@@ -110,6 +122,7 @@ function handleConfig(req, res, lui) {
 // the URL is meaningful to whoever just called /config. Remote
 // engines return their already-resolved upstream host, ignoring the
 // request hostname entirely.
+/** @param {import("node:http").IncomingMessage | null | undefined} req @param {Lui} lui @returns {string | null} */
 export function resolveBaseURL(req, lui) {
     const ep = lui.engineModule?.endpoint?.(lui)
     if (!ep) return null
@@ -118,13 +131,15 @@ export function resolveBaseURL(req, lui) {
     return `http://${host}:${ep.port}/v1`
 }
 
+/** @param {import("node:http").IncomingMessage} _req @param {import("node:http").ServerResponse} res @param {Lui} lui */
 function handleSetup(_req, res, lui) {
     const port = lui.config.global.web_port
     res.writeHead(200, { ...CORS, "content-type": "text/html; charset=utf-8" })
     res.end(setupPageHtml(port))
 }
 
-function handleBsearch(_req, res, lui, pending, url) {
+/** @param {import("node:http").IncomingMessage} _req @param {import("node:http").ServerResponse} res @param {Lui} _lui @param {Map<string, PendingSearch>} pending @param {URL} url */
+function handleBsearch(_req, res, _lui, pending, url) {
     const query = (url.searchParams.get("q") || "").trim()
     if (!query) {
         res.writeHead(400, { ...CORS, "content-type": "text/plain" })
@@ -138,7 +153,7 @@ function handleBsearch(_req, res, lui, pending, url) {
         openInBrowser(googleUrl)
     } catch (e) {
         res.writeHead(500, { ...CORS, "content-type": "text/plain" })
-        res.end(`failed to open browser: ${e.message}`)
+        res.end(`failed to open browser: ${/** @type {Error} */ (e).message}`)
         return
     }
 
@@ -163,6 +178,7 @@ function handleBsearch(_req, res, lui, pending, url) {
     })
 }
 
+/** @param {import("node:http").IncomingMessage} req @param {import("node:http").ServerResponse} res @param {Lui} _lui @param {Map<string, PendingSearch>} pending @param {URL} url */
 function handleResults(req, res, _lui, pending, url) {
     const id = url.searchParams.get("id")
     if (!id || !pending.has(id)) {
@@ -188,12 +204,14 @@ function handleResults(req, res, _lui, pending, url) {
     })
 }
 
+/** @param {string} url */
 function openInBrowser(url) {
     if (process.platform === "darwin") return spawn("open", [url], { stdio: "ignore", detached: true }).unref()
     if (process.platform === "win32") return spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true }).unref()
     return spawn("xdg-open", [url], { stdio: "ignore", detached: true }).unref()
 }
 
+/** @returns {string | null} */
 function bestLanIp() {
     const ifaces = os.networkInterfaces()
     for (const list of Object.values(ifaces)) {
@@ -204,6 +222,7 @@ function bestLanIp() {
     return null
 }
 
+/** @param {number} port @returns {string} */
 function bookmarkletJs(port) {
     return `(function(){
   try {
@@ -276,6 +295,7 @@ function bookmarkletJs(port) {
 })();`
 }
 
+/** @param {number} port @returns {string} */
 export function renderWebsearchSkill(port) {
     return `---
 name: lui-web-search
@@ -379,6 +399,7 @@ Be deliberate about when to search:
 `
 }
 
+/** @param {number} port @returns {string} */
 function setupPageHtml(port) {
     const js = bookmarkletJs(port)
     const minified = js

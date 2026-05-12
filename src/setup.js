@@ -6,6 +6,9 @@
 // on or off. The next-steps table at the bottom of this file is
 // intentionally hardcoded — treat it as a living document.
 
+/** @import { Lui } from "./lui.js" */
+/** @import { Engine } from "./types.js" */
+
 import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
@@ -16,6 +19,7 @@ import { harnesses } from "./harness.js"
 import { engines } from "./engine.js"
 import { multiselect, PromptAborted } from "./prompt.js"
 
+/** @param {Lui} lui */
 export async function runSetup(lui) {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
         process.stdout.write(
@@ -41,6 +45,7 @@ export async function runSetup(lui) {
     }
 }
 
+/** @param {Lui} lui @returns {Promise<Set<string>>} */
 async function pickHarnesses(lui) {
     const items = harnesses.map((h) => {
         const detected = commandOnPath(h.name)
@@ -53,6 +58,7 @@ async function pickHarnesses(lui) {
     return new Set(picked)
 }
 
+/** @param {Lui} lui @returns {Promise<{ name: string, engine: string, args: string[] }[]>} */
 async function pickModels(lui) {
     const items = []
     for (const [engineName, engine] of Object.entries(engines)) {
@@ -85,6 +91,7 @@ async function pickModels(lui) {
     return multiselect("Curated models to add:", items)
 }
 
+/** @param {Lui} lui @param {Set<string>} enabledHarnesses @param {{ name: string, engine: string, args: string[] }[]} addedModels */
 function writeChoices(lui, enabledHarnesses, addedModels) {
     for (const h of harnesses) {
         const sub = (lui.config.harness[h.name] ??= {})
@@ -104,7 +111,8 @@ function writeChoices(lui, enabledHarnesses, addedModels) {
 // detection is purely informational upstream (it flips the multi-select
 // preselect default); nothing in this table is filtered away based on
 // what's installed. Everything is just helpful info.
-function printInformation(lui, enabledHarnesses) {
+/** @param {Lui} _lui @param {Set<string>} enabledHarnesses */
+function printInformation(_lui, enabledHarnesses) {
     const w = process.stdout.write.bind(process.stdout)
     w("\n" + styled("Saved", STYLE.READY) + " " + dim(configPathForDisplay()) + "\n\n")
 
@@ -164,16 +172,20 @@ function printInformation(lui, enabledHarnesses) {
     )
 }
 
+/** @param {string} label @param {string} bodyStyled @param {number} width @returns {string} */
 function row(label, bodyStyled, width) {
     return "    " + styled(label.padEnd(width) + " :", STYLE.LABEL) + "   " + bodyStyled + "\n"
 }
 
+/** @param {string} s @returns {string} */
 function cmd(s) {
     return styled(s, STYLE.CONFIG_KEY)
 }
+/** @param {string} s @returns {string} */
 function url(s) {
     return styled(s, STYLE.URL)
 }
+/** @param {string} s @returns {string} */
 function dim(s) {
     return styled(s, { dim: true })
 }
@@ -182,6 +194,7 @@ function dim(s) {
 // `engine.<name>.binary` wins, otherwise the schema default, otherwise
 // the engine name as a last resort. Returns null when the engine
 // doesn't declare a binary (e.g. the `remote` engine).
+/** @param {Lui} lui @param {Engine} engine @param {string} engineName @returns {string | null} */
 function engineBinaryName(lui, engine, engineName) {
     const override = lui.config.engine?.[engineName]?.binary
     if (override) return override
@@ -193,6 +206,7 @@ function engineBinaryName(lui, engine, engineName) {
 // True when `name` resolves to an executable on the user's PATH. Pure
 // fs walk — no subprocess — so this is safe at config-write time and
 // matches what `command -v` would see for a non-shell-builtin.
+/** @param {string} name @returns {boolean} */
 function commandOnPath(name) {
     const PATH = process.env.PATH || ""
     const isWin = process.platform === "win32"
@@ -213,6 +227,7 @@ function commandOnPath(name) {
     return false
 }
 
+/** @returns {string} */
 function configPathForDisplay() {
     return path.join("~", ".config", "lui.toml")
 }

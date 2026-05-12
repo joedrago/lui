@@ -1,3 +1,5 @@
+/** @import { Engine, Model, ViewBuilder } from "./types.js" */
+
 import process from "node:process"
 
 import { Config } from "./config.js"
@@ -19,19 +21,34 @@ export class Lui {
     constructor() {
         this.config = Config.load()
         this.startedAt = Date.now()
+        /** @type {{ text: string, addedAt: number }[]} */
         this.warnings = []
 
+        /** @type {Engine | null} */
         this.engineModule = null
+        /** @type {Model | null} */
         this.activeModel = null
+        /** @type {Record<string, any>} */
         this.state = {}
 
+        /** @type {{ server: any, port: number, bookmarkletUrl: string, close: () => Promise<void> } | null} */
         this.web = null
+        /** @type {{ stop: () => void, repaint?: () => void } | null} */
         this.tui = null
 
         this.shuttingDown = false
         this.exitCode = 0
+        /** @type {boolean} */
+        this.engineReadyFired = false
+        /** @type {(() => void) | null} */
+        this.onEngineReady = null
+        /** @type {(() => void) | null} */
+        this.onShutdownResolve = null
+        /** @type {string | null} */
+        this.quitReason = null
     }
 
+    /** @param {string} [name] */
     async run(name) {
         const model = this.resolveModel(name)
         if (!model) {
@@ -50,7 +67,7 @@ export class Lui {
         // hand the harness a wrong default. The engine signals via
         // `lui.markEngineReady()` from inside its parseLine.
         this.onEngineReady = () => {
-            const ctxSize = this.engineModule.contextSize?.(this.state, this.activeModel) ?? null
+            const ctxSize = this.engineModule?.contextSize?.(this.state, this.activeModel) ?? null
             applyAllLocal(this, { ctxSize }).catch((e) => {
                 process.stderr.write(`lui: harness apply: ${e?.stack || e}\n`)
             })
@@ -70,10 +87,11 @@ export class Lui {
         try {
             this.onEngineReady?.()
         } catch (e) {
-            process.stderr.write(`lui: onEngineReady threw: ${e?.stack || e}\n`)
+            process.stderr.write(`lui: onEngineReady threw: ${/** @type {any} */ (e)?.stack || e}\n`)
         }
     }
 
+    /** @param {string} name @param {string} engineName @param {string[]} args */
     add(name, engineName, args) {
         if (!engines[engineName]) {
             process.stderr.write(`lui: unknown engine "${engineName}". Available: ${Object.keys(engines).join(", ")}\n`)
@@ -91,6 +109,7 @@ export class Lui {
         process.stdout.write(`Added model "${name}" (${engineName}).\n`)
     }
 
+    /** @param {string} name @param {string[]} args */
     set(name, args) {
         const existing = this.config.model[name]
         const creating = !existing
@@ -111,6 +130,7 @@ export class Lui {
         this.config.save()
     }
 
+    /** @param {string} name */
     rm(name) {
         if (!this.config.model[name]) {
             process.stderr.write(`lui: model "${name}" not found.\n`)
@@ -122,6 +142,7 @@ export class Lui {
         process.stdout.write(`Removed "${name}".\n`)
     }
 
+    /** @param {string} oldName @param {string} newName */
     cp(oldName, newName) {
         if (newName === oldName) {
             process.stderr.write(`lui: cp needs a different NEWNAME than OLDNAME.\n`)
@@ -141,6 +162,7 @@ export class Lui {
         process.stdout.write(`Copied "${oldName}" → "${newName}" (engine ${src.engine}).\n`)
     }
 
+    /** @param {{ indent?: string }} [opts] */
     printModels({ indent = "" } = {}) {
         const names = Object.keys(this.config.model).sort()
         if (!names.length) {
@@ -220,9 +242,11 @@ export class Lui {
         emitPaintedLines(built)
     }
 
+    /** @param {string} target */
     async ssh(target) {
         await sshSetupShare(this, target)
     }
+    /** @param {string} harnessName @param {string[]} harnessArgs */
     async sandbox(harnessName, harnessArgs) {
         await runSandbox(this, harnessName, harnessArgs)
     }
@@ -238,9 +262,11 @@ export class Lui {
     // `this.quitReason` from the signal name so the shutdown summary can
     // show why we left (only modes without a richer reason source — like
     // a parsed engine exit — want this).
+    /** @param {{ recordReason?: boolean }} [opts] @returns {Promise<void>} */
     awaitShutdown({ recordReason = false } = {}) {
         return new Promise((resolve) => {
             this.onShutdownResolve = resolve
+            /** @param {string} sig */
             const onSignal = (sig) => {
                 if (recordReason) this.quitReason ??= `received ${sig}`
                 this.shutdown(0)
@@ -250,6 +276,7 @@ export class Lui {
         })
     }
 
+    /** @param {string | undefined} name @returns {Model | null} */
     resolveModel(name) {
         const wanted = name || this.config.activeModelName
         if (!wanted) {
@@ -262,6 +289,7 @@ export class Lui {
         return { name: wanted, engine: m.engine, args: m.args || [] }
     }
 
+    /** @param {Model} model */
     async spawnEngine(model) {
         this.engineModule = engines[model.engine]
         if (!this.engineModule) {
@@ -276,6 +304,7 @@ export class Lui {
         await this.engineModule.start(this, model, desc)
     }
 
+    /** @param {number | null} code @param {string | null} signal */
     onEngineExit(code, signal) {
         if (this.shuttingDown) return
         const detail =
@@ -288,6 +317,7 @@ export class Lui {
         this.shutdown(code || 1)
     }
 
+    /** @param {number} [code] */
     async shutdown(code = 0) {
         if (this.shuttingDown) return
         this.shuttingDown = true
@@ -296,13 +326,13 @@ export class Lui {
         try {
             await this.engineModule?.stop?.(this)
         } catch (e) {
-            process.stderr.write(`lui: engine.stop threw: ${e?.stack || e}\n`)
+            process.stderr.write(`lui: engine.stop threw: ${/** @type {any} */ (e)?.stack || e}\n`)
         }
         await this.web?.close?.()
         try {
             this.config.save()
         } catch (e) {
-            process.stderr.write(`lui: failed to save config: ${e.message}\n`)
+            process.stderr.write(`lui: failed to save config: ${/** @type {Error} */ (e).message}\n`)
         }
         this.printShutdownSummary()
         this.onShutdownResolve?.()
@@ -331,6 +361,7 @@ export class Lui {
         process.stdout.write(out.join(""))
     }
 
+    /** @param {ViewBuilder} v */
     appendLuiPanel(v) {
         const webPort = this.config.global.web_port
         const wantsUrl = this.config.global.websearch !== false && webPort
@@ -352,6 +383,7 @@ export class Lui {
         }
     }
 
+    /** @param {ViewBuilder} v */
     appendWarningsPanel(v) {
         const now = Date.now()
         const live = this.warnings.filter((w) => now - w.addedAt < Lui.WARNING_TTL_MS)
@@ -361,23 +393,27 @@ export class Lui {
         for (const w of live) p.line().style(STYLE.WARNING).text(w.text)
     }
 
+    /** @param {string} text */
     addWarning(text) {
         this.warnings.push({ text, addedAt: Date.now() })
     }
 }
 
+/** @param {string[] | undefined} errors */
 function exitOnErrors(errors) {
     if (!errors?.length) return
     for (const e of errors) process.stderr.write(`lui: ${e}\n`)
     process.exit(1)
 }
 
+/** @param {string[]} labels @returns {number} */
 function labelWidth(labels) {
     let w = 0
     for (const l of labels) if (l.length > w) w = l.length
     return w
 }
 
+/** @param {string} label @param {string} value @param {number} width @returns {string} */
 function line(label, value, width) {
     return `  ${styled(`${label.padEnd(width)} :`, STYLE.LABEL)} ${value}\n`
 }
@@ -385,6 +421,7 @@ function line(label, value, width) {
 // Per-Line `indent` plus an optional outer indent. Long lines wrap at
 // the terminal width with continuation rows aligned at the same start
 // column; non-TTY skips the wrap.
+/** @param {import("./types.js").BuiltView} built @param {string} [outerIndent] */
 function emitPaintedLines(built, outerIndent = "") {
     const panel = built.panels[0]
     if (!panel) return
@@ -400,13 +437,13 @@ function emitPaintedLines(built, outerIndent = "") {
         const available = cols - indent.length - RIGHT_MARGIN
 
         if (!tty || available <= 0 || vwidth(text) <= available) {
-            const body = tty ? paint(text, compiled) : stripStyle(text)
+            const body = tty && compiled ? paint(text, compiled) : stripStyle(text)
             process.stdout.write(indent + body + "\n")
             continue
         }
 
         for (const row of wrapStyled(text, available)) {
-            process.stdout.write(indent + paint(row, compiled) + "\n")
+            process.stdout.write(indent + paint(row, compiled ?? []) + "\n")
         }
     }
 }

@@ -16,6 +16,8 @@
 // any number of hops, so turtles → relay → llm writes a harness on
 // turtles pointing straight at llm.
 
+/** @import { Engine, HostSpec } from "../types.js" */
+
 import http from "node:http"
 
 import { STYLE } from "../theme.js"
@@ -26,6 +28,7 @@ const CONFIG_TIMEOUT_MS = 5000
 const DATA_TIMEOUT_MS = 1500
 const DEFAULT_LUI_PORT = 8081
 
+/** @type {Engine} */
 export const engine = {
     name: "remote",
     schema: [],
@@ -61,13 +64,14 @@ export const engine = {
 
     async start(lui, model, _desc) {
         const target = parseHostSpec(model.args[0])
+        if (!target) throw new Error("remote: missing HOST")
         lui.state.target = target
 
         let cfg
         try {
             cfg = await fetchConfig(target)
         } catch (e) {
-            lui.state.fatalReason = `could not reach ${target.host}:${target.port}: ${e.message}`
+            lui.state.fatalReason = `could not reach ${target.host}:${target.port}: ${/** @type {Error} */ (e).message}`
             throw new Error(lui.state.fatalReason)
         }
 
@@ -92,7 +96,7 @@ export const engine = {
         try {
             lui.state.cachedView = await fetchData(target)
         } catch (e) {
-            lui.state.connectError = e.message || String(e)
+            lui.state.connectError = /** @type {Error} */ (e).message || String(e)
         }
 
         lui.markEngineReady()
@@ -102,7 +106,7 @@ export const engine = {
                 lui.state.cachedView = await fetchData(target)
                 lui.state.connectError = null
             } catch (e) {
-                lui.state.connectError = e.message || String(e)
+                lui.state.connectError = /** @type {Error} */ (e).message || String(e)
             }
         }, POLL_MS)
     },
@@ -174,6 +178,7 @@ export const engine = {
     }
 }
 
+/** @param {string | null | undefined} s @returns {HostSpec | null} */
 function parseHostSpec(s) {
     if (!s || typeof s !== "string") return null
     const i = s.lastIndexOf(":")
@@ -184,14 +189,17 @@ function parseHostSpec(s) {
     return { host, port }
 }
 
+/** @param {HostSpec} target */
 function fetchConfig(target) {
     return httpGetJSON(target, "/config", CONFIG_TIMEOUT_MS)
 }
 
+/** @param {HostSpec} target */
 function fetchData(target) {
     return httpGetJSON(target, "/data", DATA_TIMEOUT_MS)
 }
 
+/** @param {HostSpec} target @param {string} path @param {number} timeoutMs @returns {Promise<any>} */
 function httpGetJSON(target, path, timeoutMs) {
     return new Promise((resolve, reject) => {
         const req = http.get({ host: target.host, port: target.port, path, timeout: timeoutMs }, (res) => {
@@ -199,13 +207,14 @@ function httpGetJSON(target, path, timeoutMs) {
             res.setEncoding("utf8")
             res.on("data", (c) => (body += c))
             res.on("end", () => {
-                if (res.statusCode < 200 || res.statusCode >= 300) {
-                    return reject(new Error(`${target.host}:${target.port}${path} returned HTTP ${res.statusCode}`))
+                const status = res.statusCode ?? 0
+                if (status < 200 || status >= 300) {
+                    return reject(new Error(`${target.host}:${target.port}${path} returned HTTP ${status}`))
                 }
                 try {
                     resolve(JSON.parse(body))
                 } catch (e) {
-                    reject(new Error(`unparseable JSON from ${path}: ${e.message}`))
+                    reject(new Error(`unparseable JSON from ${path}: ${/** @type {Error} */ (e).message}`))
                 }
             })
         })

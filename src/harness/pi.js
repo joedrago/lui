@@ -1,10 +1,13 @@
 // pi harness: writes ~/.pi/agent/models.json. pi's file is plain JSON
 // but jsonc-parser handles it identically.
 
+/** @import { Harness } from "../types.js" */
+
 import { modify, applyEdits, parseTree, findNodeAtLocation } from "jsonc-parser"
 
 const FORMAT = { tabSize: 2, insertSpaces: true, eol: "\n" }
 
+/** @type {Harness} */
 export const harness = {
     name: "pi",
     configDir: "~/.pi/agent",

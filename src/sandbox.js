@@ -1,6 +1,9 @@
 // `lui sandbox HARNESS [args...]`: launch HARNESS under nono
 // (https://nono.sh). Knobs live under [sandbox] in lui.toml.
 
+/** @import { Lui } from "./lui.js" */
+/** @import { SchemaEntry, Segment } from "./types.js" */
+
 import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
@@ -11,6 +14,7 @@ import { STYLE } from "./theme.js"
 
 // `lui config` displays these under "Available Settings". `isArray`
 // marks list-typed paths where `set` appends and `clear` drops.
+/** @returns {SchemaEntry[]} */
 export function sandboxSchemaDefaults() {
     return [
         { path: "sandbox.allow_cwd", default: true },
@@ -39,6 +43,7 @@ const SEG_DEFAULTS = STYLE.SEGMENT_DEFAULTS
 const SEG_USER = STYLE.SEGMENT_USER
 const SEG_SEP = STYLE.SEGMENT_POLICY
 
+/** @param {Lui} lui @param {string} harnessName @param {string[]} harnessArgs */
 export async function runSandbox(lui, harnessName, harnessArgs) {
     if (!harnessName) {
         process.stderr.write("lui: sandbox requires HARNESS\n")
@@ -53,7 +58,7 @@ export async function runSandbox(lui, harnessName, harnessArgs) {
 
     const child = spawn(bin, argv, { stdio: "inherit" })
     child.on("error", (e) => {
-        if (e.code === "ENOENT") {
+        if (/** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT") {
             process.stderr.write(
                 `lui: sandbox requires ${JSON.stringify(bin)} on PATH (install from https://nono.sh, ` +
                     `or set [sandbox].bin to its path).\n`
@@ -76,6 +81,7 @@ export async function runSandbox(lui, harnessName, harnessArgs) {
     })
 }
 
+/** @param {any} cfg @param {string} bin @param {string} harness @returns {string | null} */
 function resolveProfile(cfg, bin, harness) {
     const explicit = (cfg.profile ?? "").trim()
     if (explicit) {
@@ -85,6 +91,7 @@ function resolveProfile(cfg, bin, harness) {
     return nonoProfileExists(bin, harness) ? harness : FALLBACK_PROFILE
 }
 
+/** @param {string} bin @param {string} name @returns {boolean} */
 function nonoProfileExists(bin, name) {
     try {
         const r = spawnSync(bin, ["profile", "show", name, "--silent"], { stdio: "ignore" })
@@ -96,10 +103,12 @@ function nonoProfileExists(bin, name) {
 
 // Styled-segment preview of `lui sandbox HARNESS`; "HARNESS" stands in
 // wherever the real harness name would land. No nono probe.
+/** @param {Lui} lui @returns {{ bin: string, segments: Segment[] }} */
 export function previewSandboxArgs(lui) {
     const cfg = lui.config.sandbox || {}
     const bin = cfg.bin || "nono"
     const explicit = (cfg.profile ?? "").trim()
+    /** @type {string | null} */
     let profile
     if (explicit) {
         profile = explicit.toLowerCase() === PROFILE_OPT_OUT ? null : explicit
@@ -112,7 +121,9 @@ export function previewSandboxArgs(lui) {
     return { bin, segments }
 }
 
+/** @param {any} cfg @param {string | null} profile @returns {Segment[]} */
 function buildNonoSegments(cfg, profile) {
+    /** @type {Segment[]} */
     const segments = []
     segments.push({ name: "verb", style: SEG_VERB, args: ["run"] })
 
@@ -146,8 +157,10 @@ function buildNonoSegments(cfg, profile) {
 
 // Toolchain dirs (cargo, go, npm, bun, pnpm, pip, …) granted R+W so
 // first-run fetches can populate caches. Non-existing paths skipped.
+/** @returns {string[]} */
 function existingDevToolDirs() {
     const home = os.homedir()
+    /** @param {string} envKey @param {string} rel @returns {string} */
     const envOrHome = (envKey, rel) => {
         const v = process.env[envKey]
         return v && v.length ? v : path.join(home, rel)

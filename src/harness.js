@@ -34,6 +34,9 @@
 // The HarnessContext passed to apply():
 //   modelName, baseURL, ctxSize, webPort, websearch
 
+/** @import { Harness, HarnessContext, Transport, SchemaEntry } from "./types.js" */
+/** @import { Lui } from "./lui.js" */
+
 import fs from "node:fs"
 
 import { renderWebsearchSkill } from "./web.js"
@@ -41,6 +44,7 @@ import { harness as opencode } from "./harness/opencode.js"
 import { harness as pi } from "./harness/pi.js"
 import { expandTilde } from "./util.js"
 
+/** @type {Harness[]} */
 export const harnesses = [opencode, pi]
 
 // Schema keys the framework reads generically from every harness. A
@@ -62,10 +66,12 @@ for (const h of harnesses) {
     }
 }
 
+/** @param {Harness} harness @param {string} key @returns {any} */
 function harnessSchemaDefault(harness, key) {
     return (harness.schema ?? []).find((s) => s.path === key)?.default
 }
 
+/** @param {Lui} lui @param {Harness} harness @returns {boolean} */
 export function isHarnessEnabled(lui, harness) {
     const sub = lui.config.harness?.[harness.name]
     if (sub && typeof sub.enabled === "boolean") return sub.enabled
@@ -74,6 +80,7 @@ export function isHarnessEnabled(lui, harness) {
 
 // Each harness's own `schema` entries, prefixed with `harness.<name>.`
 // and surfaced by `lui config` under "Available Settings".
+/** @returns {SchemaEntry[]} */
 export function harnessSchemaDefaults() {
     const out = []
     for (const h of harnesses) {
@@ -98,6 +105,7 @@ export function harnessSchemaDefaults() {
 // the alias is fine there, but mlx_lm.server 404s a mismatch and
 // remote-engine hops surface the upstream's value. When null we fall
 // back to the lui alias.
+/** @param {{ activeModel: { name: string } | null, baseURL: string, webPort: number, websearch: boolean | null | undefined, ctxSize: number | null | undefined, servedName: string | null }} args @returns {HarnessContext} */
 export function harnessContext({ activeModel, baseURL, webPort, websearch, ctxSize, servedName }) {
     return {
         modelName: servedName || deriveModelName(activeModel?.name),
@@ -110,6 +118,7 @@ export function harnessContext({ activeModel, baseURL, webPort, websearch, ctxSi
 
 const DEFAULT_CTX_SIZE = 32768
 
+/** @param {string | null | undefined} activeKey @returns {string} */
 export function deriveModelName(activeKey) {
     if (!activeKey) return "lui"
     const tail = activeKey.split("/").pop() || activeKey
@@ -121,6 +130,7 @@ export function deriveModelName(activeKey) {
 //   exists(p), read(p), write(p, body), remove(p), mkdirp(p), tryRmDir(p)
 // `localTransport` resolves "~/..." to a real fs path; `sshTransport`
 // (in ssh.js) passes "~/..." through to the remote shell unchanged.
+/** @type {Transport} */
 export const localTransport = {
     name: "local",
     resolve(p) {
@@ -157,7 +167,9 @@ export const localTransport = {
 //
 // `opts.onBackup(file, backup)` fires when an existing config was
 // stashed as .luibackup before lui's first write. Default noop.
+/** @param {Transport} transport @param {Harness} harness @param {HarnessContext} ctx @param {{ enabled?: boolean, onBackup?: (file: string, backup: string) => void }} [opts] @returns {Promise<string | null>} */
 export async function applyHarness(transport, harness, ctx, { enabled, onBackup } = {}) {
+    /** @param {...string} parts */
     const join = (...parts) => parts.join("/")
     const dir = transport.resolve(harness.configDir)
 
@@ -199,6 +211,7 @@ export async function applyHarness(transport, harness, ctx, { enabled, onBackup 
     return null
 }
 
+/** @param {Transport} transport @param {string} dir @param {string[]} candidates @returns {Promise<string>} */
 async function pickConfigFile(transport, dir, candidates) {
     for (const name of candidates) {
         const p = `${dir}/${name}`
@@ -213,26 +226,31 @@ async function pickConfigFile(transport, dir, candidates) {
 // remote engine that's the upstream URL the engine learned from
 // /config, so harnesses on this machine point directly at the real
 // model regardless of how many hops are in between.
+/** @param {Lui} lui @param {{ ctxSize?: number | null }} [opts] */
 export async function applyAllLocal(lui, { ctxSize } = {}) {
     const servedName = lui.engineModule?.servedModelName?.(lui.state, lui.activeModel) ?? null
+    const baseURL = localBaseURL(lui)
+    if (!baseURL) return
     const ctx = harnessContext({
         activeModel: lui.activeModel,
-        baseURL: localBaseURL(lui),
+        baseURL,
         webPort: lui.config.global.web_port,
         websearch: lui.config.global.websearch,
         ctxSize,
         servedName
     })
+    /** @param {string} file @param {string} backup */
     const onBackup = (file, backup) => lui.addWarning?.(`backed up ${file} → ${backup} before first lui write`)
     for (const h of harnesses) {
         try {
             await applyHarness(localTransport, h, ctx, { enabled: isHarnessEnabled(lui, h), onBackup })
         } catch (e) {
-            process.stderr.write(`lui: harness "${h.name}" apply failed: ${e.message}\n`)
+            process.stderr.write(`lui: harness "${h.name}" apply failed: ${/** @type {Error} */ (e).message}\n`)
         }
     }
 }
 
+/** @param {Lui} lui @returns {string | null} */
 function localBaseURL(lui) {
     const ep = lui.engineModule?.endpoint?.(lui)
     if (!ep) return null
