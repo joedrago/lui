@@ -9,6 +9,22 @@ import { spawn } from "node:child_process"
 import { harnesses, applyHarness, harnessContext, isHarnessEnabled } from "./harness.js"
 import { engines } from "./engine.js"
 
+// applyHarness does ~8–10 sequential remote ops per harness (exists,
+// read, mkdirp, write, …). Without multiplexing each one pays a fresh
+// TCP+auth handshake and the whole `lui ssh` run drags. ControlMaster
+// reuses one connection for all of them. Windows OpenSSH does not
+// implement ControlMaster (Win32-OpenSSH issue #405), so the gate
+// falls back to a plain `ssh` invocation per call there.
+//
+// ControlPath lives in /tmp rather than os.tmpdir() because macOS's
+// per-user tmpdir (/var/folders/…/T/) plus ssh's own atomic-create
+// suffix overruns the 104-byte Unix-domain-socket path limit. The
+// %C token is a per-target hash so paths don't collide across runs.
+const SSH_MUX_ARGS =
+    process.platform === "win32"
+        ? []
+        : ["-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/lui-cm-%C", "-o", "ControlPersist=60"]
+
 export async function sshSetupShare(lui, spec) {
     const target = parseShareTarget(spec)
     if (!target) {
@@ -37,6 +53,7 @@ export async function sshSetupShare(lui, spec) {
     const localWebPort = lui.config.global.web_port
     const websearch = lui.config.global.websearch !== false
 
+    process.stdout.write("\n")
     for (const h of enabled) {
         if (h.sshPreflight) {
             const ok = await h.sshPreflight(target, sshRun)
@@ -46,6 +63,7 @@ export async function sshSetupShare(lui, spec) {
             }
         }
         await applyHarnessRemote(lui, target, h, remoteEnginePort, remoteWebPort)
+        process.stdout.write(`  ${h.name} configured on ${sshTargetSpec(target)}\n`)
     }
 
     printShareSuccess(target, { engineEndpoint, localWebPort, remoteEnginePort, remoteWebPort, websearch })
@@ -77,7 +95,7 @@ function sshTargetSpec(target) {
 
 async function sshRun(target, command, stdinText) {
     return new Promise((resolve, reject) => {
-        const child = spawn("ssh", [sshTargetSpec(target), command], {
+        const child = spawn("ssh", [...SSH_MUX_ARGS, sshTargetSpec(target), command], {
             stdio: ["pipe", "pipe", "pipe"]
         })
         let stdout = ""
@@ -102,7 +120,16 @@ async function sshRun(target, command, stdinText) {
 
 // SSH transport: paths stay as "~/..." since the remote shell expands ~.
 function sshTransport(target) {
-    const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+    // Tilde expansion only fires on an *unquoted* leading `~`, so a
+    // naive `'~/foo'` ends up as a literal `~` directory in CWD. Pull
+    // the `~/` outside the quotes; single-quote the rest to neutralize
+    // any other metacharacters in the path.
+    const sq = (x) => `'${String(x).replace(/'/g, `'\\''`)}'`
+    const q = (s) => {
+        if (s === "~") return "~"
+        if (s.startsWith("~/")) return `~/${sq(s.slice(2))}`
+        return sq(s)
+    }
     return {
         name: "ssh",
         resolve(p) {
@@ -174,7 +201,6 @@ function printShareSuccess(target, ports) {
         ? `ssh -R ${engineFwd} -R ${webFwd} ${sshTargetSpec(target)}`
         : `ssh -R ${engineFwd} ${sshTargetSpec(target)}`
 
-    process.stdout.write(`\n  opencode configured on ${sshTargetSpec(target)}\n\n`)
-    process.stdout.write(`  To connect from this machine, run in another terminal:\n\n`)
+    process.stdout.write(`\n  To connect from this machine, run in another terminal:\n\n`)
     process.stdout.write(`    ${cmd}\n\n`)
 }

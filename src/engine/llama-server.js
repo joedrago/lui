@@ -56,7 +56,19 @@ export const engine = {
     // Extra lines for `lui` shutdown summary (rendered between Uptime
     // and Reason) plus an optional bright-red abort message.
     shutdownSummary(state) {
-        return { lines: [], fatal: state?.fatalReason || null }
+        const lines = []
+        const logLines = state?.logLines ?? []
+        // Include last 5 log lines when the engine exited badly (non-zero
+        // code or killed by a signal).
+        const exitCode = state?.exitCode
+        const exitSignal = state?.exitSignal
+        if ((exitCode != null && exitCode !== 0) || exitSignal) {
+            const tail = logLines.slice(-5)
+            if (tail.length > 0) {
+                lines.push({ label: "Last log lines", value: tail.join("\n") })
+            }
+        }
+        return { lines, fatal: state?.fatalReason || null }
     },
 
     // Human-readable detail for the shutdown's Reason line.

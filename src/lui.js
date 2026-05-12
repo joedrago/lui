@@ -282,6 +282,9 @@ export class Lui {
             this.engineModule?.exitReason?.(this.state, code, signal) ??
             (signal ? `killed by ${signal}` : `exited with code ${code}`)
         this.quitReason = `${this.engineModule?.name ?? "engine"} ${detail}`
+        // Store exit details on state so shutdownSummary can include them
+        this.state.exitCode = code
+        this.state.exitSignal = signal
         this.shutdown(code || 1)
     }
 
