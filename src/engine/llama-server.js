@@ -48,6 +48,37 @@ export const engine = {
     // prefixed by the framework with `engine.<name>.`.
     schema: [{ path: "binary", default: BINARY_NAME }],
 
+    // Curated "lui setup" entries. The wizard offers each as a toggle so
+    // a fresh install can leave with a working model. `args` is the
+    // argv passed straight to `lui add NAME llama-server …`. Tune as
+    // upstreams / quantizations change — this is a living list, not a
+    // policy. Models the user already registered get skipped.
+    setupDefaults: [
+        {
+            name: "qwen",
+            args: [
+                "-hf",
+                "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M",
+                "-c",
+                "262144",
+                "-ctk",
+                "q8_0",
+                "-ctv",
+                "q8_0",
+                "--temp",
+                "0.6",
+                "--top-p",
+                "0.95",
+                "--top-k",
+                "20",
+                "--min-p",
+                "0.00",
+                "--presence-penalty",
+                "1.5"
+            ]
+        }
+    ],
+
     // Best known context size. After Ready, state.ctxSize is the
     // authoritative value (lifted from `llama_context: n_ctx = …`).
     // Before then — or in offline callers like `lui ssh` that have no

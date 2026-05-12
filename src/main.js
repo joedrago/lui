@@ -2,8 +2,9 @@ import process from "node:process"
 
 import { Lui } from "./lui.js"
 import { runConfigCommand, runConfigDump } from "./config.js"
+import { runSetup } from "./setup.js"
 
-const SUBCOMMANDS = new Set(["run", "add", "cp", "set", "rm", "ssh", "websearch", "sandbox", "config"])
+const SUBCOMMANDS = new Set(["run", "add", "cp", "set", "rm", "ssh", "websearch", "sandbox", "config", "setup"])
 
 function printHelp() {
     process.stdout.write(`lui — a friendly TUI wrapper for LLM engines.
@@ -28,6 +29,8 @@ USAGE
   lui sandbox HARNESS [ARGS...]    launch HARNESS under nono — every
                                    token after HARNESS is passed
                                    verbatim
+
+Tip: run \`lui setup\` for an interactive first-run wizard.
 
 `)
 }
@@ -114,6 +117,12 @@ async function main() {
     if (verb === "websearch") {
         if (rest.length > 0) fatal("websearch takes no arguments")
         await lui.websearch()
+        return
+    }
+
+    if (verb === "setup") {
+        if (rest.length > 0) fatal("setup takes no arguments")
+        await runSetup(lui)
         return
     }
 }

@@ -35,8 +35,8 @@ A friendly TUI wrapper for [llama.cpp](https://github.com/ggml-org/llama.cpp)'s 
 Register a model once with `lui add NAME ENGINE ARGS...`, then run it with `lui run NAME`. Everything after the engine name is the opaque argv lui passes to it.
 
 ```
-lui add qwenmoe llama-server -hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M -c 262144 -ctk q8_0 -ctv q8_0 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00 --presence-penalty 1.5
-lui run qwenmoe
+lui add qwen llama-server -hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M -c 262144 -ctk q8_0 -ctv q8_0 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00 --presence-penalty 1.5
+lui run qwen
 ```
 
 lui shows download progress bars, starts `llama-server`, applies the enabled harnesses, and prints **Ready** once the model is loaded. The most recently run model is remembered, so subsequent runs are just `lui run` (no name).
@@ -88,7 +88,7 @@ Register a `remote` model the same way you'd register any model, then run it. Th
 ```
 # On the server (the machine actually running llama.cpp):
 lui config set public true     # so /config + /data bind 0.0.0.0
-lui run qwenmoe
+lui run qwen
 
 # On this machine:
 lui add llm remote server.local:8081
