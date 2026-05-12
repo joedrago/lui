@@ -7,11 +7,10 @@ const FORMAT = { tabSize: 2, insertSpaces: true, eol: "\n" }
 
 export const harness = {
     name: "pi",
-    defaultEnabled: false,
     configDir: "~/.pi/agent",
     configCandidates: ["models.json"],
     skillsDir: "skills",
-    schema: [{ path: "enabled", display: "false" }],
+    schema: [{ path: "enabled", default: false }],
 
     apply(existing, ctx) {
         let text = existing.trim() ? existing : "{}\n"

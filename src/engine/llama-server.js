@@ -6,7 +6,7 @@ import os from "node:os"
 
 import { STYLE } from "../theme.js"
 import { stripAnsi } from "../ansi.js"
-import { resolveBinary } from "../engine.js"
+import { resolveBinary } from "../util.js"
 
 const DIM = { dim: true }
 const BOLD = { bold: true }
@@ -34,7 +34,6 @@ function userSuppliedAny(args, flags) {
 
 const LOG_RING_SIZE = 200
 const MAX_RECENT_REQUESTS = 3
-const SETUP_URL_BRIGHT_MS = 5000
 
 // Flags the engine won't let the user override.
 const RESERVED_FLAGS = new Set(["--host", "--port"])
@@ -45,7 +44,7 @@ export const engine = {
 
     // Knobs that show up under "Available Settings" in `lui config`,
     // prefixed by the framework with `engine.<name>.`.
-    schema: [{ path: "binary", display: "(PATH: llama-server)" }],
+    schema: [{ path: "binary", default: "llama-server" }],
 
     // Best known context size. After Ready, state.ctxSize is the
     // authoritative value (lifted from `llama_context: n_ctx = …`).
@@ -191,7 +190,7 @@ export const engine = {
     },
 
     appendPanels(v, lui) {
-        appendModelPanel(v, lui)
+        appendEnginePanel(v, lui)
         appendPerformancePanel(v, lui)
         appendServerLogPanel(v, lui)
     }
@@ -499,21 +498,9 @@ function formatDurationSeconds(sec) {
     return rm ? `${h}h${rm}m` : `${h}h`
 }
 
-function appendModelPanel(v, lui) {
+function appendEnginePanel(v, lui) {
     const s = lui.state
-    const p = v.panel("lui — llm ui")
-
-    const webPort = lui.config.global.web_port
-    if (lui.config.global.websearch !== false && webPort) {
-        const host = lui.config.global.public ? (lui.ownHost ?? "127.0.0.1") : "127.0.0.1"
-        // Bright cyan + bold for the first 1.5s so the URL grabs attention
-        // on startup; then fades to dim so it stops competing with the
-        // live status fields below it. Matches the Rust display behavior.
-        const fresh = Date.now() - lui.startedAt < SETUP_URL_BRIGHT_MS
-        p.line({ align: "right" })
-            .style(fresh ? STYLE.URL_FRESH : DIM)
-            .text(`http://${host}:${webPort}/setup`)
-    }
+    const p = v.panel("llama-server")
 
     const gpuTotal = s.gpuMemMib + s.kvCacheMib + s.computeBufMib
     const cpuTotal = s.cpuMemMib + s.cpuRepackMib + s.cpuComputeMib

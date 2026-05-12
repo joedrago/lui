@@ -13,6 +13,7 @@ import { applyAllLocal } from "./harness.js"
 
 export class Lui {
     static WARNING_TTL_MS = 60_000
+    static SETUP_URL_BRIGHT_MS = 5000
 
     constructor() {
         this.config = Config.load()
@@ -56,7 +57,9 @@ export class Lui {
         // `lui.markEngineReady()` from inside its parseLine.
         this.onEngineReady = () => {
             const ctxSize = this.engineModule.contextSize?.(this.state, this.activeModel) ?? null
-            applyAllLocal(this, { ctxSize })
+            applyAllLocal(this, { ctxSize }).catch((e) => {
+                process.stderr.write(`lui: harness apply: ${e?.stack || e}\n`)
+            })
         }
 
         await this.spawnEngine(model)
@@ -359,16 +362,24 @@ export class Lui {
     }
 
     appendLuiPanel(v) {
-        // The engine's own appendPanels already emits the top "lui — llm ui"
-        // panel since it carries the model + memory + version state. When no
-        // engine is loaded (websearch-only mode), emit a minimal status panel
-        // here so the screen isn't empty.
-        if (this.engineModule) return
-        const p = v.panel("lui — llm ui")
         const webPort = this.config.global.web_port
-        if (webPort) p.line({ align: "right" }).style(STYLE.URL).text(`http://127.0.0.1:${webPort}/setup`)
-        p.line().style(STYLE.LABEL).text("Mode     : ").style().text("websearch only")
-        p.line().style(STYLE.LABEL).text("Listening: ").style().text(`127.0.0.1:${webPort}`)
+        const wantsUrl = this.config.global.websearch !== false && webPort
+        const noEngine = !this.engineModule
+        if (!wantsUrl && !noEngine) return
+
+        const p = v.panel("lui — llm ui")
+        if (wantsUrl) {
+            // Bright for the first SETUP_URL_BRIGHT_MS so the URL grabs
+            // attention on startup; fades to dim afterwards.
+            const fresh = Date.now() - this.startedAt < Lui.SETUP_URL_BRIGHT_MS
+            p.line({ align: "right" })
+                .style(fresh ? STYLE.URL_FRESH : { dim: true })
+                .text(`http://127.0.0.1:${webPort}/setup`)
+        }
+        if (noEngine) {
+            p.line().style(STYLE.LABEL).text("Mode     : ").style().text("websearch only")
+            p.line().style(STYLE.LABEL).text("Listening: ").style().text(`127.0.0.1:${webPort}`)
+        }
     }
 
     appendWarningsPanel(v) {

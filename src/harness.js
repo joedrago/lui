@@ -6,11 +6,14 @@
 //
 //   name              kebab-case identifier; doubles as the
 //                     [harness.<name>] table key in lui.toml
-//   defaultEnabled    boolean — used when [harness.<name>].enabled is unset
 //   configDir         where the agent reads its config (~-prefixed)
 //   configCandidates  basenames lui will look for in configDir, in
 //                     preference order; the first match is read, the
 //                     first entry is the write target if none exist
+//   schema            [{ path, default, isArray? }] of knobs under
+//                     [harness.<name>]; surfaced by `lui config` as
+//                     Available Settings. Must include an "enabled"
+//                     entry with the default-enabled state.
 //   apply(existing, ctx) → string
 //                     given the current file contents (or "") and a
 //                     HarnessContext, return the new file contents
@@ -24,9 +27,6 @@
 //   needsBackup(existing) → boolean
 //                     return true on first write to a config lui didn't
 //                     author, so the original gets stashed as .luibackup
-//   schema            [{ path, display, isArray? }] of knobs under
-//                     [harness.<name>]; surfaced by `lui config` as
-//                     Available Settings
 //   sshPreflight(target, sshRun) → { ok, error? }
 //                     async sanity check before `lui ssh` writes to a
 //                     remote machine (e.g. is the agent installed there)
@@ -35,12 +35,11 @@
 //   modelName, baseURL, ctxSize, webPort, websearch
 
 import fs from "node:fs"
-import path from "node:path"
-import os from "node:os"
 
 import { renderWebsearchSkill } from "./web.js"
 import { harness as opencode } from "./harness/opencode.js"
 import { harness as pi } from "./harness/pi.js"
+import { expandTilde } from "./util.js"
 
 export const harnesses = [opencode, pi]
 
@@ -63,10 +62,14 @@ for (const h of harnesses) {
     }
 }
 
+function harnessSchemaDefault(harness, key) {
+    return (harness.schema ?? []).find((s) => s.path === key)?.default
+}
+
 export function isHarnessEnabled(lui, harness) {
     const sub = lui.config.harness?.[harness.name]
     if (sub && typeof sub.enabled === "boolean") return sub.enabled
-    return harness.defaultEnabled
+    return harnessSchemaDefault(harness, "enabled") === true
 }
 
 // Each harness's own `schema` entries, prefixed with `harness.<name>.`
@@ -105,13 +108,104 @@ export function deriveModelName(activeKey) {
     return tail.split(":")[0].replace(/-GGUF$/, "") || "lui"
 }
 
+// Minimal transport interface — methods applyHarness drives:
+//   resolve(home-prefixed path) → path the other methods accept
+//   exists(p), read(p), write(p, body), remove(p), mkdirp(p), tryRmDir(p)
+// `localTransport` resolves "~/..." to a real fs path; `sshTransport`
+// (in ssh.js) passes "~/..." through to the remote shell unchanged.
+export const localTransport = {
+    name: "local",
+    resolve(p) {
+        return expandTilde(p)
+    },
+    async exists(p) {
+        return fs.existsSync(p)
+    },
+    async read(p) {
+        return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : ""
+    },
+    async write(p, body) {
+        const tmp = p + ".tmp"
+        fs.writeFileSync(tmp, body)
+        fs.renameSync(tmp, p)
+    },
+    async remove(p) {
+        if (fs.existsSync(p)) fs.unlinkSync(p)
+    },
+    async mkdirp(p) {
+        fs.mkdirSync(p, { recursive: true })
+    },
+    async tryRmDir(p) {
+        try {
+            fs.rmdirSync(p)
+        } catch {
+            // ignore — non-empty or missing
+        }
+    }
+}
+
+// Shared apply-flow for a single harness over any transport. Returns
+// the path written (or null if nothing changed) so callers can log.
+//
+// `opts.onBackup(file, backup)` fires when an existing config was
+// stashed as .luibackup before lui's first write. Default noop.
+export async function applyHarness(transport, harness, ctx, { enabled, onBackup } = {}) {
+    const join = (...parts) => parts.join("/")
+    const dir = transport.resolve(harness.configDir)
+
+    // Skill add/remove runs regardless of `enabled` (sweep stale files).
+    if (harness.skillsDir) {
+        const skillDir = join(dir, harness.skillsDir, "lui-web-search")
+        const skillPath = join(skillDir, "SKILL.md")
+        const wantSkill = enabled && ctx.websearch
+        if (wantSkill) {
+            await transport.mkdirp(skillDir)
+            const body = renderWebsearchSkill(ctx.webPort)
+            const cur = await transport.read(skillPath)
+            if (cur !== body) await transport.write(skillPath, body)
+        } else if (await transport.exists(skillPath)) {
+            await transport.remove(skillPath)
+            await transport.tryRmDir(skillDir)
+        }
+    }
+
+    if (!enabled) return null
+
+    await transport.mkdirp(dir)
+    const file = await pickConfigFile(transport, dir, harness.configCandidates)
+    const existing = await transport.read(file)
+
+    if (existing && harness.needsBackup?.(existing)) {
+        const backup = file + ".luibackup"
+        if (!(await transport.exists(backup))) {
+            await transport.write(backup, existing)
+            onBackup?.(file, backup)
+        }
+    }
+
+    const next = harness.apply(existing, ctx)
+    if (next !== existing) {
+        await transport.write(file, next)
+        return file
+    }
+    return null
+}
+
+async function pickConfigFile(transport, dir, candidates) {
+    for (const name of candidates) {
+        const p = `${dir}/${name}`
+        if (await transport.exists(p)) return p
+    }
+    return `${dir}/${candidates[0]}`
+}
+
 // Walks every shipped harness so just-disabled ones get their stale
 // SKILL.md swept; config edits stay gated on `enabled`. Pass
 // `{ baseURL }` to point harness configs at a remote llama-server
 // instead of the local one — used by `lui remote`. `ctxSize` is the
 // engine's current best answer; caller computes it via the engine
 // module (or, for `lui remote`, takes it from the server's /config).
-export function applyAllLocal(lui, { baseURL, ctxSize } = {}) {
+export async function applyAllLocal(lui, { baseURL, ctxSize } = {}) {
     const ctx = harnessContext({
         activeModel: lui.activeModel,
         baseURL,
@@ -120,73 +214,12 @@ export function applyAllLocal(lui, { baseURL, ctxSize } = {}) {
         websearch: lui.config.global.websearch,
         ctxSize
     })
+    const onBackup = (file, backup) => lui.addWarning?.(`backed up ${file} → ${backup} before first lui write`)
     for (const h of harnesses) {
         try {
-            applyOneLocal(lui, h, ctx, isHarnessEnabled(lui, h))
+            await applyHarness(localTransport, h, ctx, { enabled: isHarnessEnabled(lui, h), onBackup })
         } catch (e) {
             process.stderr.write(`lui: harness "${h.name}" apply failed: ${e.message}\n`)
         }
     }
 }
-
-function applyOneLocal(lui, harness, ctx, enabled) {
-    const dir = expandTilde(harness.configDir)
-
-    // Skill add/remove runs regardless of `enabled` (sweep stale files).
-    // Skipped entirely for harnesses that don't declare a skills dir.
-    if (harness.skillsDir) {
-        const skillDir = path.join(dir, harness.skillsDir, "lui-web-search")
-        const skillPath = path.join(skillDir, "SKILL.md")
-        const wantSkill = enabled && ctx.websearch
-        if (wantSkill) {
-            fs.mkdirSync(skillDir, { recursive: true })
-            const body = renderWebsearchSkill(ctx.webPort)
-            if (!fs.existsSync(skillPath) || fs.readFileSync(skillPath, "utf8") !== body) {
-                fs.writeFileSync(skillPath, body)
-            }
-        } else if (fs.existsSync(skillPath)) {
-            fs.unlinkSync(skillPath)
-            try {
-                fs.rmdirSync(skillDir)
-            } catch {
-                // ignore — directory not empty or already gone
-            }
-        }
-    }
-
-    if (!enabled) return
-
-    fs.mkdirSync(dir, { recursive: true })
-    const file = pickConfigFile(dir, harness.configCandidates)
-    const existing = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : ""
-
-    if (existing && harness.needsBackup && harness.needsBackup(existing)) {
-        const backup = file + ".luibackup"
-        if (!fs.existsSync(backup)) {
-            fs.writeFileSync(backup, existing)
-            lui.addWarning?.(`backed up ${file} → ${backup} before first lui write`)
-        }
-    }
-
-    const next = harness.apply(existing, ctx)
-    if (next !== existing) {
-        const tmp = file + ".tmp"
-        fs.writeFileSync(tmp, next)
-        fs.renameSync(tmp, file)
-    }
-}
-
-function pickConfigFile(dir, candidates) {
-    for (const name of candidates) {
-        const p = path.join(dir, name)
-        if (fs.existsSync(p)) return p
-    }
-    return path.join(dir, candidates[0])
-}
-
-export function expandTilde(p) {
-    if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2))
-    if (p === "~") return os.homedir()
-    return p
-}
-

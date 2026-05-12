@@ -1,17 +1,19 @@
 // Config IO at ~/.config/lui.toml. Atomic tmp+rename on save.
+// Also: `lui config` dump + `lui config set/clear` command handlers.
 
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
+import process from "node:process"
 import { parse } from "smol-toml"
 
-export const CONFIG_PATH = path.join(os.homedir(), ".config", "lui.toml")
+import { engineSchemaDefaults } from "./engine.js"
+import { harnessSchemaDefaults } from "./harness.js"
+import { sandboxSchemaDefaults } from "./sandbox.js"
+import { styled } from "./ansi.js"
+import { STYLE } from "./theme.js"
 
-export const DEFAULTS = {
-    engine_port: 8080,
-    web_port: 8081,
-    websearch: true
-}
+export const CONFIG_PATH = path.join(os.homedir(), ".config", "lui.toml")
 
 // Top-level TOML tables lui knows about. `global` settings are the bare
 // keys at the file root; the rest are nested. `model` is user-data
@@ -19,26 +21,34 @@ export const DEFAULTS = {
 // but it's still a valid path prefix for `lui config set model.X.Y …`.
 export const TOP_LEVEL_TABLES = ["global", "model", "harness", "engine", "sandbox"]
 
-// Schema entries displayed by `lui config` under "Available Settings".
-// One entry per knob; `isArray` marks list-typed paths (so `lui config
-// set` appends and `lui config clear` removes the whole list).
-export const globalSchemaDefaults = [
-    { path: "engine_port", display: String(DEFAULTS.engine_port) },
-    { path: "web_port", display: String(DEFAULTS.web_port) },
-    { path: "websearch", display: String(DEFAULTS.websearch) },
-    { path: "public", display: "false" },
-    { path: "debug_log", display: "(unset)" }
-]
+// Schema entries surfaced by `lui config` under "Available Settings".
+// Each is {path, default, isArray?}. `isArray` marks list-typed paths
+// where `set` appends and `clear` drops the whole list. The default
+// values here are the single source of truth — Config.global is seeded
+// from them, and the "Available Settings" dump renders them in place.
+export function globalSchemaDefaults() {
+    return [
+        { path: "engine_port", default: 8080 },
+        { path: "web_port", default: 8081 },
+        { path: "websearch", default: true },
+        { path: "public", default: false },
+        { path: "debug_log", default: null }
+    ]
+}
+
+function globalDefaults() {
+    const out = {}
+    for (const { path, default: def } of globalSchemaDefaults()) {
+        if (def == null) continue
+        if (path.includes(".")) continue
+        out[path] = def
+    }
+    return out
+}
 
 export class Config {
     constructor(data = {}) {
-        const g = data.global ?? {}
-        this.global = {
-            engine_port: DEFAULTS.engine_port,
-            web_port: DEFAULTS.web_port,
-            websearch: DEFAULTS.websearch,
-            ...g
-        }
+        this.global = { ...globalDefaults(), ...(data.global ?? {}) }
         // Top-level catalogs / tuning tables. Each is its own root in
         // the TOML — [harness.opencode], [engine.llama-server],
         // [sandbox], [model.phi] — so they sit visually as peers.
@@ -182,4 +192,213 @@ function tomlString(s) {
 function tomlKey(k) {
     if (/^[A-Za-z0-9_-]+$/.test(k)) return k
     return tomlString(k)
+}
+
+// ─── `lui config` CLI ────────────────────────────────────────────────
+
+function allSchemaDefaults() {
+    return [...globalSchemaDefaults(), ...harnessSchemaDefaults(), ...engineSchemaDefaults(), ...sandboxSchemaDefaults()]
+}
+
+const TOP_LEVEL_KEYS = new Set(TOP_LEVEL_TABLES)
+
+function isArrayPath(path) {
+    const joined = path.join(".")
+    return allSchemaDefaults().some((s) => s.isArray && s.path === joined)
+}
+
+function fatal(msg, code = 2) {
+    process.stderr.write(`lui: ${msg}\n`)
+    process.exit(code)
+}
+
+function resolveConfigPath(pathStr) {
+    if (!pathStr || pathStr.includes("..") || pathStr.startsWith(".") || pathStr.endsWith(".")) {
+        fatal(`config: invalid path ${JSON.stringify(pathStr)}`)
+    }
+    const parts = pathStr.split(".")
+    if (TOP_LEVEL_KEYS.has(parts[0])) return parts
+    return ["global", ...parts]
+}
+
+function displayPath(path) {
+    return path[0] === "global" ? path.slice(1).join(".") : path.join(".")
+}
+
+function parseConfigValue(s) {
+    if (s === "true") return true
+    if (s === "false") return false
+    if (/^-?\d+$/.test(s)) return parseInt(s, 10)
+    if (/^-?\d+\.\d+$/.test(s)) return parseFloat(s)
+    return s
+}
+
+function formatConfigValue(v) {
+    if (typeof v === "string") return JSON.stringify(v)
+    if (Array.isArray(v)) return JSON.stringify(v)
+    return String(v)
+}
+
+function setNested(root, path, value) {
+    let cur = root
+    for (let i = 0; i < path.length - 1; i++) {
+        const k = path[i]
+        if (cur[k] == null || typeof cur[k] !== "object" || Array.isArray(cur[k])) cur[k] = {}
+        cur = cur[k]
+    }
+    cur[path[path.length - 1]] = value
+}
+
+function getNested(root, path) {
+    let cur = root
+    for (const k of path) {
+        if (cur == null) return undefined
+        cur = cur[k]
+    }
+    return cur
+}
+
+function deleteNested(root, path) {
+    let cur = root
+    for (let i = 0; i < path.length - 1; i++) {
+        cur = cur[path[i]]
+        if (cur == null) return false
+    }
+    const last = path[path.length - 1]
+    if (!(last in cur)) return false
+    delete cur[last]
+    return true
+}
+
+export function runConfigCommand(lui, args) {
+    const [op, ...rest] = args
+    if (op === "set") {
+        if (rest.length !== 2) fatal("config set PATH VALUE")
+        const path = resolveConfigPath(rest[0])
+        const value = parseConfigValue(rest[1])
+        if (isArrayPath(path)) {
+            const current = getNested(lui.config, path)
+            const arr = Array.isArray(current) ? current : []
+            arr.push(value)
+            setNested(lui.config, path, arr)
+            lui.config.save()
+            process.stdout.write(
+                `Added ${formatConfigValue(value)} to ${displayPath(path)} (now ${arr.length} item${arr.length === 1 ? "" : "s"})\n`
+            )
+        } else {
+            setNested(lui.config, path, value)
+            lui.config.save()
+            process.stdout.write(`Set ${displayPath(path)} = ${formatConfigValue(value)}\n`)
+        }
+        return
+    }
+    if (op === "clear") {
+        if (rest.length !== 1) fatal("config clear PATH")
+        const path = resolveConfigPath(rest[0])
+        const removed = deleteNested(lui.config, path)
+        lui.config.save()
+        if (removed) process.stdout.write(`Cleared ${displayPath(path)}\n`)
+        else process.stdout.write(`${displayPath(path)} was already unset\n`)
+        return
+    }
+    fatal(`config: unknown operation ${JSON.stringify(op)} (try set, clear)`)
+}
+
+export function runConfigDump(lui) {
+    const tty = process.stdout.isTTY
+    const header = (label) => process.stdout.write((tty ? styled(label, STYLE.LABEL) : label) + "\n")
+
+    header("Active Settings:")
+    const setPaths = writeFlatConfig(lui, "  ")
+
+    process.stdout.write("\n")
+    header("Available Settings:")
+    writeDefaultConfig(setPaths, "  ")
+
+    process.stdout.write("\n")
+    header("Models:")
+    lui.printModels({ indent: "  " })
+
+    process.stdout.write("\n")
+    lui.printSandboxCommandline()
+    process.stdout.write("\n")
+}
+
+function emitPair(out, indent, path, value, tty) {
+    if (tty) out.push(`${indent}${styled(path, STYLE.CONFIG_KEY)} ${styled(value, STYLE.VALUE)}\n`)
+    else out.push(`${indent}${path} ${value}\n`)
+}
+
+// Sort by path, then by value — keeps multi-value arrays grouped and in
+// stable alphabetical order.
+function comparePairs(a, b) {
+    if (a.path < b.path) return -1
+    if (a.path > b.path) return 1
+    const av = String(a.value)
+    const bv = String(b.value)
+    if (av < bv) return -1
+    if (av > bv) return 1
+    return 0
+}
+
+function writeFlatConfig(lui, indent = "") {
+    const pairs = []
+    visit(pairs, "", lui.config.global)
+    for (const table of TOP_LEVEL_TABLES) {
+        // `global` is rendered flat above; `model` is user data, listed
+        // separately under "Models".
+        if (table === "global" || table === "model") continue
+        visit(pairs, table, lui.config[table])
+    }
+
+    pairs.sort(comparePairs)
+
+    const setPaths = new Set()
+    const out = []
+    const tty = process.stdout.isTTY
+    for (const { path, value } of pairs) {
+        setPaths.add(path)
+        emitPair(out, indent, path, value, tty)
+    }
+    process.stdout.write(out.join(""))
+    return setPaths
+}
+
+function writeDefaultConfig(setPaths, indent = "") {
+    const out = []
+    const tty = process.stdout.isTTY
+    const sorted = allSchemaDefaults()
+        .filter(({ path }) => !setPaths.has(path))
+        .map(({ path, default: def }) => ({ path, value: formatDefault(def) }))
+        .sort(comparePairs)
+    for (const { path, value } of sorted) emitPair(out, indent, path, value, tty)
+    process.stdout.write(out.join(""))
+}
+
+function visit(pairs, prefix, obj) {
+    if (!obj || typeof obj !== "object") return
+    for (const k of Object.keys(obj).sort()) {
+        const v = obj[k]
+        if (v == null) continue
+        const path = prefix ? `${prefix}.${k}` : k
+        if (Array.isArray(v)) {
+            if (v.length === 0) pairs.push({ path, value: "[]" })
+            else for (const item of v) pairs.push({ path, value: formatLeaf(item) })
+        } else if (typeof v === "object") {
+            visit(pairs, path, v)
+        } else {
+            pairs.push({ path, value: formatLeaf(v) })
+        }
+    }
+}
+
+function formatLeaf(v) {
+    if (typeof v === "string") return v
+    return String(v)
+}
+
+function formatDefault(v) {
+    if (v == null) return "(unset)"
+    if (Array.isArray(v)) return v.length === 0 ? "[]" : JSON.stringify(v)
+    return String(v)
 }

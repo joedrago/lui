@@ -8,11 +8,10 @@ const FORMAT = { tabSize: 2, insertSpaces: true, eol: "\n" }
 
 export const harness = {
     name: "opencode",
-    defaultEnabled: true,
     configDir: "~/.config/opencode",
     configCandidates: ["opencode.jsonc", "opencode.json"],
     skillsDir: "skills",
-    schema: [{ path: "enabled", display: "true" }],
+    schema: [{ path: "enabled", default: true }],
 
     apply(existing, ctx) {
         let text = existing.trim() ? existing : "{}\n"

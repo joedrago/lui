@@ -6,8 +6,8 @@ import http from "node:http"
 import process from "node:process"
 import { spawn } from "node:child_process"
 
-import { CONFIG_VERSION, renderWebsearchSkill, startWebServer } from "./web.js"
-import { harnesses, applyAllLocal, harnessContext, isHarnessEnabled } from "./harness.js"
+import { CONFIG_VERSION, startWebServer } from "./web.js"
+import { harnesses, applyAllLocal, applyHarness, harnessContext, isHarnessEnabled } from "./harness.js"
 import { engines } from "./engine.js"
 import { startTui } from "./display.js"
 
@@ -74,7 +74,7 @@ export async function sshSetupUse(lui, hostSpec) {
     const llamaBaseURL = `http://${target.host}:${cfg.engine_port}/v1`
     lui.activeModel = { name: cfg.active_model || "lui", engine: "remote", args: [] }
     const enabled = lui.config.global.websearch !== false
-    applyAllLocal(lui, { baseURL: llamaBaseURL, ctxSize: cfg.context_size })
+    await applyAllLocal(lui, { baseURL: llamaBaseURL, ctxSize: cfg.context_size })
 
     process.stdout.write(`\n  Using server at ${target.host}:${target.httpPort}\n`)
     process.stdout.write(`    model:           ${cfg.active_model ?? "(unknown)"}\n`)
@@ -152,22 +152,49 @@ async function sshRun(target, command, stdinText) {
     })
 }
 
-async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remoteWebPort) {
-    const dir = harness.configDir.replace(/^~\//, "")
-    const basename = harness.configCandidates[0]
-    const remotePath = `~/${dir}/${basename}`
-
-    const existing = await sshRun(target, `cat ${remotePath} 2>/dev/null || true`).catch(() => "")
-
-    if (existing && harness.needsBackup?.(existing)) {
-        const cp = `cp -n ${remotePath} ${remotePath}.luibackup 2>/dev/null || true`
-        try {
-            await sshRun(target, cp)
-        } catch {
-            // ignore
+// SSH transport: paths stay as "~/..." since the remote shell expands ~.
+function sshTransport(target) {
+    const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+    return {
+        name: "ssh",
+        resolve(p) {
+            return p
+        },
+        async exists(p) {
+            try {
+                await sshRun(target, `test -e ${q(p)}`)
+                return true
+            } catch {
+                return false
+            }
+        },
+        async read(p) {
+            return await sshRun(target, `cat ${q(p)} 2>/dev/null || true`).catch(() => "")
+        },
+        async write(p, body) {
+            await sshRun(target, `cat > ${q(p)}`, body)
+        },
+        async remove(p) {
+            try {
+                await sshRun(target, `rm -f ${q(p)}`)
+            } catch {
+                // ignore
+            }
+        },
+        async mkdirp(p) {
+            await sshRun(target, `mkdir -p ${q(p)}`)
+        },
+        async tryRmDir(p) {
+            try {
+                await sshRun(target, `rmdir ${q(p)} 2>/dev/null || true`)
+            } catch {
+                // ignore
+            }
         }
     }
+}
 
+async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remoteWebPort) {
     const activeModel = lui.activeModel ?? resolveActiveModel(lui) ?? { name: "lui", engine: "llama-server", args: [] }
     const engineModule = engines[activeModel.engine]
     const ctxSize = engineModule?.contextSize?.(lui.state, activeModel) ?? null
@@ -179,22 +206,7 @@ async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remote
         websearch: lui.config.global.websearch,
         ctxSize
     })
-    const next = harness.apply(existing || "", ctx)
-    await sshRun(target, `mkdir -p ~/${dir} && cat > ${remotePath}`, next)
-
-    if (harness.skillsDir) {
-        const skillDir = `~/${dir}/${harness.skillsDir}/lui-web-search`
-        if (lui.config.global.websearch !== false) {
-            const body = renderWebsearchSkill(remoteWebPort)
-            await sshRun(target, `mkdir -p ${skillDir} && cat > ${skillDir}/SKILL.md`, body)
-        } else {
-            try {
-                await sshRun(target, `rm -f ${skillDir}/SKILL.md && rmdir ${skillDir} 2>/dev/null || true`)
-            } catch {
-                // ignore
-            }
-        }
-    }
+    await applyHarness(sshTransport(target), harness, ctx, { enabled: true })
 }
 
 function resolveActiveModel(lui) {

@@ -80,5 +80,5 @@ export function View() {
         return { version: 1, palette, panels }
     }
 
-    return { panel, build, styleIdx }
+    return { panel, build }
 }
