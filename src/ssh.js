@@ -3,11 +3,12 @@
 // running lui on a client that fetches its engine state from somewhere
 // else — is just the `remote` engine: `lui add NAME remote HOST[:PORT]`.
 
+import http from "node:http"
 import process from "node:process"
 import { spawn } from "node:child_process"
 
 import { harnesses, applyHarness, harnessContext, isHarnessEnabled } from "./harness.js"
-import { engines } from "./engine.js"
+import { CONFIG_VERSION } from "./wire.js"
 
 // applyHarness does ~8–10 sequential remote ops per harness (exists,
 // read, mkdirp, write, …). Without multiplexing each one pays a fresh
@@ -41,17 +42,26 @@ export async function sshSetupShare(lui, spec) {
     const remoteEnginePort = pickRemotePort()
     const remoteWebPort = remoteEnginePort + 1
 
-    // Tunnel's server end: where on *this* machine to forward client
-    // traffic. For a llama-server engine that's localhost:engine_port;
-    // for a remote engine, the upstream's actual host:port — so an
-    // `lui ssh` from a relay tunnels straight to llm without
-    // proxying through this process.
-    const engineEndpoint = lui.engineModule?.endpoint?.(lui) ?? {
-        host: null,
-        port: lui.config.global.engine_port
-    }
     const localWebPort = lui.config.global.web_port
     const websearch = lui.config.global.websearch !== false
+
+    // Source of truth for the tunnel's server end + harness context: a
+    // /config call against the lui that's already running on this
+    // machine. That endpoint has the resolved base_url cached (after
+    // its own start() completed), so for a remote-engine session it
+    // already names the real upstream host:port — no second-guessing
+    // here. If no lui is running we have nothing to share; fail loudly.
+    const localConfig = await fetchLocalConfig(localWebPort)
+    const engineEndpoint = parseEndpointFromBaseURL(localConfig.base_url)
+    if (!engineEndpoint) {
+        process.stderr.write(
+            `lui ssh: the running lui at 127.0.0.1:${localWebPort} did not report a base_url ` +
+                `(its engine may not be Ready yet — wait for it to finish loading and re-run).\n`
+        )
+        process.exit(1)
+    }
+    const sessionModel = { name: localConfig.active_model ?? null }
+    const sessionCtxSize = typeof localConfig.context_size === "number" ? localConfig.context_size : null
 
     process.stdout.write("\n")
     for (const h of enabled) {
@@ -62,7 +72,7 @@ export async function sshSetupShare(lui, spec) {
                 process.exit(1)
             }
         }
-        await applyHarnessRemote(lui, target, h, remoteEnginePort, remoteWebPort)
+        await applyHarnessRemote(lui, target, h, remoteEnginePort, remoteWebPort, sessionModel, sessionCtxSize)
         process.stdout.write(`  ${h.name} configured on ${sshTargetSpec(target)}\n`)
     }
 
@@ -87,6 +97,66 @@ function parseShareTarget(s) {
 function pickRemotePort() {
     const base = 18000 + Math.floor(Math.random() * 11000)
     return base
+}
+
+const LOCAL_CONFIG_TIMEOUT_MS = 2000
+
+// /config on the locally-running lui is the authoritative source for
+// what `lui ssh` needs to share — base_url, active model name, context
+// size. Anything else risks drifting from what the live session is
+// actually serving.
+async function fetchLocalConfig(webPort) {
+    let cfg
+    try {
+        cfg = await httpGetLocalJSON(webPort, "/config", LOCAL_CONFIG_TIMEOUT_MS)
+    } catch (e) {
+        process.stderr.write(
+            `lui ssh: could not reach a running lui at 127.0.0.1:${webPort} (${e.message}).\n` +
+                `Start one in another terminal first (e.g. \`lui run NAME\`), then re-run \`lui ssh\`.\n`
+        )
+        process.exit(1)
+    }
+    if (cfg.version !== CONFIG_VERSION) {
+        process.stderr.write(
+            `lui ssh: the running lui reports /config version ${cfg.version}, this binary speaks ${CONFIG_VERSION}. ` +
+                `Run matching builds on both ends.\n`
+        )
+        process.exit(1)
+    }
+    return cfg
+}
+
+function parseEndpointFromBaseURL(baseURL) {
+    if (!baseURL) return null
+    try {
+        const u = new URL(baseURL)
+        const port = u.port ? parseInt(u.port, 10) : u.protocol === "https:" ? 443 : 80
+        return { host: u.hostname, port }
+    } catch {
+        return null
+    }
+}
+
+function httpGetLocalJSON(port, path, timeoutMs) {
+    return new Promise((resolve, reject) => {
+        const req = http.get({ host: "127.0.0.1", port, path, timeout: timeoutMs }, (res) => {
+            let body = ""
+            res.setEncoding("utf8")
+            res.on("data", (c) => (body += c))
+            res.on("end", () => {
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    return reject(new Error(`HTTP ${res.statusCode} from ${path}`))
+                }
+                try {
+                    resolve(JSON.parse(body))
+                } catch (e) {
+                    reject(new Error(`unparseable JSON from ${path}: ${e.message}`))
+                }
+            })
+        })
+        req.on("error", (e) => reject(e))
+        req.on("timeout", () => req.destroy(new Error(`timeout after ${timeoutMs}ms`)))
+    })
 }
 
 function sshTargetSpec(target) {
@@ -169,33 +239,27 @@ function sshTransport(target) {
     }
 }
 
-async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remoteWebPort) {
-    const activeModel = lui.activeModel ?? lui.resolveModel() ?? { name: "lui", engine: "llama-server", args: [] }
-    const engineModule = engines[activeModel.engine]
-    const ctxSize = engineModule?.contextSize?.(lui.state, activeModel) ?? null
-
+async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remoteWebPort, sessionModel, sessionCtxSize) {
     // The client's harness always points at localhost: the reverse
     // tunnel terminates on the client side, so the client's traffic
     // routes through localhost:<remote port> back to this machine.
     const ctx = harnessContext({
-        activeModel,
+        activeModel: sessionModel,
         baseURL: `http://localhost:${remoteEnginePort}/v1`,
         webPort: remoteWebPort,
         websearch: lui.config.global.websearch,
-        ctxSize
+        ctxSize: sessionCtxSize
     })
     await applyHarness(sshTransport(target), harness, ctx, { enabled: true })
 }
 
 function printShareSuccess(target, ports) {
-    // engine.endpoint.host === null means "the engine lives on this
-    // machine" — the tunnel's server end is localhost. A non-null
-    // host means the engine is upstream of *us* (we're a remote
-    // engine), and we want the tunnel to skip our process entirely
-    // and land directly on the real model host.
-    const engineHost = ports.engineEndpoint.host ?? "localhost"
-    const enginePort = ports.engineEndpoint.port
-    const engineFwd = `${ports.remoteEnginePort}:${engineHost}:${enginePort}`
+    // engineEndpoint comes straight from the running lui's /config
+    // base_url: for a llama-server session that's 127.0.0.1:engine_port;
+    // for a remote-engine session it's the already-resolved upstream
+    // host:port, so the tunnel skips our process entirely and lands
+    // directly on the real model host.
+    const engineFwd = `${ports.remoteEnginePort}:${ports.engineEndpoint.host}:${ports.engineEndpoint.port}`
     const webFwd = `${ports.remoteWebPort}:localhost:${ports.localWebPort}`
     const cmd = ports.websearch
         ? `ssh -R ${engineFwd} -R ${webFwd} ${sshTargetSpec(target)}`
