@@ -126,6 +126,11 @@ function printInformation(lui, enabledHarnesses) {
     w(row("install (macOS)", cmd("brew install llama.cpp"), W))
     w("\n")
 
+    w("  " + styled("mlx_lm", STYLE.ENGINE_NAME) + "\n")
+    w(row("install (macOS)", cmd("pip install mlx-lm"), W))
+    w(row("docs", url("https://github.com/ml-explore/mlx-lm"), W))
+    w("\n")
+
     w("  " + styled("lui", STYLE.BRAND) + "\n")
     w(row("inspect config", cmd("lui config"), W))
     w(row("run a model", cmd("lui run"), W))

@@ -1,15 +1,17 @@
 // Engine registry. Each engine module exports `engine`. Per-segment
 // palette conventions live in src/theme.js (STYLE.SEGMENT_*).
 //
-// Subprocess engines (llama-server, future mlx-lm.server / vllm) use
-// the shared helper in src/spawn.js for PATH lookup, line buffering,
-// and the SIGTERM dance. The framework itself doesn't spawn anything.
+// Subprocess engines (llama-server, mlx_lm, future vllm) use the
+// shared helper in src/spawn.js for PATH lookup, line buffering, and
+// the SIGTERM dance. The framework itself doesn't spawn anything.
 
 import { engine as llamaServer } from "./engine/llama-server.js"
+import { engine as mlxLm } from "./engine/mlx_lm.js"
 import { engine as remote } from "./engine/remote.js"
 
 export const engines = {
     [llamaServer.name]: llamaServer,
+    [mlxLm.name]: mlxLm,
     [remote.name]: remote
 }
 

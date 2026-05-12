@@ -97,7 +97,8 @@ function handleConfig(req, res, lui) {
         version: CONFIG_VERSION,
         base_url: resolveBaseURL(req, lui),
         active_model: lui.activeModel?.name ?? lui.config.activeModelName ?? null,
-        context_size: lui.engineModule?.contextSize?.(lui.state, lui.activeModel) ?? null
+        context_size: lui.engineModule?.contextSize?.(lui.state, lui.activeModel) ?? null,
+        served_model: lui.engineModule?.servedModelName?.(lui.state, lui.activeModel) ?? null
     })
     res.writeHead(200, { ...CORS, "content-type": "application/json" })
     res.end(body)

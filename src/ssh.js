@@ -62,6 +62,7 @@ export async function sshSetupShare(lui, spec) {
     }
     const sessionModel = { name: localConfig.active_model ?? null }
     const sessionCtxSize = typeof localConfig.context_size === "number" ? localConfig.context_size : null
+    const sessionServedName = localConfig.served_model ?? null
 
     process.stdout.write("\n")
     for (const h of enabled) {
@@ -72,7 +73,7 @@ export async function sshSetupShare(lui, spec) {
                 process.exit(1)
             }
         }
-        await applyHarnessRemote(lui, target, h, remoteEnginePort, remoteWebPort, sessionModel, sessionCtxSize)
+        await applyHarnessRemote(lui, target, h, remoteEnginePort, remoteWebPort, sessionModel, sessionCtxSize, sessionServedName)
         process.stdout.write(`  ${h.name} configured on ${sshTargetSpec(target)}\n`)
     }
 
@@ -239,7 +240,16 @@ function sshTransport(target) {
     }
 }
 
-async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remoteWebPort, sessionModel, sessionCtxSize) {
+async function applyHarnessRemote(
+    lui,
+    target,
+    harness,
+    remoteEnginePort,
+    remoteWebPort,
+    sessionModel,
+    sessionCtxSize,
+    sessionServedName
+) {
     // The client's harness always points at localhost: the reverse
     // tunnel terminates on the client side, so the client's traffic
     // routes through localhost:<remote port> back to this machine.
@@ -248,7 +258,8 @@ async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remote
         baseURL: `http://localhost:${remoteEnginePort}/v1`,
         webPort: remoteWebPort,
         websearch: lui.config.global.websearch,
-        ctxSize: sessionCtxSize
+        ctxSize: sessionCtxSize,
+        servedName: sessionServedName
     })
     await applyHarness(sshTransport(target), harness, ctx, { enabled: true })
 }

@@ -6,7 +6,7 @@ import os from "node:os"
 
 import { STYLE } from "../theme.js"
 import { stripAnsi } from "../ansi.js"
-import { resolveBinary, spawnProcess } from "../spawn.js"
+import { resolveBinary, spawnProcess, describeSpawnError } from "../spawn.js"
 import { formatDurationSeconds, formatNumber } from "../util.js"
 
 const BINARY_NAME = "llama-server"
@@ -120,6 +120,20 @@ export const engine = {
         return null
     },
 
+    // llama-server's OpenAI endpoint accepts any string as the model
+    // id, so this is purely cosmetic — harnesses just show a nicer
+    // name to the user. We surface the -hf argument verbatim (org/repo
+    // plus :quant tag) so the harness UI displays the real source.
+    // Returns null when no -hf is present, letting the framework fall
+    // back to the lui alias.
+    servedModelName(_state, model) {
+        const args = model?.args || []
+        for (let i = 0; i < args.length; i++) {
+            if (args[i] === "-hf" && i + 1 < args.length) return args[i + 1]
+        }
+        return null
+    },
+
     // {host, port} naming where to actually reach the model. host=null
     // means "use the caller's context-appropriate fallback" — the HTTP
     // server fills it in from the request hostname; `lui ssh` fills it
@@ -171,7 +185,8 @@ export const engine = {
         // hands the same desc back to us — no need to recompute.
         lui.state.argSegments = desc.segments
         const [binarySeg, ...rest] = desc.segments
-        const binaryPath = resolveBinary(binarySeg.args[0])
+        const binaryName = binarySeg.args[0]
+        const binaryPath = resolveBinary(binaryName)
         const argv = rest.flatMap((s) => s.args)
         lui.state.proc = spawnProcess({
             binary: binaryPath,
@@ -179,6 +194,11 @@ export const engine = {
             parseLine: (line) => engine.parseLine(line, lui),
             debugLog: lui.config.global.debug_log,
             onExit: (code, signal) => lui.onEngineExit?.(code, signal),
+            onSpawnError: (err) => {
+                const msg = describeSpawnError(binaryName, err)
+                lui.state.exitMessage = msg
+                lui.state.fatalReason = msg
+            },
             addWarning: (m) => lui.addWarning(m)
         })
     },

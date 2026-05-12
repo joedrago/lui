@@ -34,6 +34,15 @@ export function resolveBinary(candidate) {
 
 const KILL_GRACE_MS = 5000
 
+// Human-readable explanation of a spawn-time failure. ENOENT and
+// EACCES are the two errors the user can fix; everything else falls
+// through to the system message.
+export function describeSpawnError(binaryName, err) {
+    if (err?.code === "ENOENT") return `cannot find ${binaryName} on PATH`
+    if (err?.code === "EACCES") return `${binaryName} is not executable`
+    return `failed to spawn ${binaryName}: ${err?.message ?? err}`
+}
+
 // Spawn a subprocess; line-pipe stdout/stderr to parseLine; tee raw
 // bytes to `debugLog` if set. Returns { child, stop } where stop()
 // runs SIGTERM, waits up to KILL_GRACE_MS for exit, then SIGKILLs.
@@ -42,10 +51,16 @@ const KILL_GRACE_MS = 5000
 //   argv       — flat string array
 //   parseLine  — (line: string) => void; called once per \n
 //   debugLog   — optional path to tee raw bytes
-//   onExit     — optional (code, signal) => void
-//   addWarning — optional (msg) => void for non-fatal issues
-//                (e.g. cannot open debug log)
-export function spawnProcess({ binary, argv, parseLine, debugLog, onExit, addWarning }) {
+//   onExit       — optional (code, signal) => void
+//   onSpawnError — optional (err) => void, fired when the kernel can't
+//                  start the child at all (ENOENT, EACCES…). Called
+//                  before onExit so engines can stash a friendly
+//                  message into state before the shutdown summary
+//                  renders. With no callback, the error is written to
+//                  stderr (which the TUI swallows).
+//   addWarning   — optional (msg) => void for non-fatal issues
+//                  (e.g. cannot open debug log)
+export function spawnProcess({ binary, argv, parseLine, debugLog, onExit, onSpawnError, addWarning }) {
     let debugFd = null
     if (debugLog) {
         try {
@@ -96,7 +111,8 @@ export function spawnProcess({ binary, argv, parseLine, debugLog, onExit, addWar
     })
 
     child.on("error", (err) => {
-        process.stderr.write(`lui: failed to spawn ${binary}: ${err.message}\n`)
+        if (onSpawnError) onSpawnError(err)
+        else process.stderr.write(`lui: failed to spawn ${binary}: ${err.message}\n`)
         onExit?.(1, null)
     })
 

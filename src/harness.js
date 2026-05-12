@@ -92,9 +92,15 @@ export function harnessSchemaDefaults() {
 // comes from the engine — `engine.contextSize(state, model)` only
 // returns a real number once Ready, so callers pass a fallback for
 // early/offline use.
-export function harnessContext({ activeModel, baseURL, webPort, websearch, ctxSize }) {
+//
+// `servedName` is what the engine's OpenAI-compatible API expects in
+// the request body's `model` field — llama-server accepts anything so
+// the alias is fine there, but mlx_lm.server 404s a mismatch and
+// remote-engine hops surface the upstream's value. When null we fall
+// back to the lui alias.
+export function harnessContext({ activeModel, baseURL, webPort, websearch, ctxSize, servedName }) {
     return {
-        modelName: deriveModelName(activeModel?.name),
+        modelName: servedName || deriveModelName(activeModel?.name),
         baseURL,
         ctxSize: ctxSize ?? DEFAULT_CTX_SIZE,
         webPort,
@@ -208,12 +214,14 @@ async function pickConfigFile(transport, dir, candidates) {
 // /config, so harnesses on this machine point directly at the real
 // model regardless of how many hops are in between.
 export async function applyAllLocal(lui, { ctxSize } = {}) {
+    const servedName = lui.engineModule?.servedModelName?.(lui.state, lui.activeModel) ?? null
     const ctx = harnessContext({
         activeModel: lui.activeModel,
         baseURL: localBaseURL(lui),
         webPort: lui.config.global.web_port,
         websearch: lui.config.global.websearch,
-        ctxSize
+        ctxSize,
+        servedName
     })
     const onBackup = (file, backup) => lui.addWarning?.(`backed up ${file} → ${backup} before first lui write`)
     for (const h of harnesses) {

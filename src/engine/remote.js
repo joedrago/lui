@@ -52,6 +52,7 @@ export const engine = {
         s.baseURL = null
         s.ctxSize = 0
         s.remoteActiveModel = null
+        s.servedModelName = null
         s.cachedView = null
         s.pollTimer = null
         s.connectError = null
@@ -84,6 +85,7 @@ export const engine = {
         lui.state.baseURL = cfg.base_url
         lui.state.ctxSize = cfg.context_size ?? 0
         lui.state.remoteActiveModel = cfg.active_model ?? null
+        lui.state.servedModelName = cfg.served_model ?? null
 
         // Prime the panel cache before signaling ready so the TUI's
         // first tick isn't empty.
@@ -114,6 +116,13 @@ export const engine = {
 
     contextSize(state) {
         return state && state.ctxSize > 0 ? state.ctxSize : null
+    },
+
+    // Forward whatever the upstream's /config reported, so a chained
+    // lui → remote → … → mlx_lm still hands the right API id to the
+    // harness on this hop.
+    servedModelName(state) {
+        return state?.servedModelName || null
     },
 
     // Where to actually reach the model. Parsed from the upstream's
