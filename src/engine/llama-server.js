@@ -55,11 +55,7 @@ export const engine = {
     // Extra lines for `lui` shutdown summary (rendered between Uptime
     // and Reason) plus an optional bright-red abort message.
     shutdownSummary(state) {
-        const lines = []
-        if (state?.requestCount != null) {
-            lines.push({ label: "Requests", value: String(state.requestCount) })
-        }
-        return { lines, fatal: state?.fatalReason || null }
+        return { lines: [], fatal: state?.fatalReason || null }
     },
 
     // Human-readable detail for the shutdown's Reason line.
@@ -141,8 +137,6 @@ export const engine = {
         s.updateAvailable = false
         s.ready = false
         s.listenUrl = ""
-        s.requestCount = 0
-        s.activeRequests = 0
         s.activeSlots = new Map()
         s.recentCompleted = []
         s.lastPromptTps = 0
@@ -151,8 +145,6 @@ export const engine = {
         s.avgGenTps = 0
         s.promptTpsSamples = 0
         s.genTpsSamples = 0
-        s.fullReprocessCount = 0
-        s.invalidatedCheckpointCount = 0
         s.downloads = new Map()
         s.logLines = []
         s.exited = false
@@ -347,20 +339,7 @@ function parseLoadLine(line, lui) {
 function parseRuntimeLine(line, lui) {
     const s = lui.state
 
-    if (line.includes("done request: POST")) {
-        s.requestCount += 1
-        return
-    }
-    if (line.includes("forcing full prompt re-processing")) {
-        s.fullReprocessCount += 1
-        return
-    }
-    if (line.includes("invalidated context checkpoint") || line.includes("invalidated checkpoint")) {
-        s.invalidatedCheckpointCount += 1
-        return
-    }
     if (line.startsWith("srv") && line.includes("all slots are idle")) {
-        s.activeRequests = 0
         s.activeSlots.clear()
         return
     }
@@ -368,7 +347,6 @@ function parseRuntimeLine(line, lui) {
         const idTask = extractSlotTask(line)
         if (idTask) {
             const [slotId] = idTask
-            s.activeRequests += 1
             s.activeSlots.set(slotId, {
                 slotId,
                 nTokens: 0,
@@ -415,7 +393,6 @@ function parseRuntimeLine(line, lui) {
                 s.recentCompleted.push(slot)
                 while (s.recentCompleted.length > MAX_RECENT_REQUESTS) s.recentCompleted.shift()
             }
-            s.activeRequests = Math.max(0, s.activeRequests - 1)
         }
         return
     }
@@ -659,89 +636,53 @@ function appendModelPanel(v, lui) {
     for (const [name, pct] of [...s.downloads.entries()].sort()) {
         p.bar({ label: `Downloading ${name}`, value: pct, max: 100, text: `${String(pct).padStart(3)}%`, indent: 13 })
     }
-
-    // Active prefill bars (one per running slot).
-    for (const slot of [...s.activeSlots.values()].sort((a, b) => a.slotId - b.slotId)) {
-        if (slot.progress > 0 && slot.progress < 1) {
-            p.bar({
-                label: `● slot ${slot.slotId} prefilling`,
-                value: slot.progress,
-                text: `${String(Math.round(slot.progress * 100)).padStart(3)}%`,
-                indent: 13
-            })
-        }
-    }
 }
 
 function appendPerformancePanel(v, lui) {
     const s = lui.state
     const p = v.panel("Performance")
 
+    const promptLn = p.line().style(STYLE.LABEL).text("Prompt   : ").style(STYLE.VALUE)
     if (s.promptTpsSamples > 0) {
-        p.line()
-            .style(STYLE.LABEL)
-            .text("Prompt   : ")
-            .style(STYLE.VALUE)
-            .text(s.lastPromptTps.toFixed(1))
+        promptLn
+            .text(s.lastPromptTps.toFixed(1).padStart(6))
             .style(TEXT)
             .text(" tok/s ")
             .style(DIM)
-            .text(`(avg ${s.avgPromptTps.toFixed(1)})`)
+            .text(`(avg ${s.avgPromptTps.toFixed(1).padStart(6)})`)
+    } else {
+        promptLn.style(DIM).text("--")
     }
+
+    const genLn = p.line().style(STYLE.LABEL).text("Generate : ").style(STYLE.VALUE)
     if (s.genTpsSamples > 0) {
-        p.line()
-            .style(STYLE.LABEL)
-            .text("Generate : ")
-            .style(STYLE.VALUE)
-            .text(s.lastGenTps.toFixed(1))
+        genLn
+            .text(s.lastGenTps.toFixed(1).padStart(6))
             .style(TEXT)
             .text(" tok/s ")
             .style(DIM)
-            .text(`(avg ${s.avgGenTps.toFixed(1)})`)
+            .text(`(avg ${s.avgGenTps.toFixed(1).padStart(6)})`)
+    } else {
+        genLn.style(DIM).text("--")
     }
 
-    if (s.promptTpsSamples > 0 || s.genTpsSamples > 0) p.line()
-
-    p.line()
-        .style(STYLE.LABEL)
-        .text("WebSearch: ")
-        .style(STYLE.VALUE)
-        .text(`${lui.websearchCount ?? 0}`.padStart(4))
-        .style(TEXT)
-        .text(" total · ")
-        .style(STYLE.VALUE)
-        .text(`${lui.activeSearchCount ?? 0}`.padStart(4))
-        .style(TEXT)
-        .text(" active")
-
-    p.line()
-        .style(STYLE.LABEL)
-        .text("Requests : ")
-        .style(STYLE.VALUE)
-        .text(`${s.requestCount}`.padStart(4))
-        .style(TEXT)
-        .text(" total · ")
-        .style(STYLE.VALUE)
-        .text(`${s.activeRequests}`.padStart(4))
-        .style(TEXT)
-        .text(" active · ")
-        .style(STYLE.VALUE)
-        .text(`${s.fullReprocessCount}`.padStart(4))
-        .style(TEXT)
-        .text(" reproc · ")
-        .style(STYLE.VALUE)
-        .text(`${s.invalidatedCheckpointCount}`.padStart(4))
-        .style(TEXT)
-        .text(" invalidated")
-
-    for (const slot of [...s.activeSlots.values()].sort((a, b) => a.slotId - b.slotId)) {
-        const elapsed = slot.processingStarted ? ((Date.now() - slot.processingStarted) / 1000).toFixed(1) : "0"
-        p.line({ indent: 13 }).style(STYLE.VALUE).text(`● slot ${slot.slotId}: ${slot.nTokens} tokens, ${elapsed}s`)
-    }
     for (const slot of [...s.recentCompleted].reverse()) {
         const time = slot.totalTimeMs > 0 ? ` in ${(slot.totalTimeMs / 1000).toFixed(1)}s` : ""
         const tps = slot.genTps > 0 ? ` (${slot.genTps.toFixed(1)} tok/s)` : ""
         p.line({ indent: 13 }).style(DIM).text(`✓ slot ${slot.slotId} done ${slot.nTokens} tokens${time}${tps}`)
+    }
+
+    // The blank goes into the lines stream — bars[] always renders
+    // after lines[], so this lands directly above the first slot bar
+    // and is omitted when there are no active slots.
+    if (s.activeSlots.size > 0) p.line()
+    for (const slot of [...s.activeSlots.values()].sort((a, b) => a.slotId - b.slotId)) {
+        p.bar({
+            label: `● slot ${slot.slotId}: ${String(slot.nTokens).padStart(7)} tokens`,
+            value: slot.progress,
+            text: `${String(Math.round(slot.progress * 100)).padStart(3)}%`,
+            indent: 13
+        })
     }
 }
 

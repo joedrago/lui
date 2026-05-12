@@ -18,8 +18,6 @@ export class Lui {
         this.config = Config.load()
         this.startedAt = Date.now()
         this.warnings = []
-        this.websearchCount = 0
-        this.activeSearchCount = 0
 
         this.engineModule = null
         this.engineChild = null

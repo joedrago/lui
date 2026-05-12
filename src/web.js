@@ -112,14 +112,11 @@ function handleBsearch(_req, res, lui, pending, url) {
         return
     }
     const id = nextBsearchId()
-    lui.websearchCount += 1
-    lui.activeSearchCount = (lui.activeSearchCount ?? 0) + 1
 
     const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&lui=${encodeURIComponent(id)}`
     try {
         openInBrowser(googleUrl)
     } catch (e) {
-        lui.activeSearchCount -= 1
         res.writeHead(500, { ...CORS, "content-type": "text/plain" })
         res.end(`failed to open browser: ${e.message}`)
         return
@@ -130,7 +127,6 @@ function handleBsearch(_req, res, lui, pending, url) {
         if (settled) return
         settled = true
         pending.delete(id)
-        lui.activeSearchCount = Math.max(0, lui.activeSearchCount - 1)
         res.writeHead(504, { ...CORS, "content-type": "text/plain" })
         res.end(`user did not click the lui-grab bookmarklet within ${Math.floor(BSEARCH_TIMEOUT_MS / 1000)}s`)
     }, BSEARCH_TIMEOUT_MS)
@@ -141,7 +137,6 @@ function handleBsearch(_req, res, lui, pending, url) {
             if (settled) return
             settled = true
             clearTimeout(timer)
-            lui.activeSearchCount = Math.max(0, lui.activeSearchCount - 1)
             res.writeHead(200, { ...CORS, "content-type": "application/json" })
             res.end(JSON.stringify(payload))
         }
