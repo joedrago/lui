@@ -31,7 +31,7 @@ export async function runSetup(lui) {
         const enabledHarnesses = await pickHarnesses(lui)
         const addedModels = await pickModels(lui)
         writeChoices(lui, enabledHarnesses, addedModels)
-        printNextSteps(lui, enabledHarnesses, addedModels)
+        printInformation(lui, enabledHarnesses)
     } catch (e) {
         if (e instanceof PromptAborted) {
             process.stdout.write("\n" + styled("Cancelled.", { dim: true }) + " No changes written.\n")
@@ -90,63 +90,77 @@ function writeChoices(lui, enabledHarnesses, addedModels) {
     lui.config.save()
 }
 
-// Hand-written. Adjust as the lineup of harnesses / engines / tips
-// changes — there's intentionally no abstraction here.
-function printNextSteps(lui, enabledHarnesses, addedModels) {
+// Hand-written. Tune labels, ordering, and which lines appear as the
+// project grows — there's intentionally no abstraction here. Binary
+// detection is purely informational upstream (it flips the multi-select
+// preselect default); nothing in this table is filtered away based on
+// what's installed. Everything is just helpful info.
+function printInformation(lui, enabledHarnesses) {
     const w = process.stdout.write.bind(process.stdout)
-    w("\n" + styled("Saved", STYLE.READY) + " " + dimPath(configPathForDisplay()) + "\n\n")
+    w("\n" + styled("Saved", STYLE.READY) + " " + dim(configPathForDisplay()) + "\n\n")
 
-    w(styled("Next steps", STYLE.BRAND) + "\n\n")
+    w(styled("Information", STYLE.BRAND) + "\n\n")
+
+    // One column width used for every block so every `:` lines up
+    // top-to-bottom. Bump if any new row's label outgrows it.
+    const W = 19
 
     if (enabledHarnesses.has("opencode")) {
         w("  " + styled("opencode", STYLE.HARNESS_NAME) + "\n")
-        if (!commandOnPath("opencode")) {
-            w("    " + label("install") + cmd("npm install -g opencode-ai") + "\n")
-        }
-        w("    " + label("docs   ") + url("https://opencode.ai") + "\n")
-        w("    " + label("alias  ") + cmd("alias opencode='lui sandbox opencode'") + "\n\n")
+        w(row("install", cmd("npm install -g opencode-ai"), W))
+        w(row("docs", url("https://opencode.ai"), W))
+        w(row("enable sandbox", dim("alias opencode='lui sandbox opencode'"), W))
+        w("\n")
     }
 
     if (enabledHarnesses.has("pi")) {
         w("  " + styled("pi", STYLE.HARNESS_NAME) + "\n")
-        if (!commandOnPath("pi")) {
-            w("    " + label("install") + cmd("npm install -g @earendil-works/pi-coding-agent") + "\n")
-        }
-        w("    " + label("docs   ") + url("https://github.com/block/pi") + "\n")
-        w("    " + label("alias  ") + cmd("alias pi='lui sandbox pi'") + "\n\n")
+        w(row("install", cmd("npm install -g @earendil-works/pi-coding-agent"), W))
+        w(row("docs", url("https://github.com/block/pi"), W))
+        w(row("enable sandbox", dim("alias pi='lui sandbox pi'"), W))
+        w("\n")
     }
 
-    const needsLlamaServer = addedModels.some((m) => m.engine === "llama-server") && !commandOnPath("llama-server")
-    if (needsLlamaServer) {
-        w("  " + styled("llama-server", STYLE.ENGINE_NAME) + "\n")
-        w("    " + label("install") + url("https://github.com/ggml-org/llama.cpp#quick-start") + "\n")
-        w("    " + dimText("macOS: brew install llama.cpp · Windows/Linux: grab a release binary and put it on PATH") + "\n\n")
-    }
+    w("  " + styled("llama-server", STYLE.ENGINE_NAME) + "\n")
+    w(row("install (Win/Linux)", url("https://github.com/ggml-org/llama.cpp#quick-start"), W))
+    w(row("install (macOS)", cmd("brew install llama.cpp"), W))
+    w("\n")
 
     w("  " + styled("lui", STYLE.BRAND) + "\n")
-    if (lui.config.global.active_model) {
-        w("    " + label("start  ") + cmd("lui run") + dimText("   # runs " + lui.config.global.active_model) + "\n")
-    } else {
-        w("    " + label("start  ") + cmd("lui run NAME") + "\n")
-    }
-    w("    " + label("inspect") + cmd("lui config") + "\n")
-    w("    " + label("share  ") + cmd("lui config set public true") + dimText("   # expose this lui to other machines") + "\n")
+    w(row("inspect config", cmd("lui config"), W))
+    w(row("run a model", cmd("lui run"), W))
+    w(row("disable websearch", cmd("lui config set websearch false"), W))
+    w(row("custom debug log", cmd("lui config set debug_log /tmp/lui.log"), W))
+    w(row("change engine port", cmd("lui config set engine_port 9000"), W))
+    w(row("change web port", cmd("lui config set web_port 9001"), W))
+    w(row("toggle a harness", cmd("lui config set harness.opencode.enabled false"), W))
+    w(row("llama-server binary", cmd("lui config set engine.llama-server.binary /opt/llama/llama-server"), W))
+    w(row("share publicly", cmd("lui config set public true"), W))
+    w(row("add sandbox r+w dir", cmd("lui config set sandbox.allow ~/projects"), W))
+    w(row("block sandbox net", cmd("lui config set sandbox.block_net true"), W))
+    w(row("sandbox a tool", cmd("lui sandbox opencode"), W))
     w("\n")
+
+    w(
+        styled("Tip:", STYLE.ACTIVE) +
+            dim(" after `lui run`, wait for the model to report ") +
+            styled("Ready", STYLE.READY) +
+            dim(" before launching your harness.") +
+            "\n\n"
+    )
 }
 
-function label(s) {
-    return styled(s + " ", STYLE.LABEL)
+function row(label, bodyStyled, width) {
+    return "    " + styled(label.padEnd(width) + " :", STYLE.LABEL) + "   " + bodyStyled + "\n"
 }
+
 function cmd(s) {
     return styled(s, STYLE.CONFIG_KEY)
 }
 function url(s) {
     return styled(s, STYLE.URL)
 }
-function dimText(s) {
-    return styled(s, { dim: true })
-}
-function dimPath(s) {
+function dim(s) {
     return styled(s, { dim: true })
 }
 

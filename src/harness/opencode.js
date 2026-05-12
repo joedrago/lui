@@ -11,7 +11,7 @@ export const harness = {
     configDir: "~/.config/opencode",
     configCandidates: ["opencode.jsonc", "opencode.json"],
     skillsDir: "skills",
-    schema: [{ path: "enabled", default: true }],
+    schema: [{ path: "enabled", default: false }],
 
     apply(existing, ctx) {
         let text = existing.trim() ? existing : "{}\n"
