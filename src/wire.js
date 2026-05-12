@@ -1,11 +1,12 @@
-// View builder for the /data wire format. Style is encoded inline as
-// PUA code points U+E000..U+E0FF indexing into a per-View palette.
-// palette[0] is always {} (the default style), so emitting  is
-// the implicit "back to default" reset.
+// View builder for the /data wire format. Each panel carries its own
+// palette so panels can be moved between Views without rewriting their
+// inline style markers. Inline style switches are PUA code points
+// U+E000..U+E0FF indexing into that panel's palette; palette[0] is
+// always {} (the default style), so emitting  is "back to default".
 //
-// The View dedups palette entries via canonical-JSON keys, so engines
-// never think about indices — they pass plain PaletteEntry objects to
-// .style().
+// The per-panel palette dedups entries via canonical-JSON keys, so
+// callers never think about indices — they pass plain PaletteEntry
+// objects to .style().
 
 const DEFAULT_KEY = "{}"
 
@@ -23,24 +24,25 @@ function switchChar(idx) {
 }
 
 export function View() {
-    const palette = [{}]
-    const paletteIndex = new Map()
-    paletteIndex.set(DEFAULT_KEY, 0)
     const panels = []
 
-    function styleIdx(entry) {
-        const key = canonicalKey(entry)
-        let i = paletteIndex.get(key)
-        if (i === undefined) {
-            i = palette.length
-            palette.push({ ...entry })
-            paletteIndex.set(key, i)
-        }
-        return i
-    }
-
     function panel(title) {
-        const p = { title: title ?? "", lines: [], bars: [] }
+        const palette = [{}]
+        const paletteIndex = new Map()
+        paletteIndex.set(DEFAULT_KEY, 0)
+
+        function styleIdx(entry) {
+            const key = canonicalKey(entry)
+            let i = paletteIndex.get(key)
+            if (i === undefined) {
+                i = palette.length
+                palette.push({ ...entry })
+                paletteIndex.set(key, i)
+            }
+            return i
+        }
+
+        const p = { title: title ?? "", palette, lines: [], bars: [] }
         panels.push(p)
 
         function line(opts) {
@@ -76,9 +78,22 @@ export function View() {
         return panelApi
     }
 
-    function build() {
-        return { version: 1, palette, panels }
+    // Append a panel object {title, palette, lines, bars} from another
+    // View as-is. Because each panel owns its palette, the inline PUA
+    // indices already point at the right entries — no rewrite needed.
+    function adoptPanel(remotePanel) {
+        if (!remotePanel) return
+        panels.push({
+            title: remotePanel.title ?? "",
+            palette: remotePanel.palette ?? [{}],
+            lines: remotePanel.lines ?? [],
+            bars: remotePanel.bars ?? []
+        })
     }
 
-    return { panel, build }
+    function build() {
+        return { version: 2, panels }
+    }
+
+    return { panel, adoptPanel, build }
 }

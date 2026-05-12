@@ -8,7 +8,7 @@ import { spawn } from "node:child_process"
 
 import { View } from "./wire.js"
 
-export const CONFIG_VERSION = 3
+export const CONFIG_VERSION = 4
 
 const BSEARCH_TIMEOUT_MS = 120_000
 
@@ -75,9 +75,13 @@ function handleRequest(req, res, lui, pending) {
     res.end("not found")
 }
 
+// /data carries the engine's panels + warnings — precisely the subset
+// a `remote` engine on another machine would replay. Warnings are
+// produced server-side (engine spawn, harness apply, etc.) so they
+// travel with the engine state. The local TUI composes its own
+// lui-panel around the response.
 function handleData(_req, res, lui) {
     const v = View()
-    lui.appendLuiPanel(v)
     lui.appendWarningsPanel(v)
     lui.engineModule?.appendPanels?.(v, lui)
     const body = JSON.stringify(v.build())
@@ -85,17 +89,34 @@ function handleData(_req, res, lui) {
     res.end(body)
 }
 
-function handleConfig(_req, res, lui) {
+// /config exposes the engine's externally-reachable URL + its critical
+// state (context size, model name). Each remote-engine hop just
+// re-emits the base_url it learned from upstream, so a turtles→relay
+// →llm chain propagates llm's real URL all the way through. Web-port
+// and websearch are local concerns at every hop and don't travel.
+function handleConfig(req, res, lui) {
     const body = JSON.stringify({
         version: CONFIG_VERSION,
-        engine_port: lui.config.global.engine_port,
-        web_port: lui.config.global.web_port,
-        websearch: lui.config.global.websearch !== false,
+        base_url: resolveBaseURL(req, lui),
         active_model: lui.activeModel?.name ?? lui.config.activeModelName ?? null,
         context_size: lui.engineModule?.contextSize?.(lui.state, lui.activeModel) ?? null
     })
     res.writeHead(200, { ...CORS, "content-type": "application/json" })
     res.end(body)
+}
+
+// Build an externally-reachable base_url for the active engine. The
+// engine returns {host, port}; host=null means "use the hostname the
+// client used to reach us" — which we read from req.headers.host so
+// the URL is meaningful to whoever just called /config. Remote
+// engines return their already-resolved upstream host, ignoring the
+// request hostname entirely.
+export function resolveBaseURL(req, lui) {
+    const ep = lui.engineModule?.endpoint?.(lui)
+    if (!ep) return null
+    const reqHost = (req?.headers?.host || "").split(":")[0]
+    const host = ep.host ?? reqHost ?? "127.0.0.1"
+    return `http://${host}:${ep.port}/v1`
 }
 
 function handleSetup(_req, res, lui) {

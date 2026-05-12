@@ -290,7 +290,15 @@ export class Lui {
         this.spawnBinary = binary
         this.spawnSegments = segments
         this.engineModule.initState?.(this)
-        this.engineChild = runEngine(this, binary, segments)
+
+        // Engines that own their own lifecycle (e.g. remote, which polls
+        // HTTP instead of spawning a binary) implement start(). The
+        // subprocess engines (llama-server) still go through runEngine.
+        if (this.engineModule.start) {
+            await this.engineModule.start(this, model)
+        } else {
+            this.engineChild = runEngine(this, binary, segments)
+        }
     }
 
     onEngineExit(code, signal) {
@@ -307,6 +315,11 @@ export class Lui {
         this.shuttingDown = true
         this.exitCode = code
         this.tui?.stop?.()
+        try {
+            await this.engineModule?.stop?.(this)
+        } catch (e) {
+            process.stderr.write(`lui: engine.stop threw: ${e?.stack || e}\n`)
+        }
         if (this.engineChild && this.engineChild.exitCode == null) {
             try {
                 this.engineChild.kill("SIGTERM")
@@ -421,9 +434,11 @@ function line(label, value, width) {
 // the terminal width with continuation rows aligned at the same start
 // column; non-TTY skips the wrap.
 function emitPaintedLines(built, outerIndent = "") {
-    const lines = built.panels[0]?.lines ?? []
+    const panel = built.panels[0]
+    if (!panel) return
+    const lines = panel.lines ?? []
     const tty = process.stdout.isTTY
-    const compiled = tty ? compilePalette(built.palette) : null
+    const compiled = tty ? compilePalette(panel.palette || []) : null
     const cols = tty ? process.stdout.columns || 80 : Infinity
     const RIGHT_MARGIN = 2
 

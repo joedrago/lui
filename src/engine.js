@@ -5,10 +5,12 @@ import { spawn } from "node:child_process"
 import fs from "node:fs"
 
 import { engine as llamaServer } from "./engine/llama-server.js"
+import { engine as remote } from "./engine/remote.js"
 import { resolveBinary } from "./util.js"
 
 export const engines = {
-    [llamaServer.name]: llamaServer
+    [llamaServer.name]: llamaServer,
+    [remote.name]: remote
 }
 
 // Each engine's own `schema` entries, prefixed with `engine.<name>.`

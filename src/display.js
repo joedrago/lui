@@ -23,6 +23,7 @@ import {
     enableLineWrap
 } from "./ansi.js"
 import { STYLE } from "./theme.js"
+import { View } from "./wire.js"
 
 const POLL_MS = 250
 const GUTTER = 2
@@ -73,20 +74,26 @@ export function startTui(lui) {
 
     async function tick() {
         if (stopped) return
+        // /data carries the server-side panels (warnings + engine).
+        // The lui-panel is local to this machine — bookmarklet URL, etc.
+        // — so it gets prepended here, not over the wire.
+        let serverPanels = []
         try {
             const payload = await fetchData(lui.config.global.web_port)
-            if (payload) {
-                lastPayload = payload
-                paintScreen(payload)
-            }
+            if (payload?.panels) serverPanels = payload.panels
         } catch {
-            // Server not up yet, or transient — keep polling.
+            // Server not up yet, or transient — render local panel alone.
         }
+        const v = View()
+        lui.appendLuiPanel(v)
+        for (const panel of serverPanels) v.adoptPanel(panel)
+        const built = v.build()
+        lastPayload = built
+        paintScreen(built)
         setTimeout(tick, POLL_MS)
     }
 
     function paintScreen(payload) {
-        const compiled = compilePalette(payload.palette || [])
         const rows = process.stdout.rows || 24
         const rawCols = process.stdout.columns || 80
         const cols = Math.max(1, rawCols - RIGHT_MARGIN)
@@ -99,6 +106,7 @@ export function startTui(lui) {
             if (row > rows) break
             const panel = payload.panels[pi]
             const isLast = pi === lastPanelIdx
+            const compiled = compilePalette(panel.palette || [])
 
             // Title divider: "  ── TITLE ─────…─" in muted purple, full
             // width to the right edge. paint() ends with a hard reset

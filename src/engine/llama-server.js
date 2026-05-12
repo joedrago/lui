@@ -75,6 +75,16 @@ export const engine = {
         return null
     },
 
+    // {host, port} naming where to actually reach the model. host=null
+    // means "use the caller's context-appropriate fallback" — the HTTP
+    // server fills it in from the request hostname; `lui ssh` fills it
+    // in with "localhost" (the tunnel's server end). For llama-server
+    // the engine binary listens on lui's engine_port, on whichever
+    // address the user reached us with, so we always return null host.
+    endpoint(lui) {
+        return { host: null, port: lui.config.global.engine_port }
+    },
+
     buildArgv(model, lui) {
         const host = lui.config.global.public ? "0.0.0.0" : "127.0.0.1"
         const port = lui.config.global.engine_port

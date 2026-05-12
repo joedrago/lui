@@ -85,15 +85,17 @@ export function harnessSchemaDefaults() {
 }
 
 // Caller assembles one of these and hands it to `harness.apply(existing, ctx)`.
-// Pre-derives the values every harness wants. `ctxSize` is the caller's
-// responsibility — it comes from the engine module via
-// `engine.contextSize(state, model)`, which only returns a real number
-// once the engine has reported Ready. Callers pass a fallback default
-// when the engine doesn't know yet.
-export function harnessContext({ activeModel, baseURL, enginePort, webPort, websearch, ctxSize }) {
+// Pre-derives the values every harness wants. The caller computes the
+// model's externally-reachable baseURL itself, since the right answer
+// depends on context (req hostname for /config-driven flows, the
+// SSH-tunnel localhost port for `lui ssh`, etc.). `ctxSize` likewise
+// comes from the engine — `engine.contextSize(state, model)` only
+// returns a real number once Ready, so callers pass a fallback for
+// early/offline use.
+export function harnessContext({ activeModel, baseURL, webPort, websearch, ctxSize }) {
     return {
         modelName: deriveModelName(activeModel?.name),
-        baseURL: baseURL ?? `http://127.0.0.1:${enginePort}/v1`,
+        baseURL,
         ctxSize: ctxSize ?? DEFAULT_CTX_SIZE,
         webPort,
         websearch: websearch !== false
@@ -200,16 +202,15 @@ async function pickConfigFile(transport, dir, candidates) {
 }
 
 // Walks every shipped harness so just-disabled ones get their stale
-// SKILL.md swept; config edits stay gated on `enabled`. Pass
-// `{ baseURL }` to point harness configs at a remote llama-server
-// instead of the local one — used by `lui remote`. `ctxSize` is the
-// engine's current best answer; caller computes it via the engine
-// module (or, for `lui remote`, takes it from the server's /config).
+// SKILL.md swept; config edits stay gated on `enabled`. `baseURL`
+// overrides where the harness should point — used by a future remote
+// engine that knows the upstream URL. Defaults to the local engine's
+// endpoint with a 127.0.0.1 host (harness is on this machine).
 export async function applyAllLocal(lui, { baseURL, ctxSize } = {}) {
+    const resolvedBaseURL = baseURL ?? localBaseURL(lui)
     const ctx = harnessContext({
         activeModel: lui.activeModel,
-        baseURL,
-        enginePort: lui.config.global.engine_port,
+        baseURL: resolvedBaseURL,
         webPort: lui.config.global.web_port,
         websearch: lui.config.global.websearch,
         ctxSize
@@ -222,4 +223,10 @@ export async function applyAllLocal(lui, { baseURL, ctxSize } = {}) {
             process.stderr.write(`lui: harness "${h.name}" apply failed: ${e.message}\n`)
         }
     }
+}
+
+function localBaseURL(lui) {
+    const ep = lui.engineModule?.endpoint?.(lui)
+    if (!ep) return null
+    return `http://${ep.host ?? "127.0.0.1"}:${ep.port}/v1`
 }

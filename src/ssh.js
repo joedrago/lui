@@ -27,7 +27,15 @@ export async function sshSetupShare(lui, spec) {
     const remoteEnginePort = pickRemotePort()
     const remoteWebPort = remoteEnginePort + 1
 
-    const localEnginePort = lui.config.global.engine_port
+    // Tunnel's server end: where on *this* machine to forward client
+    // traffic. For a llama-server engine that's localhost:engine_port;
+    // for a remote engine, the upstream's actual host:port — so an
+    // `lui ssh` from a relay tunnels straight to llm without
+    // proxying through this process.
+    const engineEndpoint = lui.engineModule?.endpoint?.(lui) ?? {
+        host: null,
+        port: lui.config.global.engine_port
+    }
     const localWebPort = lui.config.global.web_port
     const websearch = lui.config.global.websearch !== false
 
@@ -42,7 +50,7 @@ export async function sshSetupShare(lui, spec) {
         await applyHarnessRemote(lui, target, h, remoteEnginePort, remoteWebPort)
     }
 
-    printShareSuccess(target, { localEnginePort, localWebPort, remoteEnginePort, remoteWebPort, websearch })
+    printShareSuccess(target, { engineEndpoint, localWebPort, remoteEnginePort, remoteWebPort, websearch })
 }
 
 export async function sshSetupUse(lui, hostSpec) {
@@ -71,7 +79,12 @@ export async function sshSetupUse(lui, hostSpec) {
         process.exit(1)
     }
 
-    const llamaBaseURL = `http://${target.host}:${cfg.engine_port}/v1`
+    // /config tells us the upstream's externally-reachable base_url
+    // directly — for a llama-server upstream it was built from the
+    // hostname we connected with; for a remote upstream it's whatever
+    // *that* hop learned from its own upstream. Either way we can
+    // hand the URL to harnesses unchanged.
+    const llamaBaseURL = cfg.base_url
     lui.activeModel = { name: cfg.active_model || "lui", engine: "remote", args: [] }
     const enabled = lui.config.global.websearch !== false
     await applyAllLocal(lui, { baseURL: llamaBaseURL, ctxSize: cfg.context_size })
@@ -199,9 +212,12 @@ async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remote
     const engineModule = engines[activeModel.engine]
     const ctxSize = engineModule?.contextSize?.(lui.state, activeModel) ?? null
 
+    // The client's harness always points at localhost: the reverse
+    // tunnel terminates on the client side, so the client's traffic
+    // routes through localhost:<remote port> back to this machine.
     const ctx = harnessContext({
         activeModel,
-        enginePort: remoteEnginePort,
+        baseURL: `http://localhost:${remoteEnginePort}/v1`,
         webPort: remoteWebPort,
         websearch: lui.config.global.websearch,
         ctxSize
@@ -240,9 +256,18 @@ function fetchRemoteConfig(target) {
 }
 
 function printShareSuccess(target, ports) {
+    // engine.endpoint.host === null means "the engine lives on this
+    // machine" — the tunnel's server end is localhost. A non-null
+    // host means the engine is upstream of *us* (we're a remote
+    // engine), and we want the tunnel to skip our process entirely
+    // and land directly on the real model host.
+    const engineHost = ports.engineEndpoint.host ?? "localhost"
+    const enginePort = ports.engineEndpoint.port
+    const engineFwd = `${ports.remoteEnginePort}:${engineHost}:${enginePort}`
+    const webFwd = `${ports.remoteWebPort}:localhost:${ports.localWebPort}`
     const cmd = ports.websearch
-        ? `ssh -R ${ports.remoteEnginePort}:localhost:${ports.localEnginePort} -R ${ports.remoteWebPort}:localhost:${ports.localWebPort} ${sshTargetSpec(target)}`
-        : `ssh -R ${ports.remoteEnginePort}:localhost:${ports.localEnginePort} ${sshTargetSpec(target)}`
+        ? `ssh -R ${engineFwd} -R ${webFwd} ${sshTargetSpec(target)}`
+        : `ssh -R ${engineFwd} ${sshTargetSpec(target)}`
 
     process.stdout.write(`\n  opencode configured on ${sshTargetSpec(target)}\n\n`)
     process.stdout.write(`  To connect from this machine, run in another terminal:\n\n`)
