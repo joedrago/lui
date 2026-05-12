@@ -1,15 +1,13 @@
 // `lui ssh USER@HOST` configures harnesses on a remote client for a
-// reverse-tunneled connection to this machine. `lui remote HOST[:PORT]`
-// is the inverse — this client fetches /config from a --public server.
+// reverse-tunneled connection back to this machine. The inverse —
+// running lui on a client that fetches its engine state from somewhere
+// else — is just the `remote` engine: `lui add NAME remote HOST[:PORT]`.
 
-import http from "node:http"
 import process from "node:process"
 import { spawn } from "node:child_process"
 
-import { CONFIG_VERSION, startWebServer } from "./web.js"
-import { harnesses, applyAllLocal, applyHarness, harnessContext, isHarnessEnabled } from "./harness.js"
+import { harnesses, applyHarness, harnessContext, isHarnessEnabled } from "./harness.js"
 import { engines } from "./engine.js"
-import { startTui } from "./display.js"
 
 export async function sshSetupShare(lui, spec) {
     const target = parseShareTarget(spec)
@@ -53,59 +51,6 @@ export async function sshSetupShare(lui, spec) {
     printShareSuccess(target, { engineEndpoint, localWebPort, remoteEnginePort, remoteWebPort, websearch })
 }
 
-export async function sshSetupUse(lui, hostSpec) {
-    const target = parseUseTarget(hostSpec)
-    if (!target) {
-        process.stderr.write(`lui: remote expects HOST or HOST:PORT, got "${hostSpec}"\n`)
-        process.exit(2)
-    }
-
-    if (!harnesses.some((h) => isHarnessEnabled(lui, h))) {
-        process.stderr.write(luiNeedsHarnessError("remote"))
-        process.exit(1)
-    }
-
-    const cfg = await fetchRemoteConfig(target).catch((e) => {
-        process.stderr.write(
-            `lui: ${e.message}\n\nIs the server running with \`--public\`? Without it, the HTTP server binds to 127.0.0.1 and a client can't see it.\n`
-        )
-        process.exit(1)
-    })
-
-    if (cfg.version !== CONFIG_VERSION) {
-        process.stderr.write(
-            `lui: server /config version ${cfg.version}, this lui understands ${CONFIG_VERSION}. Upgrade the older side.\n`
-        )
-        process.exit(1)
-    }
-
-    // /config tells us the upstream's externally-reachable base_url
-    // directly — for a llama-server upstream it was built from the
-    // hostname we connected with; for a remote upstream it's whatever
-    // *that* hop learned from its own upstream. Either way we can
-    // hand the URL to harnesses unchanged.
-    const llamaBaseURL = cfg.base_url
-    lui.activeModel = { name: cfg.active_model || "lui", engine: "remote", args: [] }
-    const enabled = lui.config.global.websearch !== false
-    await applyAllLocal(lui, { baseURL: llamaBaseURL, ctxSize: cfg.context_size })
-
-    process.stdout.write(`\n  Using server at ${target.host}:${target.httpPort}\n`)
-    process.stdout.write(`    model:           ${cfg.active_model ?? "(unknown)"}\n`)
-    process.stdout.write(`    llama (direct):  ${llamaBaseURL}\n`)
-    if (enabled) {
-        process.stdout.write(`    bsearch (local): http://127.0.0.1:${lui.config.global.web_port}/bsearch\n`)
-        process.stdout.write(`    bookmarklet:     http://127.0.0.1:${lui.config.global.web_port}/setup\n`)
-    }
-    process.stdout.write(`\n  opencode config written. Run \`opencode\` in another terminal.\n\n`)
-
-    if (enabled) {
-        lui.web = await startWebServer(lui)
-    }
-    lui.tui = startTui(lui)
-
-    await lui.awaitShutdown()
-}
-
 function luiNeedsHarnessError(verb) {
     const all = harnesses.map((h) => h.name).join(", ")
     return (
@@ -119,16 +64,6 @@ function parseShareTarget(s) {
     const i = s.indexOf("@")
     if (i <= 0 || i >= s.length - 1) return null
     return { user: s.slice(0, i), host: s.slice(i + 1) }
-}
-
-function parseUseTarget(s) {
-    if (!s) return null
-    const i = s.lastIndexOf(":")
-    if (i < 0) return { host: s, httpPort: 8081 }
-    const host = s.slice(0, i)
-    const port = parseInt(s.slice(i + 1), 10)
-    if (!host || !Number.isFinite(port)) return null
-    return { host, httpPort: port }
 }
 
 function pickRemotePort() {
@@ -231,28 +166,6 @@ function resolveActiveModel(lui) {
     const m = lui.config.model[name]
     if (!m) return null
     return { name, engine: m.engine, args: m.args || [] }
-}
-
-function fetchRemoteConfig(target) {
-    return new Promise((resolve, reject) => {
-        const req = http.get({ host: target.host, port: target.httpPort, path: "/config", timeout: 5000 }, (res) => {
-            let body = ""
-            res.setEncoding("utf8")
-            res.on("data", (c) => (body += c))
-            res.on("end", () => {
-                if (res.statusCode < 200 || res.statusCode >= 300) {
-                    return reject(new Error(`${target.host}:${target.httpPort}/config returned HTTP ${res.statusCode}`))
-                }
-                try {
-                    resolve(JSON.parse(body))
-                } catch (e) {
-                    reject(new Error(`unparseable /config JSON: ${e.message}`))
-                }
-            })
-        })
-        req.on("error", (e) => reject(new Error(`could not reach ${target.host}:${target.httpPort}: ${e.message}`)))
-        req.on("timeout", () => req.destroy(new Error(`timeout connecting to ${target.host}:${target.httpPort}`)))
-    })
 }
 
 function printShareSuccess(target, ports) {

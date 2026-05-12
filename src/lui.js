@@ -7,7 +7,7 @@ import { STYLE } from "./theme.js"
 import { engines, runEngine } from "./engine.js"
 import { startWebServer } from "./web.js"
 import { startTui } from "./display.js"
-import { sshSetupShare, sshSetupUse } from "./ssh.js"
+import { sshSetupShare } from "./ssh.js"
 import { runSandbox, previewSandboxArgs } from "./sandbox.js"
 import { applyAllLocal } from "./harness.js"
 
@@ -230,9 +230,6 @@ export class Lui {
 
     async ssh(target) {
         await sshSetupShare(this, target)
-    }
-    async remote(host) {
-        await sshSetupUse(this, host)
     }
     async sandbox(harnessName, harnessArgs) {
         await runSandbox(this, harnessName, harnessArgs)

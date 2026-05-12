@@ -3,7 +3,7 @@ import process from "node:process"
 import { Lui } from "./lui.js"
 import { runConfigCommand, runConfigDump } from "./config.js"
 
-const SUBCOMMANDS = new Set(["run", "add", "cp", "set", "rm", "ssh", "remote", "websearch", "sandbox", "config"])
+const SUBCOMMANDS = new Set(["run", "add", "cp", "set", "rm", "ssh", "websearch", "sandbox", "config"])
 
 function printHelp() {
     process.stdout.write(`lui — a friendly TUI wrapper for LLM engines.
@@ -22,7 +22,6 @@ USAGE
   lui config set PATH VALUE        set a config value (appends for array paths)
   lui config clear PATH            remove a config value (or whole array)
 
-  lui remote HOST[:PORT]           connect TUI to a remote lui
   lui ssh USER@HOST                configure a remote client
   lui websearch                    run only the websearch server
 
@@ -103,12 +102,6 @@ async function main() {
     if (verb === "ssh") {
         if (rest.length !== 1) fatal("ssh requires USER@HOST")
         await lui.ssh(rest[0])
-        return
-    }
-
-    if (verb === "remote") {
-        if (rest.length !== 1) fatal("remote requires HOST[:PORT]")
-        await lui.remote(rest[0])
         return
     }
 

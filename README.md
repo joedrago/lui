@@ -76,19 +76,42 @@ The handful of flags that _aren't_ persisted (override for one run only):
 
 ## Connecting to a shared server
 
-lui supports two machines sharing one model. The two modes are mutually exclusive; neither is persisted.
+lui supports machines sharing one model. There are two flows; they're not mutually exclusive and stack cleanly.
 
-### `lui ssh USER@HOST` — share your local LLM with a remote machine
+### `remote` engine — point this lui at another lui
 
-Run **on the server** (the machine where `llama-server` is running). It SSHes into the client, writes an opencode config there pointing back at your llama-server through a reverse tunnel, and prints the `ssh -R ...` command for you to run in another terminal.
+Register a `remote` model the same way you'd register any model, then run it. The `remote` engine fetches `/config` from the upstream lui, learns where the real model lives, and propagates that URL through harnesses on this machine. The TUI shows the upstream's panels via `/data`; the local web search stays local.
+
+```
+# On the server (the machine actually running llama.cpp):
+lui config set public true     # so /config + /data bind 0.0.0.0
+lui run qwenmoe
+
+# On this machine:
+lui add llm remote server.local:8081
+lui run llm
+```
+
+Chains transparently: `lui add bar remote relay:8081` on a third machine will write a harness pointing straight at the original server, since each `/config` hop just propagates the fully-qualified `base_url`.
+
+**Requirements:**
+
+- The upstream lui must be running with `--public` (or `lui config set public true`) so its HTTP server binds `0.0.0.0`.
+- This machine must be network-reachable to the *actual* model host, not just the immediate upstream — the harness writes the real URL, not a per-hop relative one.
+
+### `lui ssh USER@HOST` — share your local LLM with a remote client
+
+Run **on the server** (the machine where lui — and the engine it runs — already lives). It SSHes into the client, writes an opencode config there pointing back at this lui through a reverse tunnel, and prints the `ssh -R ...` command for you to run in another terminal.
 
 **What it does:**
 
 1. Verifies `opencode` is installed on the client.
-2. Picks a random high port on the client (18000–28999) for llama-server and the next port for websearch.
+2. Picks a random high port on the client (18000–28999) for the engine and the next port for websearch.
 3. Writes `~/.config/opencode/opencode.json` on the client with `baseURL` pointing to `http://localhost:<client_port>/v1`.
 4. Writes the `lui-web-search` SKILL.md on the client (unless websearch is disabled), baked with the correct client ports.
 5. Prints the `ssh -R …` command. Run that in another terminal to establish the tunnel.
+
+The `-R` command targets wherever this lui's *engine* actually lives — so if the lui running `ssh` is itself a `remote` engine pointing at another machine, the tunnel terminates there directly rather than proxying through this process.
 
 **Requirements:**
 
@@ -103,31 +126,6 @@ lui ssh user@workstation
 
 # Then, in another terminal on the server:
 ssh -R 23847:localhost:8080 -R 23848:localhost:8081 user@workstation
-```
-
-### `lui remote HOST[:PORT]` — use a remote LLM while keeping web search local
-
-Run **on your client** (your laptop). It connects to a `--public` lui server, writes a local opencode config pointing at it, spawns an in-process websearch server here so browser-mediated search works against your real browser, and renders the TUI by polling the remote `/data`.
-
-**What it does:**
-
-1. Fetches `/config` from the server's HTTP endpoint (default port 8081).
-2. Validates the config version matches.
-3. Writes local `~/.config/opencode/opencode.json` with `baseURL` pointing directly at the server's llama-server (e.g. `http://server:8080/v1`).
-4. Writes the local `lui-web-search` SKILL.md pointed at a bsearch server spawned on this client.
-5. Renders the TUI; blocks until `Ctrl+C`.
-
-**Requirements:**
-
-- The server must be running with `lui --public` (or `lui config set public true`) so its HTTP server binds to `0.0.0.0`.
-- Network access from client to server.
-
-**Example:**
-
-```
-# On your client machine (server already running with --public):
-lui remote server.local
-lui remote server.local:9000    # custom HTTP port
 ```
 
 ## Sandboxing the harness

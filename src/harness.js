@@ -202,15 +202,15 @@ async function pickConfigFile(transport, dir, candidates) {
 }
 
 // Walks every shipped harness so just-disabled ones get their stale
-// SKILL.md swept; config edits stay gated on `enabled`. `baseURL`
-// overrides where the harness should point — used by a future remote
-// engine that knows the upstream URL. Defaults to the local engine's
-// endpoint with a 127.0.0.1 host (harness is on this machine).
-export async function applyAllLocal(lui, { baseURL, ctxSize } = {}) {
-    const resolvedBaseURL = baseURL ?? localBaseURL(lui)
+// SKILL.md swept; config edits stay gated on `enabled`. The harness
+// baseURL is derived from the active engine's endpoint — for a
+// remote engine that's the upstream URL the engine learned from
+// /config, so harnesses on this machine point directly at the real
+// model regardless of how many hops are in between.
+export async function applyAllLocal(lui, { ctxSize } = {}) {
     const ctx = harnessContext({
         activeModel: lui.activeModel,
-        baseURL: resolvedBaseURL,
+        baseURL: localBaseURL(lui),
         webPort: lui.config.global.web_port,
         websearch: lui.config.global.websearch,
         ctxSize
