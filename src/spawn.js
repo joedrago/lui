@@ -60,7 +60,12 @@ export function describeSpawnError(binaryName, err) {
 //                  stderr (which the TUI swallows).
 //   addWarning   — optional (msg) => void for non-fatal issues
 //                  (e.g. cannot open debug log)
-export function spawnProcess({ binary, argv, parseLine, debugLog, onExit, onSpawnError, addWarning }) {
+//   env          — optional env mapping for the child. Default is
+//                  process.env. Engines that need to override TTY-
+//                  related vars (e.g. mlx_lm sets TQDM_POSITION=-1 to
+//                  un-suppress huggingface_hub's bytes bar in pipe
+//                  mode) pass an extended env here.
+export function spawnProcess({ binary, argv, parseLine, debugLog, onExit, onSpawnError, addWarning, env }) {
     let debugFd = null
     if (debugLog) {
         try {
@@ -70,7 +75,7 @@ export function spawnProcess({ binary, argv, parseLine, debugLog, onExit, onSpaw
         }
     }
 
-    const child = spawn(binary, argv, { stdio: ["ignore", "pipe", "pipe"] })
+    const child = spawn(binary, argv, { stdio: ["ignore", "pipe", "pipe"], env: env ?? process.env })
 
     const buffers = { stdout: "", stderr: "" }
     function drain(name, chunk) {
@@ -82,10 +87,19 @@ export function spawnProcess({ binary, argv, parseLine, debugLog, onExit, onSpaw
             }
         }
         buffers[name] += chunk
-        let idx
-        while ((idx = buffers[name].indexOf("\n")) !== -1) {
-            const line = buffers[name].slice(0, idx).replace(/\r$/, "")
-            buffers[name] = buffers[name].slice(idx + 1)
+        // Split on both \n and \r so tqdm-style progress bars (which
+        // overwrite the same line with \r-only updates between
+        // newlines) become a stream of distinct line events instead
+        // of one giant concatenation at the final \n. \r\n collapses
+        // to a single break so DOS line endings don't double-fire.
+        while (true) {
+            const nIdx = buffers[name].indexOf("\n")
+            const rIdx = buffers[name].indexOf("\r")
+            const idx = nIdx === -1 ? rIdx : rIdx === -1 ? nIdx : Math.min(nIdx, rIdx)
+            if (idx === -1) break
+            const next = buffers[name][idx] === "\r" && buffers[name][idx + 1] === "\n" ? idx + 2 : idx + 1
+            const line = buffers[name].slice(0, idx)
+            buffers[name] = buffers[name].slice(next)
             try {
                 parseLine(line)
             } catch (e) {

@@ -199,6 +199,14 @@ function paintLine(line, cols, compiled) {
     return wrapped.map((r) => " ".repeat(startCol) + paint(r, compiled) + reset())
 }
 
+// Bars are right-justified into a fixed slot at the trailing half of
+// the post-margin width, so every bar in the UI lines up regardless
+// of how long its label is. The label fills the left half (truncated
+// with "…" if necessary) and the bar+text combo occupies the right.
+// A minimum bar width keeps narrow terminals from rendering a stub.
+const BAR_RIGHT_FRACTION = 0.5
+const BAR_MIN_RIGHT_WIDTH = 12
+
 function paintBar(bar, width, compiled) {
     const frac = bar.max ? Math.max(0, Math.min(1, bar.value / bar.max)) : Math.max(0, Math.min(1, bar.value || 0))
     const label = bar.label ?? ""
@@ -206,21 +214,38 @@ function paintBar(bar, width, compiled) {
     const labelW = vwidth(label)
     const textW = vwidth(text)
 
-    const labelGap = labelW ? 1 : 0
+    // Right slot holds `[bar] text` and is the same fixed width on
+    // every row. Clamp so we don't disappear on tiny windows or
+    // overflow on huge ones.
+    const rightW = Math.max(BAR_MIN_RIGHT_WIDTH, Math.min(width, Math.floor(width * BAR_RIGHT_FRACTION)))
+    const leftW = Math.max(0, width - rightW)
+
     const textGap = textW ? 1 : 0
-    const fixed = labelW + labelGap + 2 /* [] */ + textGap + textW
-    const inner = Math.max(1, width - fixed)
+    const inner = Math.max(1, rightW - 2 /* [] */ - textGap - textW)
     const filled = Math.round(frac * inner)
     const empty = Math.max(0, inner - filled)
 
-    let out = ""
-    if (label) out += paint(label, compiled) + reset() + " "
-    out += "["
-    out += styled("█".repeat(filled), STYLE.BAR_FILL)
-    out += styled("░".repeat(empty), STYLE.BAR_EMPTY)
-    out += "]"
-    if (text) out += " " + styled(paint(text, compiled), STYLE.VALUE)
-    return out
+    let left
+    if (!label) {
+        left = " ".repeat(leftW)
+    } else if (labelW <= leftW - 1) {
+        // Label fits with a one-column gutter before the bar slot.
+        left = paint(label, compiled) + reset() + " ".repeat(leftW - labelW)
+    } else if (labelW <= leftW) {
+        left = paint(label, compiled) + reset()
+    } else {
+        // Label longer than its half — trim and ellipsize. vwidth("…") = 1.
+        const cut = Math.max(0, leftW - 1)
+        left = paint(label.slice(0, cut) + "…", compiled) + reset()
+    }
+
+    let right = "["
+    right += styled("█".repeat(filled), STYLE.BAR_FILL)
+    right += styled("░".repeat(empty), STYLE.BAR_EMPTY)
+    right += "]"
+    if (text) right += " " + styled(paint(text, compiled), STYLE.VALUE)
+
+    return left + right
 }
 
 function fetchData(port) {

@@ -56,6 +56,8 @@ export const engine = {
     setupDefaults: [
         {
             name: "qwen",
+            // Qwen3.6-35B-A3B UD-Q4_K_M is ~22 GB on disk.
+            sizeGiB: 22,
             args: [
                 "-hf",
                 "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M",

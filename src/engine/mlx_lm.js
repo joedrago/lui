@@ -1,7 +1,11 @@
-// mlx_lm.server engine. Bare-bones scaffold — parseLine just shoves
-// lines into the log ring and flips to Ready when uvicorn/Flask
-// announces the listen address. Once we have a debug log to study
-// we can flesh out real parsing (model name, ctx, tps, slots…).
+// mlx_lm.server engine. parseLine sifts the python-logging stream
+// into tok/s and cache stats; appendPanels paints them. Ready
+// detection waits for an active completion probe (not the bare
+// "Starting httpd" line) because mlx_lm's HTTP server starts
+// accepting connections before its worker thread has finished
+// loading the model.
+
+import http from "node:http"
 
 import { STYLE } from "../theme.js"
 import { stripAnsi } from "../ansi.js"
@@ -35,7 +39,24 @@ export const engine = {
     setupDefaults: [
         {
             name: "qwen-mlx",
-            args: ["--model", "mlx-community/Qwen3-4B-4bit"]
+            // ~14 GB on disk at 4-bit. Sampling params are Qwen3's
+            // recommended thinking-mode preset; the 12 GB cache lets
+            // long-context conversations stay warm.
+            sizeGiB: 14,
+            args: [
+                "--model",
+                "mlx-community/Qwen3.6-27B-4bit",
+                "--prompt-cache-bytes",
+                "12GB",
+                "--temp",
+                "0.6",
+                "--top-k",
+                "20",
+                "--top-p",
+                "0.95",
+                "--min-p",
+                "0.0"
+            ]
         }
     ],
 
@@ -127,9 +148,17 @@ export const engine = {
         const binaryName = binarySeg.args[0]
         const binaryPath = resolveBinary(binaryName)
         const argv = rest.flatMap((s) => s.args)
+        // TQDM_POSITION=-1 forces huggingface_hub's tqdm subclass to
+        // emit progress bars even when stderr isn't a TTY (see
+        // huggingface_hub/utils/tqdm.py:is_tqdm_disabled). Without
+        // this we only see the snapshot_download wrapper bar and miss
+        // the aggregated bytes bar (which is the actually-useful one
+        // for shard downloads).
+        const env = { ...process.env, TQDM_POSITION: "-1" }
         lui.state.proc = spawnProcess({
             binary: binaryPath,
             argv,
+            env,
             parseLine: (line) => engine.parseLine(line, lui),
             debugLog: lui.config.global.debug_log,
             onExit: (code, signal) => lui.onEngineExit?.(code, signal),
@@ -159,6 +188,16 @@ export const engine = {
         s.exitMessage = ""
         s.fatalReason = null
 
+        // serverListening flips when mlx_lm logs "Starting httpd…";
+        // engineReadyFired waits for the probe completion below to
+        // actually return (i.e. the worker thread has loaded the
+        // model and is processing requests). probeInProgress
+        // suppresses gen tracking during the probe so its single
+        // throwaway token doesn't anchor lastGen / Average.
+        s.serverListening = false
+        s.probeFired = false
+        s.probeInProgress = false
+
         // Performance / runtime stats lifted from DEBUG output.
         s.gen = null // { startMs, tokens, lastTokenMs } while active
         s.lastGen = null // { tokens, durationMs, tps } after finalize
@@ -172,6 +211,11 @@ export const engine = {
         s.promptProcessed = 0
         s.promptTotal = 0
 
+        // filename → percent (0-100) for huggingface_hub downloads.
+        // The "Fetching N files" wrapper bar is stored under the
+        // sentinel key OVERALL_KEY so the panel can render it first.
+        s.downloads = new Map()
+
         // Multi-line body suppression: when set we drop continuation
         // lines until the next logger-prefixed line or access-log line.
         s.swallowBody = false
@@ -184,8 +228,12 @@ export const engine = {
         const s = lui.state
         const lineTs = parseLineTimestamp(line) ?? Date.now()
 
-        // tqdm carriage-return progress bars from huggingface_hub.
-        if (/Fetching \d+ files:/.test(line)) return
+        // tqdm progress lines from huggingface_hub. These arrive as
+        // \r-overwriting updates (now split into separate parseLine
+        // events by spawn.js), so we extract the latest percentage
+        // and route to s.downloads. Both the "Fetching N files"
+        // wrapper and individual file bars are handled.
+        if (parseDownloadProgress(s, line)) return
 
         // Mid-body continuation of a previously-suppressed JSON dump.
         // Break out the moment we see a real logger line or the
@@ -215,11 +263,20 @@ export const engine = {
         // HF API call that fires on every model resolve.
         if (level === "INFO" && /^HTTP Request: GET https:\/\/huggingface\.co\//.test(content)) return
 
-        if (!lui.engineReadyFired && level === "INFO") {
+        if (!s.serverListening && level === "INFO") {
             const httpd = /^Starting httpd at (\S+) on port (\d+)/.exec(content)
             if (httpd) {
+                s.serverListening = true
                 s.listenUrl = `http://${httpd[1]}:${httpd[2]}`
-                lui.markEngineReady()
+                // The HTTP server is now accepting connections but
+                // the worker thread may still be loading the model.
+                // Fire a probe completion and only mark Ready when it
+                // returns — mlx_lm queues requests during load, so a
+                // response means decode is actually online.
+                if (!s.probeFired) {
+                    s.probeFired = true
+                    probeReady(lui).catch(() => lui.markEngineReady())
+                }
             }
         }
 
@@ -244,8 +301,10 @@ export const engine = {
 
         const prog = /^Prompt processing progress: (\d+)\/(\d+)/.exec(content)
         if (prog && level === "INFO") {
-            s.promptProcessed = parseInt(prog[1], 10) || 0
-            s.promptTotal = parseInt(prog[2], 10) || 0
+            if (!s.probeInProgress) {
+                s.promptProcessed = parseInt(prog[1], 10) || 0
+                s.promptTotal = parseInt(prog[2], 10) || 0
+            }
             pushLog(s, line)
             return
         }
@@ -259,13 +318,18 @@ export const engine = {
         // startMs is deliberately left null here; we anchor it on the
         // first token timestamp below so the duration covers decode
         // only and excludes the prompt-processing prefill window.
+        //
+        // During the readiness probe (a 1-token throwaway completion)
+        // we skip all gen tracking — otherwise lastGen / Average get
+        // anchored at the probe's "1 token in 0.0s = 1000 tok/s".
         if (level === "DEBUG" && (content === "Starting stream:" || content === "Starting completion:")) {
+            if (s.probeInProgress) return
             finalizeGen(s)
             s.gen = { startMs: null, tokens: 0, lastTokenMs: null }
             return
         }
         if (level === "DEBUG" && content.startsWith("Outgoing Response:")) {
-            finalizeGen(s)
+            if (!s.probeInProgress) finalizeGen(s)
             s.swallowBody = true
             return
         }
@@ -277,7 +341,7 @@ export const engine = {
         // Once we're inside a generation, every other DEBUG line is a
         // single generated token's text. Counting them powers tok/s.
         // First token anchors the decode-only window.
-        if (level === "DEBUG" && s.gen) {
+        if (level === "DEBUG" && s.gen && !s.probeInProgress) {
             if (s.gen.startMs == null) s.gen.startMs = lineTs
             s.gen.tokens += 1
             s.gen.lastTokenMs = lineTs
@@ -297,6 +361,125 @@ export const engine = {
         appendPerformancePanel(v, lui)
         appendServerLogPanel(v, lui)
     }
+}
+
+const OVERALL_KEY = "__overall__"
+
+// tqdm shapes from huggingface_hub:
+//
+//   wrapper:  "Fetching 14 files:  35%|███       | 5/14 [..]"
+//   per-file: "model.safetensors:  18%|█▊        | 2.25G/12.5G [..]"
+//   truncated: "(…)f-00009.safetensors:  18%|█▊        | 2.25G/12.5G [..]"
+//
+// We try the wrapper first; anything else with the `NAME: NN%|…|`
+// shape is treated as a per-file bar. The per-file regex
+// deliberately accepts any name (including the "(…)" ellipsis tqdm
+// inserts when the desc is too long for the terminal) so we don't
+// silently miss progress for repos with long shard names. Either
+// match suppresses the line from the log ring and the panel renders
+// an active bar instead.
+function parseDownloadProgress(s, line) {
+    const wrapper = /Fetching (\d+) files:\s+(\d+)%\|[^|]*\|\s*(\d+)\/(\d+)/.exec(line)
+    if (wrapper) {
+        const pct = parseInt(wrapper[2], 10) || 0
+        const cur = parseInt(wrapper[3], 10) || 0
+        const total = parseInt(wrapper[4], 10) || 0
+        s.downloads.set(OVERALL_KEY, { label: `Fetching ${total} files (${cur}/${total})`, pct })
+        if (pct >= 100) s.downloads.delete(OVERALL_KEY)
+        return true
+    }
+    // Reject "Fetching N files" first so the generic shape doesn't
+    // pick it up; the wrapper case above handles it explicitly.
+    const perFile = /^([^:\r\n]+?):\s+(\d+)%\|[^|]*\|\s*([\d.]+\s*[KMGT]?i?B(?:\/[\d.]+\s*[KMGT]?i?B)?)?/.exec(line)
+    if (perFile && !/^Fetching \d+ files/.test(perFile[1])) {
+        let name = perFile[1].replace(/^\(…\)|^\(\.\.\.\)/, "…")
+        // huggingface_hub's aggregated bytes bar starts life with
+        // desc="Downloading (incomplete total...)" and renames to
+        // "Download complete" at the end. Collapse both to one key so
+        // the rename doesn't double-list the bar, and shorten the
+        // verbose initial desc for display.
+        if (/^Downloading|^Download complete/.test(name)) name = "Downloading"
+        const pct = parseInt(perFile[2], 10) || 0
+        const sizes = perFile[3] || ""
+        if (pct >= 100) s.downloads.delete(name)
+        else {
+            const prev = s.downloads.get(name)?.pct ?? 0
+            if (pct >= prev) {
+                const label = sizes ? `${name}  ${sizes}` : name
+                s.downloads.set(name, { label, pct })
+            }
+        }
+        return true
+    }
+    return false
+}
+
+// Probe the engine with the smallest possible chat completion so we
+// can tell when the worker thread has finished loading. mlx_lm.server
+// holds the request until model load completes; the response (any
+// status code) confirms decode is online. On connection or transport
+// failure we still fire markEngineReady so the harness gets
+// configured — degrading to old behavior is better than wedging the
+// UI on "Loading model…" forever.
+//
+// probeInProgress + the post-probe stat reset together keep the
+// probe's one-token completion from anchoring lastGen / Average:
+// the flag suppresses gen tracking inline, and the reset wipes any
+// state that slipped through pipe-ordering races between the HTTP
+// response and the final stderr log lines.
+async function probeReady(lui) {
+    const s = lui.state
+    s.probeInProgress = true
+
+    const port = lui.config.global.engine_port
+    const modelName = engine.servedModelName(s, lui.activeModel) || "default"
+    const body = JSON.stringify({
+        model: modelName,
+        messages: [{ role: "user", content: "." }],
+        max_tokens: 1,
+        temperature: 0,
+        stream: false
+    })
+
+    function settle() {
+        s.gen = null
+        s.lastGen = null
+        s.totalGenTokens = 0
+        s.totalGenMs = 0
+        s.promptProcessed = 0
+        s.promptTotal = 0
+        s.swallowBody = false
+        s.probeInProgress = false
+        lui.markEngineReady()
+    }
+
+    return new Promise((resolve) => {
+        const req = http.request(
+            {
+                host: "127.0.0.1",
+                port,
+                path: "/v1/chat/completions",
+                method: "POST",
+                headers: {
+                    "content-type": "application/json",
+                    "content-length": Buffer.byteLength(body)
+                }
+            },
+            (res) => {
+                res.on("data", () => {})
+                res.on("end", () => {
+                    settle()
+                    resolve()
+                })
+            }
+        )
+        req.on("error", () => {
+            settle()
+            resolve()
+        })
+        req.write(body)
+        req.end()
+    })
 }
 
 function finalizeGen(s) {
@@ -360,6 +543,8 @@ function appendEnginePanel(v, lui) {
         if (s.exitMessage) statusLn.text(`  ${s.exitMessage}`)
     } else if (lui.engineReadyFired) {
         statusLn.style(STYLE.READY).text("Ready").style().text(` (uptime: ${formatDurationSeconds(uptimeSec)})`)
+    } else if (s.serverListening) {
+        statusLn.style(DIM).text("Loading model…").style()
     } else {
         statusLn.style(DIM).text("Starting…").style()
     }
@@ -369,6 +554,30 @@ function appendEnginePanel(v, lui) {
     if (s.argSegments) {
         const parts = s.argSegments.flatMap((seg) => seg.args)
         p.line({ indent: 15 }).style(DIM).text(parts.join(" "))
+    }
+
+    // Active huggingface_hub downloads. Wrapper bar first (when
+    // present) then per-file bars in stable sort order so the panel
+    // doesn't jitter as keys arrive.
+    const overall = s.downloads.get(OVERALL_KEY)
+    if (overall) {
+        p.bar({
+            label: overall.label,
+            value: overall.pct,
+            max: 100,
+            text: `${String(overall.pct).padStart(3)}%`,
+            indent: 13
+        })
+    }
+    const files = [...s.downloads.entries()].filter(([k]) => k !== OVERALL_KEY).sort(([a], [b]) => a.localeCompare(b))
+    for (const [, entry] of files) {
+        p.bar({
+            label: entry.label,
+            value: entry.pct,
+            max: 100,
+            text: `${String(entry.pct).padStart(3)}%`,
+            indent: 13
+        })
     }
 }
 

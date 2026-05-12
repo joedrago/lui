@@ -57,13 +57,22 @@ async function pickModels(lui) {
     const items = []
     for (const [engineName, engine] of Object.entries(engines)) {
         if (!engine.setupDefaults?.length) continue
-        const detected = commandOnPath(engineName)
+        // Engine name and binary name don't always match: mlx_lm's
+        // binary is "mlx_lm.server", remote has none at all. Resolve
+        // through schema/config so detection actually finds them.
+        const binary = engineBinaryName(lui, engine, engineName)
+        const detected = binary ? commandOnPath(binary) : false
         for (const def of engine.setupDefaults) {
             if (lui.config.model?.[def.name]) continue
+            const detectedSuffix = detected ? "(detected)" : "(not found on PATH)"
+            // sizeGiB is an approximate on-disk size for the model
+            // weights — handy when users are picking which to download
+            // on a constrained connection or drive.
+            const sizeSuffix = typeof def.sizeGiB === "number" ? `, ~${def.sizeGiB} GB on disk ` : ""
             items.push({
                 label: `${def.name}`,
                 value: { name: def.name, engine: engineName, args: def.args },
-                hint: `uses ${engineName} ${detected ? "(detected)" : "(not found on PATH)"}`,
+                hint: `uses ${engineName}${sizeSuffix} ${detectedSuffix}`,
                 selected: detected
             })
         }
@@ -167,6 +176,18 @@ function url(s) {
 }
 function dim(s) {
     return styled(s, { dim: true })
+}
+
+// Resolve an engine's binary name: a user override under
+// `engine.<name>.binary` wins, otherwise the schema default, otherwise
+// the engine name as a last resort. Returns null when the engine
+// doesn't declare a binary (e.g. the `remote` engine).
+function engineBinaryName(lui, engine, engineName) {
+    const override = lui.config.engine?.[engineName]?.binary
+    if (override) return override
+    const schemaEntry = (engine.schema ?? []).find((s) => s.path === "binary")
+    if (schemaEntry?.default) return schemaEntry.default
+    return null
 }
 
 // True when `name` resolves to an executable on the user's PATH. Pure
