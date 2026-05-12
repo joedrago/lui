@@ -19,11 +19,11 @@
 import http from "node:http"
 
 import { STYLE } from "../theme.js"
+import { CONFIG_VERSION } from "../wire.js"
 
 const POLL_MS = 250
 const CONFIG_TIMEOUT_MS = 5000
 const DATA_TIMEOUT_MS = 1500
-const SUPPORTED_CONFIG_VERSION = 4
 const DEFAULT_LUI_PORT = 8081
 
 export const engine = {
@@ -55,11 +55,10 @@ export const engine = {
         s.cachedView = null
         s.pollTimer = null
         s.connectError = null
-        s.ready = false
         s.fatalReason = null
     },
 
-    async start(lui, model) {
+    async start(lui, model, _desc) {
         const target = parseHostSpec(model.args[0])
         lui.state.target = target
 
@@ -71,9 +70,9 @@ export const engine = {
             throw new Error(lui.state.fatalReason)
         }
 
-        if (cfg.version !== SUPPORTED_CONFIG_VERSION) {
+        if (cfg.version !== CONFIG_VERSION) {
             lui.state.fatalReason =
-                `remote /config version ${cfg.version}, this lui understands ${SUPPORTED_CONFIG_VERSION} ` +
+                `remote /config version ${cfg.version}, this lui understands ${CONFIG_VERSION} ` +
                 `— upgrade the older side`
             throw new Error(lui.state.fatalReason)
         }
@@ -94,8 +93,7 @@ export const engine = {
             lui.state.connectError = e.message || String(e)
         }
 
-        lui.state.ready = true
-        lui.markEngineReady?.()
+        lui.markEngineReady()
 
         lui.state.pollTimer = setInterval(async () => {
             try {

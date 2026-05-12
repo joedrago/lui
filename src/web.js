@@ -6,9 +6,7 @@ import http from "node:http"
 import os from "node:os"
 import { spawn } from "node:child_process"
 
-import { View } from "./wire.js"
-
-export const CONFIG_VERSION = 4
+import { View, CONFIG_VERSION } from "./wire.js"
 
 const BSEARCH_TIMEOUT_MS = 120_000
 

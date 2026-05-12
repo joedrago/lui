@@ -8,6 +8,11 @@
 // callers never think about indices — they pass plain PaletteEntry
 // objects to .style().
 
+// Protocol version reported by /config and required by the `remote`
+// engine when it dials another lui. Bump together with any breaking
+// change to the /config response shape.
+export const CONFIG_VERSION = 4
+
 const DEFAULT_KEY = "{}"
 
 function canonicalKey(entry) {

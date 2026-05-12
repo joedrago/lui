@@ -8,3 +8,27 @@ export function expandTilde(p) {
     if (p === "~") return os.homedir()
     return p
 }
+
+export function formatDurationMilliseconds(ms) {
+    const s = Math.floor(ms / 1000)
+    if (s < 60) return `${s}s`
+    const m = Math.floor(s / 60)
+    const rs = s % 60
+    if (m < 60) return rs ? `${m}m${rs}s` : `${m}m`
+    const h = Math.floor(m / 60)
+    const rm = m % 60
+    return rm ? `${h}h${rm}m` : `${h}h`
+}
+
+export function formatDurationSeconds(sec) {
+    if (sec < 60) return `<1m`
+    const m = Math.floor(sec / 60)
+    if (m < 60) return `${m}m`
+    const h = Math.floor(m / 60)
+    const rm = m % 60
+    return rm ? `${h}h${rm}m` : `${h}h`
+}
+
+export function formatNumber(n) {
+    return Number(n).toLocaleString("en-US")
+}

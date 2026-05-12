@@ -10,6 +10,7 @@ import { startTui } from "./display.js"
 import { sshSetupShare } from "./ssh.js"
 import { runSandbox, previewSandboxArgs } from "./sandbox.js"
 import { applyAllLocal } from "./harness.js"
+import { formatDurationMilliseconds } from "./util.js"
 
 export class Lui {
     static WARNING_TTL_MS = 60_000
@@ -84,10 +85,7 @@ export class Lui {
         }
         const model = { name, engine: engineName, args: [...args] }
         const probe = engines[engineName].describe(model, this)
-        if (probe.errors?.length) {
-            for (const e of probe.errors) process.stderr.write(`lui: ${e}\n`)
-            process.exit(1)
-        }
+        exitOnErrors(probe.errors)
         this.config.model[name] = { engine: engineName, args: [...args] }
         this.config.save()
         process.stdout.write(`Added model "${name}" (${engineName}).\n`)
@@ -102,10 +100,7 @@ export class Lui {
             process.exit(1)
         }
         const probe = engines[engineName].describe({ name, engine: engineName, args: [...args] }, this)
-        if (probe.errors?.length) {
-            for (const e of probe.errors) process.stderr.write(`lui: ${e}\n`)
-            process.exit(1)
-        }
+        exitOnErrors(probe.errors)
         if (creating) {
             this.config.model[name] = { engine: engineName, args: [...args] }
             process.stdout.write(`(model "${name}" didn't exist — created with engine "${engineName}".)\n`)
@@ -268,7 +263,6 @@ export class Lui {
     }
 
     async spawnEngine(model) {
-        this.activeModel = model
         this.engineModule = engines[model.engine]
         if (!this.engineModule) {
             process.stderr.write(`lui: unknown engine "${model.engine}"\n`)
@@ -276,13 +270,10 @@ export class Lui {
         }
         this.state = {}
         const desc = this.engineModule.describe(model, this)
-        if (desc.errors?.length) {
-            for (const e of desc.errors) process.stderr.write(`lui: ${e}\n`)
-            process.exit(1)
-        }
+        exitOnErrors(desc.errors)
         for (const w of desc.warnings ?? []) this.addWarning(w)
         this.engineModule.initState?.(this)
-        await this.engineModule.start(this, model)
+        await this.engineModule.start(this, model, desc)
     }
 
     onEngineExit(code, signal) {
@@ -317,7 +308,7 @@ export class Lui {
 
     printShutdownSummary() {
         const uptimeMs = Date.now() - this.startedAt
-        const uptime = formatDuration(uptimeMs)
+        const uptime = formatDurationMilliseconds(uptimeMs)
         const model = this.activeModel?.name
         const reason = this.quitReason || (this.exitCode === 0 ? "shutdown" : `exit code ${this.exitCode}`)
         const summary = this.engineModule?.shutdownSummary?.(this.state) ?? { lines: [], fatal: null }
@@ -372,15 +363,10 @@ export class Lui {
     }
 }
 
-function formatDuration(ms) {
-    const s = Math.floor(ms / 1000)
-    if (s < 60) return `${s}s`
-    const m = Math.floor(s / 60)
-    const rs = s % 60
-    if (m < 60) return rs ? `${m}m${rs}s` : `${m}m`
-    const h = Math.floor(m / 60)
-    const rm = m % 60
-    return rm ? `${h}h${rm}m` : `${h}h`
+function exitOnErrors(errors) {
+    if (!errors?.length) return
+    for (const e of errors) process.stderr.write(`lui: ${e}\n`)
+    process.exit(1)
 }
 
 function labelWidth(labels) {

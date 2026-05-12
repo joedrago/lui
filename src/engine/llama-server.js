@@ -7,6 +7,7 @@ import os from "node:os"
 import { STYLE } from "../theme.js"
 import { stripAnsi } from "../ansi.js"
 import { resolveBinary, spawnProcess } from "../spawn.js"
+import { formatDurationSeconds, formatNumber } from "../util.js"
 
 const BINARY_NAME = "llama-server"
 
@@ -122,10 +123,9 @@ export const engine = {
         }
     },
 
-    async start(lui, model) {
-        const desc = engine.describe(model, lui)
-        // Caller (lui.spawnEngine) already surfaced errors/warnings — we
-        // assume desc is valid here.
+    async start(lui, model, desc) {
+        // Caller (lui.spawnEngine) already surfaced errors/warnings and
+        // hands the same desc back to us — no need to recompute.
         lui.state.argSegments = desc.segments
         const [binarySeg, ...rest] = desc.segments
         const binaryPath = resolveBinary(binarySeg.args[0])
@@ -174,7 +174,6 @@ export const engine = {
         s.nParallel = 1
         s.llamaVersion = ""
         s.updateAvailable = false
-        s.ready = false
         s.listenUrl = ""
         s.activeSlots = new Map()
         s.recentCompleted = []
@@ -223,7 +222,7 @@ export const engine = {
             if (matched) return
         }
 
-        if (!lui.state.ready) parseLoadLine(line, lui)
+        if (!lui.engineReadyFired) parseLoadLine(line, lui)
         else parseRuntimeLine(line, lui)
 
         pushLog(lui.state, line)
@@ -370,8 +369,7 @@ function parseLoadLine(line, lui) {
     if (line.includes("server is listening on")) {
         const at = line.indexOf("on ")
         if (at >= 0) s.listenUrl = line.slice(at + 3).trim()
-        s.ready = true
-        lui.markEngineReady?.()
+        lui.markEngineReady()
     }
 }
 
@@ -529,19 +527,6 @@ async function probeVersion(lui) {
     })
 }
 
-function formatNumber(n) {
-    return Number(n).toLocaleString("en-US")
-}
-
-function formatDurationSeconds(sec) {
-    if (sec < 60) return `<1m`
-    const m = Math.floor(sec / 60)
-    if (m < 60) return `${m}m`
-    const h = Math.floor(m / 60)
-    const rm = m % 60
-    return rm ? `${h}h${rm}m` : `${h}h`
-}
-
 function appendEnginePanel(v, lui) {
     const s = lui.state
     const p = v.panel("llama-server")
@@ -640,7 +625,7 @@ function appendEnginePanel(v, lui) {
     if (s.exited) {
         ln2.style(STYLE.ERROR_INLINE).text("Exited").style()
         if (s.exitMessage) ln2.text(`  ${s.exitMessage}`)
-    } else if (s.ready) {
+    } else if (lui.engineReadyFired) {
         ln2.style(STYLE.READY).text("Ready").style()
         const tail = s.llamaVersion
             ? ` (${s.llamaVersion}, uptime: ${formatDurationSeconds(uptimeSec)})`

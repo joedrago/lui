@@ -143,7 +143,7 @@ function sshTransport(target) {
 }
 
 async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remoteWebPort) {
-    const activeModel = lui.activeModel ?? resolveActiveModel(lui) ?? { name: "lui", engine: "llama-server", args: [] }
+    const activeModel = lui.activeModel ?? lui.resolveModel() ?? { name: "lui", engine: "llama-server", args: [] }
     const engineModule = engines[activeModel.engine]
     const ctxSize = engineModule?.contextSize?.(lui.state, activeModel) ?? null
 
@@ -158,14 +158,6 @@ async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remote
         ctxSize
     })
     await applyHarness(sshTransport(target), harness, ctx, { enabled: true })
-}
-
-function resolveActiveModel(lui) {
-    const name = lui.config.activeModelName
-    if (!name) return null
-    const m = lui.config.model[name]
-    if (!m) return null
-    return { name, engine: m.engine, args: m.args || [] }
 }
 
 function printShareSuccess(target, ports) {
