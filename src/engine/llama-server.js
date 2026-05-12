@@ -6,6 +6,7 @@ import os from "node:os"
 
 import { STYLE } from "../theme.js"
 import { stripAnsi } from "../ansi.js"
+import { resolveBinary } from "../engine.js"
 
 const DIM = { dim: true }
 const BOLD = { bold: true }
@@ -41,6 +42,43 @@ const RESERVED_FLAGS = new Set(["--host", "--port"])
 export const engine = {
     name: "llama-server",
     defaultBinary: "llama-server",
+
+    // Knobs that show up under "Available Settings" in `lui config`,
+    // prefixed by the framework with `engine.<name>.`.
+    schema: [{ path: "binary", display: "(PATH: llama-server)" }],
+
+    // Best known context size. After Ready, state.ctxSize is the
+    // authoritative value (lifted from `llama_context: n_ctx = …`).
+    // Before then — or in offline callers like `lui ssh` that have no
+    // running engine — fall back to parsing -c / --ctx-size from the
+    // model's argv. Returns null if neither is available.
+    // Extra lines for `lui` shutdown summary (rendered between Uptime
+    // and Reason) plus an optional bright-red abort message.
+    shutdownSummary(state) {
+        const lines = []
+        if (state?.requestCount != null) {
+            lines.push({ label: "Requests", value: String(state.requestCount) })
+        }
+        return { lines, fatal: state?.fatalReason || null }
+    },
+
+    // Human-readable detail for the shutdown's Reason line.
+    exitReason(state, code, signal) {
+        if (state?.exitMessage) return state.exitMessage
+        return signal ? `killed by ${signal}` : `exited with code ${code}`
+    },
+
+    contextSize(state, model) {
+        if (state && state.ctxSize > 0) return state.ctxSize
+        const args = model?.args || []
+        for (let i = 0; i < args.length; i++) {
+            if ((args[i] === "-c" || args[i] === "--ctx-size") && i + 1 < args.length) {
+                const n = parseInt(args[i + 1], 10)
+                if (Number.isFinite(n) && n > 0) return n
+            }
+        }
+        return null
+    },
 
     buildArgv(model, lui) {
         const host = lui.config.global.public ? "0.0.0.0" : "127.0.0.1"
@@ -302,6 +340,7 @@ function parseLoadLine(line, lui) {
         const at = line.indexOf("on ")
         if (at >= 0) s.listenUrl = line.slice(at + 3).trim()
         s.ready = true
+        lui.markEngineReady?.()
     }
 }
 
@@ -455,7 +494,8 @@ function extractMib(line) {
 
 async function probeVersion(lui) {
     return new Promise((resolve) => {
-        const bin = lui.config.engine?.[engine.name]?.binary || engine.defaultBinary
+        const bin = resolveBinary(lui, engine)
+        if (!bin) return resolve()
         let stderr = ""
         const child = spawn(bin, ["--version"], { stdio: ["ignore", "ignore", "pipe"] })
         child.stderr.setEncoding("utf8")

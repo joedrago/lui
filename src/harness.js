@@ -1,37 +1,103 @@
-// Harness registry, local apply flow, lui-web-search SKILL.md, and
-// shared helpers (deriveModelName, inferContextSize, harnessContext).
-// Each concrete harness lives in src/harness/<name>.js and exports a
-// `harness` object — see the contract referenced from those files.
+// Harness registry + local apply flow.
+//
+// A harness is an external agent (opencode, pi, …) that lui teaches how
+// to talk to llama-server. Each one lives in src/harness/<name>.js and
+// exports a `harness` object. The minimum a new harness needs:
+//
+//   name              kebab-case identifier; doubles as the
+//                     [harness.<name>] table key in lui.toml
+//   defaultEnabled    boolean — used when [harness.<name>].enabled is unset
+//   configDir         where the agent reads its config (~-prefixed)
+//   configCandidates  basenames lui will look for in configDir, in
+//                     preference order; the first match is read, the
+//                     first entry is the write target if none exist
+//   apply(existing, ctx) → string
+//                     given the current file contents (or "") and a
+//                     HarnessContext, return the new file contents
+//
+// Optional fields:
+//
+//   skillsDir         relative path under configDir where the agent
+//                     looks for SKILL.md files. When set, lui drops
+//                     the lui-web-search skill in there (and sweeps
+//                     it when disabled).
+//   needsBackup(existing) → boolean
+//                     return true on first write to a config lui didn't
+//                     author, so the original gets stashed as .luibackup
+//   schema            [{ path, display, isArray? }] of knobs under
+//                     [harness.<name>]; surfaced by `lui config` as
+//                     Available Settings
+//   sshPreflight(target, sshRun) → { ok, error? }
+//                     async sanity check before `lui ssh` writes to a
+//                     remote machine (e.g. is the agent installed there)
+//
+// The HarnessContext passed to apply():
+//   modelName, baseURL, ctxSize, webPort, websearch
 
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
+import { renderWebsearchSkill } from "./web.js"
 import { harness as opencode } from "./harness/opencode.js"
 import { harness as pi } from "./harness/pi.js"
 
 export const harnesses = [opencode, pi]
 
-// One `enabled` toggle per harness, shown under "Available Settings".
-export function harnessSchemaDefaults(harnessModules) {
-    return harnessModules.map((h) => ({
-        path: `harness.${h.name}.enabled`,
-        display: String(h.defaultEnabled)
-    }))
+// Schema keys the framework reads generically from every harness. A
+// harness that omits one of these is a bug — fail loudly at import
+// rather than silently treating "missing" as "false" later. Add to
+// this list whenever you introduce framework code that consults
+// `[harness.<name>].<key>` for every harness.
+const REQUIRED_HARNESS_SCHEMA_KEYS = ["enabled"]
+
+for (const h of harnesses) {
+    for (const key of REQUIRED_HARNESS_SCHEMA_KEYS) {
+        if (!(h.schema ?? []).some((s) => s.path === key)) {
+            process.stderr.write(
+                `lui: harness "${h.name}" is missing required schema entry "${key}". ` +
+                    `Add it to the harness's schema array.\n`
+            )
+            process.exit(1)
+        }
+    }
+}
+
+export function isHarnessEnabled(lui, harness) {
+    const sub = lui.config.harness?.[harness.name]
+    if (sub && typeof sub.enabled === "boolean") return sub.enabled
+    return harness.defaultEnabled
+}
+
+// Each harness's own `schema` entries, prefixed with `harness.<name>.`
+// and surfaced by `lui config` under "Available Settings".
+export function harnessSchemaDefaults() {
+    const out = []
+    for (const h of harnesses) {
+        for (const s of h.schema ?? []) {
+            out.push({ ...s, path: `harness.${h.name}.${s.path}` })
+        }
+    }
+    return out
 }
 
 // Caller assembles one of these and hands it to `harness.apply(existing, ctx)`.
-// Pre-derives the values every harness wants, so harness modules don't
-// need to know how to walk an args array or build a baseURL.
-export function harnessContext({ activeModel, baseURL, enginePort, webPort, websearch }) {
+// Pre-derives the values every harness wants. `ctxSize` is the caller's
+// responsibility — it comes from the engine module via
+// `engine.contextSize(state, model)`, which only returns a real number
+// once the engine has reported Ready. Callers pass a fallback default
+// when the engine doesn't know yet.
+export function harnessContext({ activeModel, baseURL, enginePort, webPort, websearch, ctxSize }) {
     return {
         modelName: deriveModelName(activeModel?.name),
         baseURL: baseURL ?? `http://127.0.0.1:${enginePort}/v1`,
-        ctxSize: inferContextSize(activeModel?.args || []),
+        ctxSize: ctxSize ?? DEFAULT_CTX_SIZE,
         webPort,
         websearch: websearch !== false
     }
 }
+
+const DEFAULT_CTX_SIZE = 32768
 
 export function deriveModelName(activeKey) {
     if (!activeKey) return "lui"
@@ -39,62 +105,52 @@ export function deriveModelName(activeKey) {
     return tail.split(":")[0].replace(/-GGUF$/, "") || "lui"
 }
 
-export function inferContextSize(args) {
-    for (let i = 0; i < args.length; i++) {
-        if ((args[i] === "-c" || args[i] === "--ctx-size") && i + 1 < args.length) {
-            const n = parseInt(args[i + 1], 10)
-            if (Number.isFinite(n) && n > 0) return n
-        }
-    }
-    return 32768
-}
-
 // Walks every shipped harness so just-disabled ones get their stale
 // SKILL.md swept; config edits stay gated on `enabled`. Pass
 // `{ baseURL }` to point harness configs at a remote llama-server
-// instead of the local one — used by `lui remote`.
-export function applyAllLocal(lui, { baseURL } = {}) {
+// instead of the local one — used by `lui remote`. `ctxSize` is the
+// engine's current best answer; caller computes it via the engine
+// module (or, for `lui remote`, takes it from the server's /config).
+export function applyAllLocal(lui, { baseURL, ctxSize } = {}) {
     const ctx = harnessContext({
         activeModel: lui.activeModel,
         baseURL,
         enginePort: lui.config.global.engine_port,
         webPort: lui.config.global.web_port,
-        websearch: lui.config.global.websearch
+        websearch: lui.config.global.websearch,
+        ctxSize
     })
     for (const h of harnesses) {
         try {
-            applyOneLocal(lui, h, ctx, isEnabled(lui, h))
+            applyOneLocal(lui, h, ctx, isHarnessEnabled(lui, h))
         } catch (e) {
             process.stderr.write(`lui: harness "${h.name}" apply failed: ${e.message}\n`)
         }
     }
 }
 
-function isEnabled(lui, harness) {
-    const sub = lui.config.harness?.[harness.name]
-    if (sub && typeof sub.enabled === "boolean") return sub.enabled
-    return harness.defaultEnabled
-}
-
 function applyOneLocal(lui, harness, ctx, enabled) {
     const dir = expandTilde(harness.configDir)
-    const wantSkill = enabled && ctx.websearch
 
     // Skill add/remove runs regardless of `enabled` (sweep stale files).
-    const skillDir = path.join(dir, "skills", "lui-web-search")
-    const skillPath = path.join(skillDir, "SKILL.md")
-    if (wantSkill) {
-        fs.mkdirSync(skillDir, { recursive: true })
-        const body = renderWebsearchSkill(ctx.webPort)
-        if (!fs.existsSync(skillPath) || fs.readFileSync(skillPath, "utf8") !== body) {
-            fs.writeFileSync(skillPath, body)
-        }
-    } else if (fs.existsSync(skillPath)) {
-        fs.unlinkSync(skillPath)
-        try {
-            fs.rmdirSync(skillDir)
-        } catch {
-            // ignore — directory not empty or already gone
+    // Skipped entirely for harnesses that don't declare a skills dir.
+    if (harness.skillsDir) {
+        const skillDir = path.join(dir, harness.skillsDir, "lui-web-search")
+        const skillPath = path.join(skillDir, "SKILL.md")
+        const wantSkill = enabled && ctx.websearch
+        if (wantSkill) {
+            fs.mkdirSync(skillDir, { recursive: true })
+            const body = renderWebsearchSkill(ctx.webPort)
+            if (!fs.existsSync(skillPath) || fs.readFileSync(skillPath, "utf8") !== body) {
+                fs.writeFileSync(skillPath, body)
+            }
+        } else if (fs.existsSync(skillPath)) {
+            fs.unlinkSync(skillPath)
+            try {
+                fs.rmdirSync(skillDir)
+            } catch {
+                // ignore — directory not empty or already gone
+            }
         }
     }
 
@@ -134,105 +190,3 @@ export function expandTilde(p) {
     return p
 }
 
-export function renderWebsearchSkill(port) {
-    return `---
-name: lui-web-search
-description: Web search via browser bookmarklet. Extracts live search results from Google to answer questions requiring up-to-date information. Use when the user asks to search the web, look something up, find recent information, or you need data past your training cutoff. Returns JSON results with title, url, and snippet.
-license: BSD-2-Clause
----
-
-# lui-web-search
-
-lui's search endpoint opens a Google search tab in the user's real
-browser. The user clicks a one-time-installed \`lui-grab\` bookmarklet on
-the resulting page; the bookmarklet POSTs the rendered results back to
-lui, which returns them to you.
-
-## Endpoint
-
-\`\`\`
-GET http://127.0.0.1:${port}/bsearch?q=<URL-ENCODED QUERY>
-\`\`\`
-
-- \`q\` (required): the search query. URL-encode it.
-
-The request **blocks for up to 120 seconds** while waiting for the
-user to click the bookmarklet. On timeout you'll get HTTP 504.
-
-## Response
-
-JSON object:
-
-\`\`\`json
-{
-  "results": [
-    {"title": "...", "url": "https://...", "snippet": "..."}
-  ],
-  "warnings": ["..."]
-}
-\`\`\`
-
-\`results\` is always present. \`warnings\` is present only when the
-bookmarklet had something to tell you — for example, when Google's
-CSS class names rotated and the bookmarklet had to fall back to a
-structural selector to find results. **If \`warnings\` is non-empty,
-surface each warning verbatim to the user** at the end of your reply
-(under a short heading like "Note from lui-grab:"), on top of your
-normal answer. The user is the only one who can act on it (usually
-by updating lui).
-
-An HTTP 504 means the user did not click the bookmarklet in time
-(probably they were AFK or the browser tab got buried). Other 4xx/5xx
-or an empty \`results\` array means the search failed — say so plainly
-rather than fabricating answers.
-
-## How to invoke
-
-\`\`\`sh
-curl -sG 'http://127.0.0.1:${port}/bsearch' \\
-  --data-urlencode 'q=rust async traits 2026'
-\`\`\`
-
-On Windows (PowerShell):
-
-\`\`\`powershell
-$q = [uri]::EscapeDataString('rust async traits 2026')
-curl.exe -s "http://127.0.0.1:${port}/bsearch?q=$q"
-\`\`\`
-
-Read the JSON, then write your answer as normal prose with markdown
-links. Do not paste the raw JSON back into the chat. If you need the
-body of a specific page, fetch that page separately.
-
-## When to use
-
-- User asks to "search the web", "look up", "google", "find recent", etc.
-- You need information that post-dates your training cutoff.
-- You need a canonical URL for documentation, a release, a spec, or an issue.
-
-Do not use this for fetching content from a URL the user already gave
-you — just fetch that URL directly.
-
-## Important: this requires user action
-
-Each call pops a browser tab the user must click on. Before invoking
-this for the first time in a conversation, **tell the user what's about
-to happen** so they can be ready, e.g.:
-
-> "I'm going to search the web for that. When I do, a Google tab will
-> open in your browser — click the **lui-grab** bookmarklet on it. If
-> you haven't installed lui-grab yet, visit
-> \`http://127.0.0.1:${port}/setup\` and drag it to your bookmarks bar
-> first. (This URL is also shown in the lui status panel.)"
-
-Then call \`/bsearch\` and wait. If the call returns HTTP 504, the user
-didn't click in time — most likely they don't have the bookmarklet
-installed yet. Stop, point them at the setup page, wait for them to
-say it's ready, then retry.
-
-Be deliberate about when to search:
-- One search at a time. Do not fire parallel searches.
-- Pick the best query first instead of iterating with small variations.
-- Don't search for things you already know.
-`
-}

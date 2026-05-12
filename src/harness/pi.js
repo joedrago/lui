@@ -10,6 +10,8 @@ export const harness = {
     defaultEnabled: false,
     configDir: "~/.pi/agent",
     configCandidates: ["models.json"],
+    skillsDir: "skills",
+    schema: [{ path: "enabled", display: "false" }],
 
     apply(existing, ctx) {
         let text = existing.trim() ? existing : "{}\n"

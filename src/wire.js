@@ -82,17 +82,3 @@ export function View() {
 
     return { panel, build, styleIdx }
 }
-
-// Convenience: build a styled string for use outside the .line() builder
-// (e.g. bar labels). Pass alternating styles and texts:
-//   styled([{ fg: "cyan" }, "hi"], [{}, " world"])
-// → "hi world" — and the styles passed get registered with
-// the View. Use this only when a builder chain doesn't fit.
-export function styled(view, ...spans) {
-    let out = ""
-    for (const [entry, text] of spans) {
-        const idx = view.styleIdx(entry ?? {})
-        out += switchChar(idx) + (text ?? "")
-    }
-    return out
-}

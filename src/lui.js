@@ -9,7 +9,7 @@ import { startWebServer } from "./web.js"
 import { startTui } from "./display.js"
 import { sshSetupShare, sshSetupUse } from "./ssh.js"
 import { runSandbox, previewSandboxArgs } from "./sandbox.js"
-import { harnesses, applyAllLocal } from "./harness.js"
+import { applyAllLocal } from "./harness.js"
 
 export class Lui {
     static WARNING_TTL_MS = 60_000
@@ -49,9 +49,17 @@ export class Lui {
         this.config.setActiveModel(model.name)
         this.config.save()
 
-        // applyAllLocal reads lui.activeModel for harness configs.
         this.activeModel = model
-        applyAllLocal(this)
+
+        // Harness configs only get written once the engine reports
+        // Ready — otherwise an engine that has to download or otherwise
+        // take its time before knowing the real context size would
+        // hand the harness a wrong default. The engine signals via
+        // `lui.markEngineReady()` from inside its parseLine.
+        this.onEngineReady = () => {
+            const ctxSize = this.engineModule.contextSize?.(this.state, this.activeModel) ?? null
+            applyAllLocal(this, { ctxSize })
+        }
 
         await this.spawnEngine(model)
 
@@ -59,6 +67,16 @@ export class Lui {
         this.tui = startTui(this)
 
         await this.awaitShutdown()
+    }
+
+    markEngineReady() {
+        if (this.engineReadyFired) return
+        this.engineReadyFired = true
+        try {
+            this.onEngineReady?.()
+        } catch (e) {
+            process.stderr.write(`lui: onEngineReady threw: ${e?.stack || e}\n`)
+        }
     }
 
     add(name, engineName, args) {
@@ -276,7 +294,9 @@ export class Lui {
 
     onEngineExit(code, signal) {
         if (this.shuttingDown) return
-        const detail = this.state?.exitMessage || (signal ? `killed by ${signal}` : `exited with code ${code}`)
+        const detail =
+            this.engineModule?.exitReason?.(this.state, code, signal) ??
+            (signal ? `killed by ${signal}` : `exited with code ${code}`)
         this.quitReason = `${this.engineModule?.name ?? "engine"} ${detail}`
         this.shutdown(code || 1)
     }
@@ -323,19 +343,18 @@ export class Lui {
         const uptime = formatDuration(uptimeMs)
         const model = this.activeModel?.name
         const reason = this.quitReason || (this.exitCode === 0 ? "shutdown" : `exit code ${this.exitCode}`)
-        const fatal = this.state?.fatalReason
+        const summary = this.engineModule?.shutdownSummary?.(this.state) ?? { lines: [], fatal: null }
+        const labelW = labelWidth(["Model", "Uptime", "Reason", ...summary.lines.map((l) => l.label)])
 
         const out = []
         out.push("\n")
         out.push(`${styled("lui", STYLE.BRAND)} shutting down\n`)
-        if (model) out.push(`  ${styled("Model   :", STYLE.LABEL)} ${model}\n`)
-        out.push(`  ${styled("Uptime  :", STYLE.LABEL)} ${uptime}\n`)
-        if (this.state?.requestCount != null) {
-            out.push(`  ${styled("Requests:", STYLE.LABEL)} ${this.state.requestCount}\n`)
-        }
-        out.push(`  ${styled("Reason  :", STYLE.LABEL)} ${reason}\n`)
-        if (fatal) {
-            out.push(`\n  ${styled("lui aborted:", STYLE.FATAL_LABEL)} ${styled(fatal, STYLE.FATAL)}\n`)
+        if (model) out.push(line("Model", model, labelW))
+        out.push(line("Uptime", uptime, labelW))
+        for (const l of summary.lines) out.push(line(l.label, l.value, labelW))
+        out.push(line("Reason", reason, labelW))
+        if (summary.fatal) {
+            out.push(`\n  ${styled("lui aborted:", STYLE.FATAL_LABEL)} ${styled(summary.fatal, STYLE.FATAL)}\n`)
         }
         out.push("\n")
         process.stdout.write(out.join(""))
@@ -366,11 +385,6 @@ export class Lui {
     addWarning(text) {
         this.warnings.push({ text, addedAt: Date.now() })
     }
-
-    enabledHarnesses() {
-        const cfg = this.config.harness || {}
-        return harnesses.filter((h) => cfg[h.name]?.enabled ?? h.defaultEnabled)
-    }
 }
 
 function formatDuration(ms) {
@@ -382,6 +396,16 @@ function formatDuration(ms) {
     const h = Math.floor(m / 60)
     const rm = m % 60
     return rm ? `${h}h${rm}m` : `${h}h`
+}
+
+function labelWidth(labels) {
+    let w = 0
+    for (const l of labels) if (l.length > w) w = l.length
+    return w
+}
+
+function line(label, value, width) {
+    return `  ${styled(`${label.padEnd(width)} :`, STYLE.LABEL)} ${value}\n`
 }
 
 // Per-Line `indent` plus an optional outer indent. Long lines wrap at

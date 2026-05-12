@@ -1,20 +1,15 @@
 import process from "node:process"
 
 import { Lui } from "./lui.js"
-import { harnesses, harnessSchemaDefaults } from "./harness.js"
-import { engines, engineSchemaDefaults } from "./engine.js"
+import { harnessSchemaDefaults } from "./harness.js"
+import { engineSchemaDefaults } from "./engine.js"
 import { TOP_LEVEL_TABLES, globalSchemaDefaults } from "./config.js"
 import { sandboxSchemaDefaults } from "./sandbox.js"
 import { styled } from "./ansi.js"
 import { STYLE } from "./theme.js"
 
 function gatherSchemaDefaults() {
-    return [
-        ...globalSchemaDefaults,
-        ...harnessSchemaDefaults(harnesses),
-        ...engineSchemaDefaults(Object.values(engines)),
-        ...sandboxSchemaDefaults
-    ]
+    return [...globalSchemaDefaults, ...harnessSchemaDefaults(), ...engineSchemaDefaults(), ...sandboxSchemaDefaults]
 }
 
 const SUBCOMMANDS = new Set(["run", "add", "cp", "set", "rm", "ssh", "remote", "websearch", "sandbox", "config"])

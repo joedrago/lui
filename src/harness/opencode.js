@@ -11,6 +11,8 @@ export const harness = {
     defaultEnabled: true,
     configDir: "~/.config/opencode",
     configCandidates: ["opencode.jsonc", "opencode.json"],
+    skillsDir: "skills",
+    schema: [{ path: "enabled", display: "true" }],
 
     apply(existing, ctx) {
         let text = existing.trim() ? existing : "{}\n"
@@ -27,9 +29,16 @@ export const harness = {
         return !lui
     },
 
-    async preflight(_target) {
-        // SSH preflight implemented in ssh.js so this stays purely declarative.
-        return { ok: true }
+    async sshPreflight(target, sshRun) {
+        const probe =
+            'command -v opencode || bash -lc \'command -v opencode\' || { [ -x "$HOME/.opencode/bin/opencode" ] && echo "$HOME/.opencode/bin/opencode"; }'
+        try {
+            const out = await sshRun(target, probe)
+            if (out.trim()) return { ok: true }
+            return { ok: false, error: `opencode not found on ${target.user}@${target.host}. Install it there first.` }
+        } catch (e) {
+            return { ok: false, error: `opencode preflight on ${target.user}@${target.host} failed: ${e.message}` }
+        }
     }
 }
 

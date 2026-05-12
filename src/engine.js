@@ -11,20 +11,28 @@ export const engines = {
     [llamaServer.name]: llamaServer
 }
 
-// One default-binary path per engine, shown under "Available Settings".
-// The default is "look up engine.defaultBinary on $PATH" — that's why
-// the display is a hint, not a concrete path.
-export function engineSchemaDefaults(engineModules) {
-    return engineModules.map((e) => ({
-        path: `engine.${e.name}.binary`,
-        display: `(PATH: ${e.defaultBinary})`
-    }))
+// Each engine's own `schema` entries, prefixed with `engine.<name>.`
+// and surfaced by `lui config` under "Available Settings".
+export function engineSchemaDefaults() {
+    const out = []
+    for (const e of Object.values(engines)) {
+        for (const s of e.schema ?? []) {
+            out.push({ ...s, path: `engine.${e.name}.${s.path}` })
+        }
+    }
+    return out
 }
 
-// [engine.<name>].binary if set, else engine.defaultBinary on $PATH.
-function resolveBinary(lui, engineModule, binaryHint) {
+// [engine.<name>].binary if set, else `binaryHint` (from buildArgv),
+// else engine.defaultBinary — looked up on $PATH if it's a bare name.
+//
+// Engines reach for this when they need a path to spawn anything
+// (version probes, sidecar tools). Engines that don't run a binary
+// at all don't need to call this.
+export function resolveBinary(lui, engineModule, binaryHint) {
     const override = lui.config.engine?.[engineModule.name]?.binary
     const candidate = override || binaryHint || engineModule.defaultBinary
+    if (!candidate) return null
 
     if (candidate.includes(path.sep) || candidate.startsWith(".")) {
         return candidate

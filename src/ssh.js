@@ -6,9 +6,9 @@ import http from "node:http"
 import process from "node:process"
 import { spawn } from "node:child_process"
 
-import { CONFIG_VERSION } from "./web.js"
-import { harnesses, renderWebsearchSkill, applyAllLocal, harnessContext } from "./harness.js"
-import { startWebServer } from "./web.js"
+import { CONFIG_VERSION, renderWebsearchSkill, startWebServer } from "./web.js"
+import { harnesses, applyAllLocal, harnessContext, isHarnessEnabled } from "./harness.js"
+import { engines } from "./engine.js"
 import { startTui } from "./display.js"
 
 export async function sshSetupShare(lui, spec) {
@@ -18,6 +18,12 @@ export async function sshSetupShare(lui, spec) {
         process.exit(2)
     }
 
+    const enabled = harnesses.filter((h) => isHarnessEnabled(lui, h))
+    if (enabled.length === 0) {
+        process.stderr.write(luiNeedsHarnessError("ssh"))
+        process.exit(1)
+    }
+
     const remoteEnginePort = pickRemotePort()
     const remoteWebPort = remoteEnginePort + 1
 
@@ -25,11 +31,9 @@ export async function sshSetupShare(lui, spec) {
     const localWebPort = lui.config.global.web_port
     const websearch = lui.config.global.websearch !== false
 
-    for (const h of harnesses) {
-        const enabled = (lui.config.harness?.[h.name]?.enabled ?? h.defaultEnabled) === true
-        if (!enabled) continue
-        if (h.preflight) {
-            const ok = await sshPreflight(target, h)
+    for (const h of enabled) {
+        if (h.sshPreflight) {
+            const ok = await h.sshPreflight(target, sshRun)
             if (!ok.ok) {
                 process.stderr.write(`lui: ${ok.error}\n`)
                 process.exit(1)
@@ -46,6 +50,11 @@ export async function sshSetupUse(lui, hostSpec) {
     if (!target) {
         process.stderr.write(`lui: remote expects HOST or HOST:PORT, got "${hostSpec}"\n`)
         process.exit(2)
+    }
+
+    if (!harnesses.some((h) => isHarnessEnabled(lui, h))) {
+        process.stderr.write(luiNeedsHarnessError("remote"))
+        process.exit(1)
     }
 
     const cfg = await fetchRemoteConfig(target).catch((e) => {
@@ -65,7 +74,7 @@ export async function sshSetupUse(lui, hostSpec) {
     const llamaBaseURL = `http://${target.host}:${cfg.engine_port}/v1`
     lui.activeModel = { name: cfg.active_model || "lui", engine: "remote", args: [] }
     const enabled = lui.config.global.websearch !== false
-    applyAllLocal(lui, { baseURL: llamaBaseURL })
+    applyAllLocal(lui, { baseURL: llamaBaseURL, ctxSize: cfg.context_size })
 
     process.stdout.write(`\n  Using server at ${target.host}:${target.httpPort}\n`)
     process.stdout.write(`    model:           ${cfg.active_model ?? "(unknown)"}\n`)
@@ -82,6 +91,15 @@ export async function sshSetupUse(lui, hostSpec) {
     lui.tui = startTui(lui)
 
     await lui.awaitShutdown()
+}
+
+function luiNeedsHarnessError(verb) {
+    const all = harnesses.map((h) => h.name).join(", ")
+    return (
+        `lui ${verb}: no harnesses are enabled, which makes this subcommand a no-op.\n` +
+        `Enable at least one before re-running, e.g. \`lui config set harness.${harnesses[0].name}.enabled true\`.\n` +
+        `Available: ${all}.\n`
+    )
 }
 
 function parseShareTarget(s) {
@@ -134,19 +152,6 @@ async function sshRun(target, command, stdinText) {
     })
 }
 
-async function sshPreflight(target, harness) {
-    if (harness.name !== "opencode") return { ok: true }
-    const probe =
-        'command -v opencode || bash -lc \'command -v opencode\' || { [ -x "$HOME/.opencode/bin/opencode" ] && echo "$HOME/.opencode/bin/opencode"; }'
-    try {
-        const out = await sshRun(target, probe)
-        if (out.trim()) return { ok: true }
-        return { ok: false, error: `opencode not found on ${sshTargetSpec(target)}. Install it there first.` }
-    } catch (e) {
-        return { ok: false, error: `opencode preflight on ${sshTargetSpec(target)} failed: ${e.message}` }
-    }
-}
-
 async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remoteWebPort) {
     const dir = harness.configDir.replace(/^~\//, "")
     const basename = harness.configCandidates[0]
@@ -163,26 +168,41 @@ async function applyHarnessRemote(lui, target, harness, remoteEnginePort, remote
         }
     }
 
+    const activeModel = lui.activeModel ?? resolveActiveModel(lui) ?? { name: "lui", engine: "llama-server", args: [] }
+    const engineModule = engines[activeModel.engine]
+    const ctxSize = engineModule?.contextSize?.(lui.state, activeModel) ?? null
+
     const ctx = harnessContext({
-        activeModel: lui.activeModel ?? { name: "lui", engine: "llama-server", args: [] },
+        activeModel,
         enginePort: remoteEnginePort,
         webPort: remoteWebPort,
-        websearch: lui.config.global.websearch
+        websearch: lui.config.global.websearch,
+        ctxSize
     })
     const next = harness.apply(existing || "", ctx)
     await sshRun(target, `mkdir -p ~/${dir} && cat > ${remotePath}`, next)
 
-    const skillDir = `~/${dir}/skills/lui-web-search`
-    if (lui.config.global.websearch !== false) {
-        const body = renderWebsearchSkill(remoteWebPort)
-        await sshRun(target, `mkdir -p ${skillDir} && cat > ${skillDir}/SKILL.md`, body)
-    } else {
-        try {
-            await sshRun(target, `rm -f ${skillDir}/SKILL.md && rmdir ${skillDir} 2>/dev/null || true`)
-        } catch {
-            // ignore
+    if (harness.skillsDir) {
+        const skillDir = `~/${dir}/${harness.skillsDir}/lui-web-search`
+        if (lui.config.global.websearch !== false) {
+            const body = renderWebsearchSkill(remoteWebPort)
+            await sshRun(target, `mkdir -p ${skillDir} && cat > ${skillDir}/SKILL.md`, body)
+        } else {
+            try {
+                await sshRun(target, `rm -f ${skillDir}/SKILL.md && rmdir ${skillDir} 2>/dev/null || true`)
+            } catch {
+                // ignore
+            }
         }
     }
+}
+
+function resolveActiveModel(lui) {
+    const name = lui.config.activeModelName
+    if (!name) return null
+    const m = lui.config.model[name]
+    if (!m) return null
+    return { name, engine: m.engine, args: m.args || [] }
 }
 
 function fetchRemoteConfig(target) {
