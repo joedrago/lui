@@ -72,17 +72,15 @@ async function main() {
 
     if (verb === "add") {
         if (rest.length < 2) fatal("add requires NAME and ENGINE")
-        const [name, engineName, ...tail] = rest
-        const args = tail[0] === "--" ? tail.slice(1) : tail
+        const [name, engineName, ...args] = rest
         lui.add(name, engineName, args)
         return
     }
 
     if (verb === "set") {
         if (rest.length < 1) fatal("set requires NAME")
-        const [name, ...tail] = rest
-        if (tail.length === 0) fatal("set requires ARGS after NAME")
-        const args = tail[0] === "--" ? tail.slice(1) : tail
+        const [name, ...args] = rest
+        if (args.length === 0) fatal("set requires ARGS after NAME")
         lui.set(name, args)
         return
     }
