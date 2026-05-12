@@ -18,7 +18,7 @@ export const harness = {
 
     apply(existing, ctx) {
         let text = existing.trim() ? existing : "{}\n"
-        text = setProviderLui(text, ctx.modelName, ctx.baseURL, ctx.ctxSize)
+        text = setProviderLui({ text, modelName: ctx.modelName, baseURL: ctx.baseURL, ctxSize: ctx.ctxSize })
         text = setPermissionBash(text, ctx.webPort, ctx.websearch)
         return text
     },
@@ -44,8 +44,8 @@ export const harness = {
     }
 }
 
-/** @param {string} text @param {string} modelName @param {string} baseURL @param {number} ctxSize @returns {string} */
-function setProviderLui(text, modelName, baseURL, ctxSize) {
+/** @param {{ text: string, modelName: string, baseURL: string, ctxSize: number }} args @returns {string} */
+function setProviderLui({ text, modelName, baseURL, ctxSize }) {
     const luiValue = {
         name: "lui",
         npm: "@ai-sdk/openai-compatible",

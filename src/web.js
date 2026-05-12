@@ -35,7 +35,7 @@ export async function startWebServer(lui) {
     /** @type {Map<string, PendingSearch>} */
     const pending = new Map()
 
-    const server = http.createServer((req, res) => handleRequest(req, res, lui, pending))
+    const server = http.createServer((req, res) => handleRequest({ req, res, lui, pending }))
 
     await /** @type {Promise<void>} */ (
         new Promise((resolve, reject) => {
@@ -57,8 +57,8 @@ export async function startWebServer(lui) {
     }
 }
 
-/** @param {import("node:http").IncomingMessage} req @param {import("node:http").ServerResponse} res @param {Lui} lui @param {Map<string, PendingSearch>} pending */
-function handleRequest(req, res, lui, pending) {
+/** @param {{ req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse, lui: Lui, pending: Map<string, PendingSearch> }} args */
+function handleRequest({ req, res, lui, pending }) {
     if (req.method === "OPTIONS") {
         res.writeHead(204, CORS)
         res.end()
@@ -72,8 +72,8 @@ function handleRequest(req, res, lui, pending) {
         if (path === "/data") return handleData(req, res, lui)
         if (path === "/config") return handleConfig(req, res, lui)
         if (path === "/setup") return handleSetup(req, res, lui)
-        if (path === "/bsearch") return handleBsearch(req, res, lui, pending, url)
-        if (path === "/results") return handleResults(req, res, lui, pending, url)
+        if (path === "/bsearch") return handleBsearch({ res, pending, url })
+        if (path === "/results") return handleResults({ req, res, pending, url })
     } catch (e) {
         res.writeHead(500, { ...CORS, "content-type": "text/plain" })
         res.end(`internal error: ${/** @type {Error} */ (e).message}`)
@@ -138,8 +138,8 @@ function handleSetup(_req, res, lui) {
     res.end(setupPageHtml(port))
 }
 
-/** @param {import("node:http").IncomingMessage} _req @param {import("node:http").ServerResponse} res @param {Lui} _lui @param {Map<string, PendingSearch>} pending @param {URL} url */
-function handleBsearch(_req, res, _lui, pending, url) {
+/** @param {{ res: import("node:http").ServerResponse, pending: Map<string, PendingSearch>, url: URL }} args */
+function handleBsearch({ res, pending, url }) {
     const query = (url.searchParams.get("q") || "").trim()
     if (!query) {
         res.writeHead(400, { ...CORS, "content-type": "text/plain" })
@@ -178,8 +178,8 @@ function handleBsearch(_req, res, _lui, pending, url) {
     })
 }
 
-/** @param {import("node:http").IncomingMessage} req @param {import("node:http").ServerResponse} res @param {Lui} _lui @param {Map<string, PendingSearch>} pending @param {URL} url */
-function handleResults(req, res, _lui, pending, url) {
+/** @param {{ req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse, pending: Map<string, PendingSearch>, url: URL }} args */
+function handleResults({ req, res, pending, url }) {
     const id = url.searchParams.get("id")
     if (!id || !pending.has(id)) {
         res.writeHead(404, { ...CORS, "content-type": "text/plain" })

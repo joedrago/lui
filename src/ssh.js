@@ -77,7 +77,16 @@ export async function sshSetupShare(lui, spec) {
                 process.exit(1)
             }
         }
-        await applyHarnessRemote(lui, target, h, remoteEnginePort, remoteWebPort, sessionModel, sessionCtxSize, sessionServedName)
+        await applyHarnessRemote({
+            lui,
+            target,
+            harness: h,
+            remoteEnginePort,
+            remoteWebPort,
+            sessionModel,
+            sessionCtxSize,
+            sessionServedName
+        })
         process.stdout.write(`  ${h.name} configured on ${sshTargetSpec(target)}\n`)
     }
 
@@ -256,8 +265,8 @@ function sshTransport(target) {
     }
 }
 
-/** @param {Lui} lui @param {SshTarget} target @param {Harness} harness @param {number} remoteEnginePort @param {number} remoteWebPort @param {{ name: string | null }} sessionModel @param {number | null} sessionCtxSize @param {string | null} sessionServedName */
-async function applyHarnessRemote(
+/** @param {{ lui: Lui, target: SshTarget, harness: Harness, remoteEnginePort: number, remoteWebPort: number, sessionModel: { name: string | null }, sessionCtxSize: number | null, sessionServedName: string | null }} args */
+async function applyHarnessRemote({
     lui,
     target,
     harness,
@@ -266,7 +275,7 @@ async function applyHarnessRemote(
     sessionModel,
     sessionCtxSize,
     sessionServedName
-) {
+}) {
     // The client's harness always points at localhost: the reverse
     // tunnel terminates on the client side, so the client's traffic
     // routes through localhost:<remote port> back to this machine.
@@ -278,7 +287,7 @@ async function applyHarnessRemote(
         ctxSize: sessionCtxSize,
         servedName: sessionServedName
     })
-    await applyHarness(sshTransport(target), harness, ctx, { enabled: true })
+    await applyHarness({ transport: sshTransport(target), harness, ctx, enabled: true })
 }
 
 /** @param {SshTarget} target @param {{ engineEndpoint: Endpoint, localWebPort: number, remoteEnginePort: number, remoteWebPort: number, websearch: boolean }} ports */

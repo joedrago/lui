@@ -167,8 +167,8 @@ export const localTransport = {
 //
 // `opts.onBackup(file, backup)` fires when an existing config was
 // stashed as .luibackup before lui's first write. Default noop.
-/** @param {Transport} transport @param {Harness} harness @param {HarnessContext} ctx @param {{ enabled?: boolean, onBackup?: (file: string, backup: string) => void }} [opts] @returns {Promise<string | null>} */
-export async function applyHarness(transport, harness, ctx, { enabled, onBackup } = {}) {
+/** @param {{ transport: Transport, harness: Harness, ctx: HarnessContext, enabled?: boolean, onBackup?: (file: string, backup: string) => void }} args @returns {Promise<string | null>} */
+export async function applyHarness({ transport, harness, ctx, enabled, onBackup }) {
     /** @param {...string} parts */
     const join = (...parts) => parts.join("/")
     const dir = transport.resolve(harness.configDir)
@@ -243,7 +243,7 @@ export async function applyAllLocal(lui, { ctxSize } = {}) {
     const onBackup = (file, backup) => lui.addWarning?.(`backed up ${file} → ${backup} before first lui write`)
     for (const h of harnesses) {
         try {
-            await applyHarness(localTransport, h, ctx, { enabled: isHarnessEnabled(lui, h), onBackup })
+            await applyHarness({ transport: localTransport, harness: h, ctx, enabled: isHarnessEnabled(lui, h), onBackup })
         } catch (e) {
             process.stderr.write(`lui: harness "${h.name}" apply failed: ${/** @type {Error} */ (e).message}\n`)
         }
