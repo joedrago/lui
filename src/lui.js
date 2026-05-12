@@ -48,16 +48,19 @@ export class Lui {
         this.quitReason = null
     }
 
-    /** @param {string} [name] */
+    /** @param {string} name */
     async run(name) {
+        if (!name) {
+            const all = Object.keys(this.config.model).sort()
+            const hint = all.length ? `Available: ${all.join(", ")}.` : "Try `lui add NAME ENGINE ARGS...` first."
+            process.stderr.write(`lui: \`lui run\` requires a model name. ${hint}\n`)
+            process.exit(2)
+        }
         const model = this.resolveModel(name)
         if (!model) {
-            const want = name ? `model "${name}"` : "any model"
-            process.stderr.write(`lui: ${want} not found. Try \`lui add ${name || "NAME"} llama-server -- ARGS\`.\n`)
+            process.stderr.write(`lui: model "${name}" not found. Try \`lui add ${name} llama-server -- ARGS\`.\n`)
             process.exit(1)
         }
-        this.config.setActiveModel(model.name)
-        this.config.save()
 
         this.activeModel = model
 
@@ -137,7 +140,6 @@ export class Lui {
             process.exit(1)
         }
         delete this.config.model[name]
-        if (this.config.global.active_model === name) delete this.config.global.active_model
         this.config.save()
         process.stdout.write(`Removed "${name}".\n`)
     }
@@ -169,7 +171,6 @@ export class Lui {
             process.stdout.write(`${indent}(no models — try \`lui add NAME ENGINE ARGS...\`)\n`)
             return
         }
-        const active = this.config.activeModelName
 
         const v = View()
         const p = v.panel("")
@@ -177,12 +178,8 @@ export class Lui {
         for (let i = 0; i < names.length; i++) {
             const name = names[i]
             const m = this.config.model[name]
-            const isActive = name === active
 
-            // Header: ● name  engine
             const ln = p.line()
-            if (isActive) ln.style(STYLE.ACTIVE).text("● ").style()
-            else ln.style({ dim: true }).text("○ ").style()
             ln.style({ bold: true }).text(name).style().text("  ").style(STYLE.ENGINE_NAME).text(m.engine).style()
 
             // Body: the model's full resolved commandline, with
@@ -276,17 +273,11 @@ export class Lui {
         })
     }
 
-    /** @param {string | undefined} name @returns {Model | null} */
+    /** @param {string} name @returns {Model | null} */
     resolveModel(name) {
-        const wanted = name || this.config.activeModelName
-        if (!wanted) {
-            const all = Object.keys(this.config.model)
-            if (all.length === 0) return null
-            return null
-        }
-        const m = this.config.model[wanted]
+        const m = this.config.model[name]
         if (!m) return null
-        return { name: wanted, engine: m.engine, args: m.args || [] }
+        return { name, engine: m.engine, args: m.args || [] }
     }
 
     /** @param {Model} model */

@@ -13,7 +13,7 @@ function printHelp() {
 USAGE
   lui                              print this help
 
-  lui run [NAME]                   run a model by name (resumes last if absent)
+  lui run NAME                     run a model by name
 
   lui add NAME ENGINE ARGS...      create a model (ARGS go to the engine)
   lui set NAME ARGS...             replace ARGS for a model

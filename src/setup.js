@@ -100,9 +100,6 @@ function writeChoices(lui, enabledHarnesses, addedModels) {
     for (const m of addedModels) {
         lui.config.model[m.name] = { engine: m.engine, args: [...m.args] }
     }
-    if (!lui.config.global.active_model && addedModels.length > 0) {
-        lui.config.setActiveModel(addedModels[0].name)
-    }
     lui.config.save()
 }
 

@@ -108,7 +108,7 @@ function handleConfig(req, res, lui) {
     const body = JSON.stringify({
         version: CONFIG_VERSION,
         base_url: resolveBaseURL(req, lui),
-        active_model: lui.activeModel?.name ?? lui.config.activeModelName ?? null,
+        active_model: lui.activeModel?.name ?? null,
         context_size: lui.engineModule?.contextSize?.(lui.state, lui.activeModel) ?? null,
         served_model: lui.engineModule?.servedModelName?.(lui.state, lui.activeModel) ?? null
     })

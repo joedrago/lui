@@ -24,7 +24,7 @@ lui add qwen llama-server -hf unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M -c 262144 -
 lui run qwen
 ```
 
-lui shows download progress bars, starts `llama-server`, applies the enabled harnesses, and prints **Ready** once the model is loaded. The most recently run model is remembered, so subsequent runs are just `lui run` (no name).
+lui shows download progress bars, starts `llama-server`, applies the enabled harnesses, and prints **Ready** once the model is loaded.
 
 To manage models:
 

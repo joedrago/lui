@@ -30,7 +30,7 @@ export const STYLE = {
     FATAL_LABEL: { fg: [230, 100, 100], bold: true },
     ERROR_INLINE: { fg: "red" },
 
-    // "● phi" active-model marker in `lui config`.
+    // Emphasis accent — multiselect cursor, "Tip:" labels.
     ACTIVE: { fg: [230, 200, 140], bold: true },
 
     // Config-key path in dumps ("global.engine_port", etc.).

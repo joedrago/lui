@@ -106,13 +106,6 @@ export class Config {
         fs.renameSync(tmp, p)
     }
 
-    get activeModelName() {
-        return this.global.active_model || null
-    }
-    /** @param {string} name */
-    setActiveModel(name) {
-        this.global.active_model = name
-    }
 }
 
 /** @param {Config} cfg @returns {string} */
