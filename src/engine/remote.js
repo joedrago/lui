@@ -77,8 +77,7 @@ export const engine = {
 
         if (cfg.version !== CONFIG_VERSION) {
             lui.state.fatalReason =
-                `remote /config version ${cfg.version}, this lui understands ${CONFIG_VERSION} ` +
-                `— upgrade the older side`
+                `remote /config version ${cfg.version}, this lui understands ${CONFIG_VERSION} ` + `— upgrade the older side`
             throw new Error(lui.state.fatalReason)
         }
         if (!cfg.base_url) {

@@ -39,7 +39,10 @@ export const harness = {
             if (out.trim()) return { ok: true }
             return { ok: false, error: `opencode not found on ${target.user}@${target.host}. Install it there first.` }
         } catch (e) {
-            return { ok: false, error: `opencode preflight on ${target.user}@${target.host} failed: ${/** @type {Error} */ (e).message}` }
+            return {
+                ok: false,
+                error: `opencode preflight on ${target.user}@${target.host} failed: ${/** @type {Error} */ (e).message}`
+            }
         }
     }
 }

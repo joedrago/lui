@@ -58,8 +58,7 @@ for (const h of harnesses) {
     for (const key of REQUIRED_HARNESS_SCHEMA_KEYS) {
         if (!(h.schema ?? []).some((s) => s.path === key)) {
             process.stderr.write(
-                `lui: harness "${h.name}" is missing required schema entry "${key}". ` +
-                    `Add it to the harness's schema array.\n`
+                `lui: harness "${h.name}" is missing required schema entry "${key}". ` + `Add it to the harness's schema array.\n`
             )
             process.exit(1)
         }

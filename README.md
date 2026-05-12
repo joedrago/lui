@@ -85,7 +85,7 @@ Chains transparently: `lui add bar remote relay:8081` on a third machine will wr
 **Requirements:**
 
 - The upstream lui must have `public = true` so its HTTP server binds `0.0.0.0`.
-- This machine must be network-reachable to the *actual* model host, not just the immediate upstream — the harness writes the real URL, not a per-hop relative one.
+- This machine must be network-reachable to the _actual_ model host, not just the immediate upstream — the harness writes the real URL, not a per-hop relative one.
 
 ### `lui ssh USER@HOST` — share your local LLM with a remote client
 
@@ -99,7 +99,7 @@ Run **on the server** (the machine where lui — and the engine it runs — alre
 4. Drops the `lui-web-search` SKILL.md alongside each harness's config (unless websearch is disabled), baked with the correct client ports.
 5. Prints the `ssh -R …` command. Run that in another terminal to establish the tunnel.
 
-The `-R` command targets wherever this lui's *engine* actually lives — so if the lui running `ssh` is itself a `remote` engine pointing at another machine, the tunnel terminates there directly rather than proxying through this process.
+The `-R` command targets wherever this lui's _engine_ actually lives — so if the lui running `ssh` is itself a `remote` engine pointing at another machine, the tunnel terminates there directly rather than proxying through this process.
 
 On macOS/Linux, lui multiplexes its setup-time SSH calls over a single connection (`ControlMaster` with a socket under `/tmp`) so the configure step finishes in a couple of seconds rather than once per round-trip. Windows OpenSSH doesn't support multiplexing; it works there too, just slower.
 

@@ -55,19 +55,24 @@ function globalDefaults() {
 export class Config {
     /** @param {Record<string, any>} [data] */
     constructor(data = {}) {
+        // Drop anything not in the schema — retired settings, typos, or
+        // values written by an older build with a different vocabulary
+        // don't survive a load. `lui config set` is gated against the
+        // same schema, so the in-memory shape stays honest.
+        const clean = filterToSchema(data)
         /** @type {Record<string, any>} */
-        this.global = { ...globalDefaults(), ...(data.global ?? {}) }
+        this.global = { ...globalDefaults(), ...clean.global }
         // Top-level catalogs / tuning tables. Each is its own root in
         // the TOML — [harness.opencode], [engine.llama-server],
         // [sandbox], [model.phi] — so they sit visually as peers.
         /** @type {Record<string, any>} */
-        this.harness = data.harness ?? {}
+        this.harness = clean.harness
         /** @type {Record<string, any>} */
-        this.engine = data.engine ?? {}
+        this.engine = clean.engine
         /** @type {Record<string, any>} */
-        this.sandbox = data.sandbox ?? {}
+        this.sandbox = clean.sandbox
         /** @type {Record<string, { engine: string, args: string[] }>} */
-        this.model = data.model ?? {}
+        this.model = clean.model
     }
 
     static load() {
@@ -105,7 +110,6 @@ export class Config {
         fs.writeFileSync(tmp, serialize(cfg))
         fs.renameSync(tmp, p)
     }
-
 }
 
 /** @param {Config} cfg @returns {string} */
@@ -224,6 +228,47 @@ function isArrayPath(path) {
     return allSchemaDefaults().some((s) => s.isArray && s.path === joined)
 }
 
+// Globals live at bare keys in the schema ([global] is implicit), so
+// "global.engine_port" looks up as "engine_port"; everything else uses
+// its fully dotted form. `model.*` is user-data managed by add/set/rm
+// — it bypasses schema entirely.
+/** @param {string[]} path @returns {boolean} */
+function isSchemaAllowed(path) {
+    if (path[0] === "model") return true
+    const lookup = path[0] === "global" ? path.slice(1).join(".") : path.join(".")
+    return allSchemaDefaults().some((s) => s.path === lookup)
+}
+
+// Strip parsed TOML data down to schema-known keys. `model` passes
+// through (it has no schema). Used by the Config constructor so any
+// retired or mistyped key disappears on the next save — the in-memory
+// shape is always what the file *should* contain.
+/** @param {Record<string, any>} data @returns {{ global: Record<string, any>, harness: Record<string, any>, engine: Record<string, any>, sandbox: Record<string, any>, model: Record<string, any> }} */
+function filterToSchema(data) {
+    const known = new Set(allSchemaDefaults().map((s) => s.path))
+    /** @type {{ global: Record<string, any>, harness: Record<string, Record<string, any>>, engine: Record<string, Record<string, any>>, sandbox: Record<string, any>, model: Record<string, any> }} */
+    const out = { global: {}, harness: {}, engine: {}, sandbox: {}, model: data.model ?? {} }
+    for (const [k, v] of Object.entries(data.global ?? {})) {
+        if (known.has(k)) out.global[k] = v
+    }
+    for (const [name, sub] of Object.entries(data.harness ?? {})) {
+        if (!sub || typeof sub !== "object" || Array.isArray(sub)) continue
+        for (const [k, v] of Object.entries(/** @type {Record<string, any>} */ (sub))) {
+            if (known.has(`harness.${name}.${k}`)) (out.harness[name] ??= {})[k] = v
+        }
+    }
+    for (const [name, sub] of Object.entries(data.engine ?? {})) {
+        if (!sub || typeof sub !== "object" || Array.isArray(sub)) continue
+        for (const [k, v] of Object.entries(/** @type {Record<string, any>} */ (sub))) {
+            if (known.has(`engine.${name}.${k}`)) (out.engine[name] ??= {})[k] = v
+        }
+    }
+    for (const [k, v] of Object.entries(data.sandbox ?? {})) {
+        if (known.has(`sandbox.${k}`)) out.sandbox[k] = v
+    }
+    return out
+}
+
 /** @param {string} msg @param {number} [code] @returns {never} */
 function fatal(msg, code = 2) {
     process.stderr.write(`lui: ${msg}\n`)
@@ -301,6 +346,9 @@ export function runConfigCommand(lui, args) {
     if (op === "set") {
         if (rest.length !== 2) fatal("config set PATH VALUE")
         const path = resolveConfigPath(rest[0])
+        if (!isSchemaAllowed(path)) {
+            fatal(`config: unknown setting ${JSON.stringify(displayPath(path))} (run \`lui config\` to see available settings)`)
+        }
         const value = parseConfigValue(rest[1])
         if (isArrayPath(path)) {
             const current = getNested(lui.config, path)

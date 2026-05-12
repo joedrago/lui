@@ -558,7 +558,11 @@ function appendEnginePanel(v, lui) {
         statusLn.style(STYLE.ERROR_INLINE).text("Exited").style()
         if (s.exitMessage) statusLn.text(`  ${s.exitMessage}`)
     } else if (lui.engineReadyFired) {
-        statusLn.style(STYLE.READY).text("Ready").style().text(` (uptime: ${formatDurationSeconds(uptimeSec)})`)
+        statusLn
+            .style(STYLE.READY)
+            .text("Ready")
+            .style()
+            .text(` (uptime: ${formatDurationSeconds(uptimeSec)})`)
     } else if (s.serverListening) {
         statusLn.style(DIM).text("Loading model…").style()
     } else {
