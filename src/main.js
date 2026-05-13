@@ -2,6 +2,7 @@ import process from "node:process"
 
 import { Lui } from "./lui.js"
 import { runConfigSet, runConfigUnset, runConfigDump } from "./config.js"
+import { engines } from "./engine.js"
 import { runSetup } from "./setup.js"
 
 const SUBCOMMANDS = new Set(["run", "add", "cp", "args", "rm", "ssh", "websearch", "sandbox", "set", "unset", "setup"])
@@ -16,7 +17,7 @@ USAGE
   lui run                          show all models
   lui run NAME                     run a model by name
 
-  lui add NAME ENGINE ARGS...      create a model (ARGS go to the engine)
+  lui add NAME ENGINE ARGS...      create a model (${Object.keys(engines).join(", ")})
   lui cp OLDNAME NEWNAME           copy a model under a new name
   lui rm NAME                      delete a model
 
