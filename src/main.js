@@ -17,7 +17,7 @@ USAGE
   lui run                          show all models
   lui run NAME                     run a model by name
 
-  lui add NAME ENGINE ARGS...      create a model (${Object.keys(engines).join(", ")})
+  lui add NEWNAME ENGINE ARGS...   create a model
   lui cp OLDNAME NEWNAME           copy a model under a new name
   lui rm NAME                      delete a model
 
@@ -36,6 +36,8 @@ USAGE
   lui sandbox HARNESS [ARGS...]    launch HARNESS under nono — every
                                    token after HARNESS is passed
                                    verbatim
+
+Engines: ${Object.keys(engines).join(", ")}
 
 Tip: run \`lui setup\` for an interactive first-run wizard.
 
