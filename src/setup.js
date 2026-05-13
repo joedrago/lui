@@ -23,8 +23,7 @@ import { multiselect, PromptAborted } from "./prompt.js"
 export async function runSetup(lui) {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
         process.stdout.write(
-            "lui setup is interactive and needs a terminal.\n" +
-                "Run it from a TTY, or configure directly with `lui set ...`.\n"
+            "lui setup is interactive and needs a terminal.\n" + "Run it from a TTY, or configure directly with `lui set ...`.\n"
         )
         return
     }

@@ -120,12 +120,12 @@ export class Lui {
             process.exit(1)
         }
 
-        // Zero-arg `lui args NAME` is a print-only shortcut: emit the
-        // model's current argv in shell-copypaste form and exit
-        // without touching the config. Lets you round-trip via
-        // `lui args NAME $(lui args NAME)` or paste between hosts.
+        /** @param {string[]} a */
+        const fmt = (a) => a.map(shellQuote).join(" ")
+        const previousArgs = existing.args || []
+
         if (args.length === 0) {
-            process.stdout.write((existing.args || []).map(shellQuote).join(" ") + "\n")
+            process.stdout.write(`\nCurrent Args:\n${fmt(previousArgs)}\n\n`)
             return
         }
 
@@ -138,7 +138,7 @@ export class Lui {
         exitOnErrors(probe.errors)
         existing.args = [...args]
         this.config.save()
-        process.stdout.write(`Updated "${name}" args.\n`)
+        process.stdout.write(`\nCurrent Args:\n${fmt(previousArgs)}\n\nUpdated Args:\n${fmt(existing.args)}\n\n`)
     }
 
     /** @param {string} name */
