@@ -18,7 +18,7 @@ export const engines = {
 }
 
 // Each engine's own `schema` entries, prefixed with `engine.<name>.`
-// and surfaced by `lui ls` under "Available Settings".
+// and surfaced in the config dump.
 /** @returns {SchemaEntry[]} */
 export function engineSchemaDefaults() {
     const out = []

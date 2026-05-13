@@ -145,7 +145,7 @@ function printInformation(_lui, enabledHarnesses) {
     w("\n")
 
     w("  " + styled("lui", STYLE.BRAND) + "\n")
-    w(row("inspect config", cmd("lui ls"), W))
+    w(row("inspect config", cmd("lui set"), W))
     w(row("run a model", cmd("lui run"), W))
     w(row("disable websearch", cmd("lui set websearch false"), W))
     w(row("custom debug log", cmd("lui set debug_log /tmp/lui.log"), W))

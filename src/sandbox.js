@@ -12,8 +12,8 @@ import process from "node:process"
 
 import { STYLE } from "./theme.js"
 
-// `lui ls` displays these under "Available Settings". `isArray`
-// marks list-typed paths where `set` appends and `unset` drops.
+// Displayed in the config dump. `isArray` marks list-typed paths
+// where `set` appends and `unset` drops.
 /** @returns {SchemaEntry[]} */
 export function sandboxSchemaDefaults() {
     return [

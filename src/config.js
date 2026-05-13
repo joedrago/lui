@@ -1,5 +1,5 @@
 // Config IO at ~/.config/lui.toml. Atomic tmp+rename on save.
-// Also: `lui ls` dump + `lui set` / `lui unset` command handlers.
+// Also: `lui set` / `lui unset` command handlers (bare forms dump).
 
 /** @import { SchemaEntry } from "./types.js" */
 /** @import { Lui } from "./lui.js" */
@@ -24,11 +24,12 @@ export const CONFIG_PATH = path.join(os.homedir(), ".config", "lui.toml")
 // but it's still a valid path prefix for `lui set model.X.Y ...`.
 export const TOP_LEVEL_TABLES = ["global", "model", "harness", "engine", "sandbox"]
 
-// Schema entries surfaced by `lui ls` under "Available Settings".
-// Each is {path, default, isArray?}. `isArray` marks list-typed paths
-// where `set` appends and `unset` drops the whole list. The default
-// values here are the single source of truth — Config.global is seeded
-// from them, and the "Available Settings" dump renders them in place.
+// Schema entries surfaced by the config dump. Each is
+// {path, default, isArray?}. `isArray` marks list-typed paths where
+// `set` appends and `unset` drops the whole list. The default values
+// here are the single source of truth — Config.global is seeded from
+// them, and the dump renders unset entries with their defaults in
+// place.
 /** @returns {SchemaEntry[]} */
 export function globalSchemaDefaults() {
     return [
@@ -213,7 +214,7 @@ function tomlKey(k) {
     return tomlString(k)
 }
 
-// ─── `lui ls` / `lui set` / `lui unset` CLI ──────────────────────────
+// ─── `lui set` / `lui unset` CLI ─────────────────────────────────────
 
 /** @returns {SchemaEntry[]} */
 function allSchemaDefaults() {
@@ -345,7 +346,7 @@ export function runConfigSet(lui, args) {
     if (args.length !== 2) fatal("set PATH VALUE")
     const path = resolveConfigPath(args[0])
     if (!isSchemaAllowed(path)) {
-        fatal(`unknown setting ${JSON.stringify(displayPath(path))} (run \`lui ls\` to see available settings)`)
+        fatal(`unknown setting ${JSON.stringify(displayPath(path))} (run \`lui set\` to see available settings)`)
     }
     const value = parseConfigValue(args[1])
     if (isArrayPath(path)) {
@@ -376,20 +377,7 @@ export function runConfigUnset(lui, args) {
 
 /** @param {Lui} lui */
 export function runConfigDump(lui) {
-    const tty = process.stdout.isTTY
-    /** @param {string} label */
-    const header = (label) => process.stdout.write((tty ? styled(label, STYLE.LABEL) : label) + "\n")
-
-    header("Settings:")
     writeAllSettings(lui, "  ")
-
-    process.stdout.write("\n")
-    header("Models:")
-    lui.printModels({ indent: "  " })
-
-    process.stdout.write("\n")
-    lui.printSandboxCommandline()
-    process.stdout.write("\n")
 }
 
 // Sort by path, then by value — keeps multi-value arrays grouped and in

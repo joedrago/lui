@@ -50,8 +50,8 @@ const RESERVED_FLAGS = new Set(["--host", "--port"])
 export const engine = {
     name: "llama-server",
 
-    // Knobs that show up under "Available Settings" in `lui ls`,
-    // prefixed by the framework with `engine.<name>.`.
+    // Knobs that show up in the config dump, prefixed by the
+    // framework with `engine.<name>.`.
     schema: [{ path: "binary", default: BINARY_NAME }],
 
     // Curated "lui setup" entries. The wizard offers each as a toggle so
@@ -154,8 +154,9 @@ export const engine = {
 
     // describe() is how the framework asks an engine "what would your
     // commandline look like for this model?" — used for `lui add`
-    // validation, `lui ls` rendering, and (internally) by start() to
-    // build the spawn argv. Segment 0 is the binary; the rest follow.
+    // validation, the config dump's commandline rendering, and
+    // (internally) by start() to build the spawn argv. Segment 0 is
+    // the binary; the rest follow.
     describe(model, lui) {
         const binaryName = binaryNameFromConfig(lui)
         const host = lui.config.global.public ? "0.0.0.0" : "127.0.0.1"

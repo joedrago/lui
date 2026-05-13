@@ -4,7 +4,7 @@ import { Lui } from "./lui.js"
 import { runConfigSet, runConfigUnset, runConfigDump } from "./config.js"
 import { runSetup } from "./setup.js"
 
-const SUBCOMMANDS = new Set(["run", "add", "cp", "args", "rm", "ssh", "websearch", "sandbox", "ls", "set", "unset", "setup"])
+const SUBCOMMANDS = new Set(["run", "add", "cp", "args", "rm", "ssh", "websearch", "sandbox", "set", "unset", "setup"])
 
 /** @returns {void} */
 function printHelp() {
@@ -13,20 +13,25 @@ function printHelp() {
 USAGE
   lui                              print this help
 
+  lui run                          show all models
   lui run NAME                     run a model by name
 
   lui add NAME ENGINE ARGS...      create a model (ARGS go to the engine)
-  lui args NAME ARGS...            show / replace ARGS for a model
   lui cp OLDNAME NEWNAME           copy a model under a new name
   lui rm NAME                      delete a model
 
-  lui ls                           settings + models + resolved commandlines
+  lui args NAME                    show ARGS for a model
+  lui args NAME ARGS...            replace ARGS for a model
+
+  lui set                          show config settings
   lui set PATH VALUE               set a config value (appends for array paths)
+  lui unset                        show config settings
   lui unset PATH                   unset a config value (or whole array)
 
   lui ssh USER@HOST                configure a remote client
   lui websearch                    run only the websearch server
 
+  lui sandbox                      show sandbox commandline preview
   lui sandbox HARNESS [ARGS...]    launch HARNESS under nono — every
                                    token after HARNESS is passed
                                    verbatim
@@ -62,23 +67,23 @@ async function main() {
 
     if (verb === "run") {
         if (rest.length > 1) fatal(`run takes at most one NAME, got: ${rest.join(" ")}`)
+        if (rest.length === 0) {
+            lui.printModels({ indent: "  " })
+            return
+        }
         await lui.run(rest[0])
         return
     }
 
-    if (verb === "ls") {
-        if (rest.length > 0) fatal("ls takes no arguments")
-        runConfigDump(lui)
-        return
-    }
-
     if (verb === "set") {
-        runConfigSet(lui, rest)
+        if (rest.length === 0) runConfigDump(lui)
+        else runConfigSet(lui, rest)
         return
     }
 
     if (verb === "unset") {
-        runConfigUnset(lui, rest)
+        if (rest.length === 0) runConfigDump(lui)
+        else runConfigUnset(lui, rest)
         return
     }
 
@@ -115,7 +120,10 @@ async function main() {
     }
 
     if (verb === "sandbox") {
-        if (rest.length < 1) fatal("sandbox requires HARNESS [args...]")
+        if (rest.length === 0) {
+            lui.printSandboxCommandline()
+            return
+        }
         const harnessName = rest[0]
         const harnessArgs = rest.slice(1)
         await lui.sandbox(harnessName, harnessArgs)

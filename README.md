@@ -33,10 +33,12 @@ lui add NAME ENGINE ARGS...    # register a model
 lui args NAME ARGS...          # show / replace this model's args (creates as llama-server if absent)
 lui cp OLDNAME NEWNAME         # copy a model under a new name
 lui rm NAME                    # delete the entry
-lui ls                         # settings, model list, and each model's resolved commandline
+lui run                        # list every registered model with its resolved engine commandline
+lui set                        # list every known setting (defaults dimmed, overrides highlighted)
+lui sandbox                    # preview the resolved `nono` commandline
 ```
 
-`lui ls` is the inspect-everything command: it dumps all settings (defaults dimmed, overrides highlighted), every registered model with its full resolved engine commandline, and the sandbox commandline preview.
+Each verb, called with no arguments, shows what it operates on: `lui run` lists models, `lui set` / `lui unset` list settings, `lui sandbox` shows the sandbox commandline preview.
 
 The TUI quits on `q` or `Ctrl+C`.
 
@@ -60,7 +62,7 @@ lui unset sandbox.profile
 
 Paths are dot-separated. A path that doesn't name a top-level table (`global`, `model`, `harness`, `engine`, `sandbox`) is automatically rooted under `global.`, so `engine_port` and `global.engine_port` mean the same thing.
 
-For list-valued paths (`sandbox.allow`, `sandbox.read`, `sandbox.write`, `sandbox.allow_domain`, `sandbox.extra`), `lui set PATH VALUE` **appends** rather than replacing, and `lui unset PATH` drops the whole list. Run `lui ls` for a full enumeration of every known setting and its current/default value.
+For list-valued paths (`sandbox.allow`, `sandbox.read`, `sandbox.write`, `sandbox.allow_domain`, `sandbox.extra`), `lui set PATH VALUE` **appends** rather than replacing, and `lui unset PATH` drops the whole list. Run `lui set` (no args) for a full enumeration of every known setting and its current/default value.
 
 ## Connecting to a shared server
 
