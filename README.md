@@ -97,7 +97,7 @@ Run **on the server** (the machine where lui — and the engine it runs — alre
 2. Picks a random high port on the client (18000–28999) for the engine and the next port for websearch.
 3. For each enabled harness, writes its config on the client with `baseURL` pointing to `http://localhost:<client_port>/v1`, and prints a one-line confirmation as it finishes.
 4. Drops the `lui-web-search` SKILL.md alongside each harness's config (unless websearch is disabled), baked with the correct client ports.
-5. Prints the `ssh -R …` command. Run that in another terminal to establish the tunnel.
+5. Prints the `ssh -R ...` command. Run that in another terminal to establish the tunnel.
 
 The `-R` command targets wherever this lui's _engine_ actually lives — so if the lui running `ssh` is itself a `remote` engine pointing at another machine, the tunnel terminates there directly rather than proxying through this process.
 
@@ -157,7 +157,7 @@ nono run -p opencode --allow . --allow-cwd \
 
 What that gets you:
 
-- **Profile auto-detected.** If nono ships a profile by the harness's name (`opencode`, `claude-code`, `codex`, …), lui uses it. Otherwise it falls back to nono's `default` profile (gives `/tmp`, `/usr/bin`, homebrew, plus deny-rules for credentials, keychains, browser data, shell history).
+- **Profile auto-detected.** If nono ships a profile by the harness's name (`opencode`, `claude-code`, `codex`, ...), lui uses it. Otherwise it falls back to nono's `default` profile (gives `/tmp`, `/usr/bin`, homebrew, plus deny-rules for credentials, keychains, browser data, shell history).
 - **Project tree r+w** via `--allow .` and `--allow-cwd` (skips nono's first-run prompt).
 - **Toolchains r+w** for any of `~/.cargo`, `~/.rustup`, `~/go`, `/usr/local/go`, `~/.pyenv`, `~/.local/share/uv`, `~/.conda`, `~/.nvm`, `~/.fnm`, `~/.npm`, `~/.bun`, `~/.deno`, `~/Library/pnpm`, `/usr/local/lib/node_modules`, `~/.nix-profile`, `/nix/store`, etc. that exist on your machine. `$CARGO_HOME` / `$RUSTUP_HOME` / `$GOPATH` / `$PYENV_ROOT` override the defaults.
 - **GPU off**, **network on**. Node-based agents don't need GPU; lui's llama-server runs _outside_ the sandbox.
@@ -186,7 +186,7 @@ lui config set sandbox.extra --some-other-nono-flag
 lui config clear sandbox.allow               # wipe the list
 ```
 
-When nono blocks something, its denial output prints a `Fix: --read … --read …` hint. Translate each `--read` to `lui config set sandbox.read …` (and `--allow` to `sandbox.allow`) and re-run.
+When nono blocks something, its denial output prints a `Fix: --read ... --read ...` hint. Translate each `--read` to `lui config set sandbox.read ...` (and `--allow` to `sandbox.allow`) and re-run.
 
 ### Authoring a custom nono profile (optional)
 

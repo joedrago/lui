@@ -56,7 +56,7 @@ export const engine = {
 
     // Curated "lui setup" entries. The wizard offers each as a toggle so
     // a fresh install can leave with a working model. `args` is the
-    // argv passed straight to `lui add NAME llama-server …`. Tune as
+    // argv passed straight to `lui add NAME llama-server ...`. Tune as
     // upstreams / quantizations change — this is a living list, not a
     // policy. Models the user already registered get skipped.
     setupDefaults: [
@@ -88,7 +88,7 @@ export const engine = {
     ],
 
     // Best known context size. After Ready, state.ctxSize is the
-    // authoritative value (lifted from `llama_context: n_ctx = …`).
+    // authoritative value (lifted from `llama_context: n_ctx = ...`).
     // Before then — or in offline callers like `lui ssh` that have no
     // running engine — fall back to parsing -c / --ctx-size from the
     // model's argv. Returns null if neither is available.
@@ -669,7 +669,7 @@ function appendEnginePanel(v, lui) {
         .style(STYLE.LABEL)
         .text("Model    : ")
         .style()
-        .text(modelDisplay || "(loading…)")
+        .text(modelDisplay || "(loading...)")
     if (aliasName) {
         ln.style(STYLE.LABEL).text(" — ").style(STYLE.ALIAS).style(BOLD).text(aliasName).style()
     }
@@ -714,7 +714,7 @@ function appendEnginePanel(v, lui) {
         ln2.text(tail)
         if (s.updateAvailable) ln2.text("  ").style(STYLE.WARNING).text("(update available)").style()
     } else {
-        ln2.style(DIM).text("Starting…").style()
+        ln2.style(DIM).text("Starting...").style()
     }
 
     if (s.listenUrl) p.line({ indent: 15 }).style(DIM).text(s.listenUrl)

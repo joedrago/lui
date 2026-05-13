@@ -85,7 +85,6 @@ async function main() {
     if (verb === "set") {
         if (rest.length < 1) fatal("set requires NAME")
         const [name, ...args] = rest
-        if (args.length === 0) fatal("set requires ARGS after NAME")
         lui.set(name, args)
         return
     }

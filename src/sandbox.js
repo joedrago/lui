@@ -155,7 +155,7 @@ function buildNonoSegments(cfg, profile) {
     return segments
 }
 
-// Toolchain dirs (cargo, go, npm, bun, pnpm, pip, …) granted R+W so
+// Toolchain dirs (cargo, go, npm, bun, pnpm, pip, ...) granted R+W so
 // first-run fetches can populate caches. Non-existing paths skipped.
 /** @returns {string[]} */
 function existingDevToolDirs() {

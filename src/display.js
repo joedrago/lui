@@ -116,7 +116,7 @@ export function startTui(lui) {
             const isLast = pi === lastPanelIdx
             const compiled = compilePalette(panel.palette || [])
 
-            // Title divider: "  ── TITLE ─────…─" in muted purple, full
+            // Title divider: "  -- TITLE ----- ... -" in muted purple, full
             // width to the right edge. paint() ends with a hard reset
             // so we have to re-establish the title style on each side
             // of the inline title.
@@ -211,7 +211,7 @@ function paintLine(line, cols, compiled) {
 // Bars are right-justified into a fixed slot at the trailing half of
 // the post-margin width, so every bar in the UI lines up regardless
 // of how long its label is. The label fills the left half (truncated
-// with "…" if necessary) and the bar+text combo occupies the right.
+// with "..." if necessary) and the bar+text combo occupies the right.
 // A minimum bar width keeps narrow terminals from rendering a stub.
 const BAR_RIGHT_FRACTION = 0.5
 const BAR_MIN_RIGHT_WIDTH = 12
@@ -244,9 +244,10 @@ function paintBar(bar, width, compiled) {
     } else if (labelW <= leftW) {
         left = paint(label, compiled) + reset()
     } else {
-        // Label longer than its half — trim and ellipsize. vwidth("…") = 1.
-        const cut = Math.max(0, leftW - 1)
-        left = paint(label.slice(0, cut) + "…", compiled) + reset()
+        // Label longer than its half — trim and ellipsize. "..." is
+        // three columns wide, so reserve three from the slice budget.
+        const cut = Math.max(0, leftW - 3)
+        left = paint(label.slice(0, cut) + "...", compiled) + reset()
     }
 
     let right = "["

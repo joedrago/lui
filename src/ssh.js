@@ -14,14 +14,14 @@ import { harnesses, applyHarness, harnessContext, isHarnessEnabled } from "./har
 import { CONFIG_VERSION } from "./wire.js"
 
 // applyHarness does ~8–10 sequential remote ops per harness (exists,
-// read, mkdirp, write, …). Without multiplexing each one pays a fresh
+// read, mkdirp, write, ...). Without multiplexing each one pays a fresh
 // TCP+auth handshake and the whole `lui ssh` run drags. ControlMaster
 // reuses one connection for all of them. Windows OpenSSH does not
 // implement ControlMaster (Win32-OpenSSH issue #405), so the gate
 // falls back to a plain `ssh` invocation per call there.
 //
 // ControlPath lives in /tmp rather than os.tmpdir() because macOS's
-// per-user tmpdir (/var/folders/…/T/) plus ssh's own atomic-create
+// per-user tmpdir (/var/folders/.../T/) plus ssh's own atomic-create
 // suffix overruns the 104-byte Unix-domain-socket path limit. The
 // %C token is a per-target hash so paths don't collide across runs.
 const SSH_MUX_ARGS =

@@ -1,5 +1,5 @@
 // Subprocess plumbing shared by spawn-based engines (llama-server,
-// mlx-lm.server, vllm, …). Owns PATH lookup, stdio piping, line
+// mlx-lm.server, vllm, ...). Owns PATH lookup, stdio piping, line
 // buffering, debug-log tee, and the SIGTERM → grace → SIGKILL dance.
 //
 // Engine modules call spawnProcess() from inside their start(); they
@@ -57,7 +57,7 @@ export function describeSpawnError(binaryName, err) {
 //   debugLog   — optional path to tee raw bytes
 //   onExit       — optional (code, signal) => void
 //   onSpawnError — optional (err) => void, fired when the kernel can't
-//                  start the child at all (ENOENT, EACCES…). Called
+//                  start the child at all (ENOENT, EACCES...). Called
 //                  before onExit so engines can stash a friendly
 //                  message into state before the shutdown summary
 //                  renders. With no callback, the error is written to

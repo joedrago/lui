@@ -92,7 +92,7 @@ function setPermissionBash(text, webPort, websearch) {
         const edits = modify(cur, ["permission", "bash", currentPattern], "allow", { formattingOptions: FORMAT })
         cur = applyEdits(cur, edits)
     } else {
-        // jsonc-parser's modify(…, undefined) throws on a path that
+        // jsonc-parser's modify(..., undefined) throws on a path that
         // doesn't already exist (e.g. fresh install with no permission
         // block). Only attempt the delete when the entry is actually
         // there.

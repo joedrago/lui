@@ -1,7 +1,7 @@
 // Harness registry + local apply flow.
 //
-// A harness is an external agent (opencode, pi, …) that lui teaches how
-// to talk to llama-server. Each one lives in src/harness/<name>.js and
+// A harness is an external agent that lui teaches how to talk to its
+// engine endpoint. Each one lives in src/harness/<name>.js and
 // exports a `harness` object. The minimum a new harness needs:
 //
 //   name              kebab-case identifier; doubles as the

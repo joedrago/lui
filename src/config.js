@@ -21,7 +21,7 @@ export const CONFIG_PATH = path.join(os.homedir(), ".config", "lui.toml")
 // Top-level TOML tables lui knows about. `global` settings are the bare
 // keys at the file root; the rest are nested. `model` is user-data
 // (added/removed via `lui add/rm`), not a schema-controlled setting,
-// but it's still a valid path prefix for `lui config set model.X.Y …`.
+// but it's still a valid path prefix for `lui config set model.X.Y ...`.
 export const TOP_LEVEL_TABLES = ["global", "model", "harness", "engine", "sandbox"]
 
 // Schema entries surfaced by `lui config` under "Available Settings".

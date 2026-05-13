@@ -325,8 +325,8 @@ function switchCharSafe(idx) {
     return String.fromCharCode(0xe000 + idx)
 }
 
-// Left-truncate with a leading "…". Re-emits style switches for the
-// retained tail.
+// Left-truncate with a leading "...". Re-emits style switches for the
+// retained tail. Three-column marker so the budget subtracts three.
 /** @param {string} text @param {number} width @returns {string} */
 export function truncateLeft(text, width) {
     if (width <= 0) return ""
@@ -334,7 +334,7 @@ export function truncateLeft(text, width) {
     const runs = [...visibleRuns(text)]
     let kept = ""
     let keptWidth = 0
-    const budget = width - 1
+    const budget = width - 3
     for (let i = runs.length - 1; i >= 0; i--) {
         const r = runs[i]
         if (keptWidth + r.text.length <= budget) {
@@ -348,7 +348,7 @@ export function truncateLeft(text, width) {
         }
         break
     }
-    return "…" + kept
+    return "..." + kept
 }
 
 /** @param {number} row @param {number} col @returns {string} */

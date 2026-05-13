@@ -122,7 +122,7 @@ export const engine = {
     },
 
     // Forward whatever the upstream's /config reported, so a chained
-    // lui → remote → … → mlx_lm still hands the right API id to the
+    // lui → remote → ... → mlx_lm still hands the right API id to the
     // harness on this hop.
     servedModelName(state) {
         return state?.servedModelName || null
@@ -171,7 +171,7 @@ export const engine = {
         const ln = p.line().style(STYLE.LABEL).text("Status   : ").style()
         if (lui.state.fatalReason) ln.style(STYLE.FATAL).text(lui.state.fatalReason).style()
         else if (lui.state.connectError) ln.style(STYLE.WARNING).text(lui.state.connectError).style()
-        else ln.style({ dim: true }).text("connecting…").style()
+        else ln.style({ dim: true }).text("connecting...").style()
         if (t) p.line().style(STYLE.LABEL).text("Upstream : ").style().text(`${t.host}:${t.port}`)
         if (lui.state.baseURL) p.line().style(STYLE.LABEL).text("Base URL : ").style().text(lui.state.baseURL)
     }

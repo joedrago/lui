@@ -115,22 +115,30 @@ export class Lui {
     /** @param {string} name @param {string[]} args */
     set(name, args) {
         const existing = this.config.model[name]
-        const creating = !existing
-        const engineName = existing?.engine ?? "llama-server"
+        if (!existing) {
+            process.stderr.write(`lui: model "${name}" not found. Use \`lui add ${name} ENGINE ARGS...\` to create it.\n`)
+            process.exit(1)
+        }
+
+        // Zero-arg `lui set NAME` is a print-only shortcut: emit the
+        // model's current argv in shell-copypaste form and exit
+        // without touching the config. Lets you round-trip via
+        // `lui set NAME $(lui set NAME)` or paste between hosts.
+        if (args.length === 0) {
+            process.stdout.write((existing.args || []).map(shellQuote).join(" ") + "\n")
+            return
+        }
+
+        const engineName = existing.engine
         if (!engines[engineName]) {
             process.stderr.write(`lui: model "${name}" has unknown engine "${engineName}".\n`)
             process.exit(1)
         }
         const probe = engines[engineName].describe({ name, engine: engineName, args: [...args] }, this)
         exitOnErrors(probe.errors)
-        if (creating) {
-            this.config.model[name] = { engine: engineName, args: [...args] }
-            process.stdout.write(`(model "${name}" didn't exist — created with engine "${engineName}".)\n`)
-        } else {
-            existing.args = [...args]
-            process.stdout.write(`Updated "${name}" args.\n`)
-        }
+        existing.args = [...args]
         this.config.save()
+        process.stdout.write(`Updated "${name}" args.\n`)
     }
 
     /** @param {string} name */
@@ -388,6 +396,18 @@ export class Lui {
     addWarning(text) {
         this.warnings.push({ text, addedAt: Date.now() })
     }
+}
+
+// Quote a single argv token for sh-compatible shells. Bare tokens
+// composed entirely of safe characters pass through unquoted; anything
+// else gets wrapped in single quotes (with embedded single quotes
+// escaped via the standard '\'' dance). Matches what the user would
+// type to reproduce the token at a shell prompt.
+/** @param {string} arg @returns {string} */
+function shellQuote(arg) {
+    if (arg === "") return "''"
+    if (/^[A-Za-z0-9_\-./:@+,=%]+$/.test(arg)) return arg
+    return "'" + arg.replace(/'/g, "'\\''") + "'"
 }
 
 /** @param {string[] | undefined} errors */

@@ -193,7 +193,7 @@ export const engine = {
         s.exitMessage = ""
         s.fatalReason = null
 
-        // serverListening flips when mlx_lm logs "Starting httpd…";
+        // serverListening flips when mlx_lm logs "Starting httpd...";
         // engineReadyFired waits for the probe completion below to
         // actually return (i.e. the worker thread has loaded the
         // model and is processing requests). probeInProgress
@@ -374,11 +374,11 @@ const OVERALL_KEY = "__overall__"
 //
 //   wrapper:  "Fetching 14 files:  35%|███       | 5/14 [..]"
 //   per-file: "model.safetensors:  18%|█▊        | 2.25G/12.5G [..]"
-//   truncated: "(…)f-00009.safetensors:  18%|█▊        | 2.25G/12.5G [..]"
+//   truncated: "(...)f-00009.safetensors:  18%|█▊        | 2.25G/12.5G [..]"
 //
-// We try the wrapper first; anything else with the `NAME: NN%|…|`
+// We try the wrapper first; anything else with the `NAME: NN%|...|`
 // shape is treated as a per-file bar. The per-file regex
-// deliberately accepts any name (including the "(…)" ellipsis tqdm
+// deliberately accepts any name (including the "(...)" ellipsis tqdm
 // inserts when the desc is too long for the terminal) so we don't
 // silently miss progress for repos with long shard names. Either
 // match suppresses the line from the log ring and the panel renders
@@ -398,7 +398,7 @@ function parseDownloadProgress(s, line) {
     // pick it up; the wrapper case above handles it explicitly.
     const perFile = /^([^:\r\n]+?):\s+(\d+)%\|[^|]*\|\s*([\d.]+\s*[KMGT]?i?B(?:\/[\d.]+\s*[KMGT]?i?B)?)?/.exec(line)
     if (perFile && !/^Fetching \d+ files/.test(perFile[1])) {
-        let name = perFile[1].replace(/^\(…\)|^\(\.\.\.\)/, "…")
+        let name = perFile[1].replace(/^\(...\)|^\(\.\.\.\)/, "...")
         // huggingface_hub's aggregated bytes bar starts life with
         // desc="Downloading (incomplete total...)" and renames to
         // "Download complete" at the end. Collapse both to one key so
@@ -426,7 +426,7 @@ function parseDownloadProgress(s, line) {
 // status code) confirms decode is online. On connection or transport
 // failure we still fire markEngineReady so the harness gets
 // configured — degrading to old behavior is better than wedging the
-// UI on "Loading model…" forever.
+// UI on "Loading model..." forever.
 //
 // probeInProgress + the post-probe stat reset together keep the
 // probe's one-token completion from anchoring lastGen / Average:
@@ -564,9 +564,9 @@ function appendEnginePanel(v, lui) {
             .style()
             .text(` (uptime: ${formatDurationSeconds(uptimeSec)})`)
     } else if (s.serverListening) {
-        statusLn.style(DIM).text("Loading model…").style()
+        statusLn.style(DIM).text("Loading model...").style()
     } else {
-        statusLn.style(DIM).text("Starting…").style()
+        statusLn.style(DIM).text("Starting...").style()
     }
 
     if (s.listenUrl) p.line({ indent: 15 }).style(DIM).text(s.listenUrl)
