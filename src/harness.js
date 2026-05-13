@@ -11,7 +11,7 @@
 //                     preference order; the first match is read, the
 //                     first entry is the write target if none exist
 //   schema            [{ path, default, isArray? }] of knobs under
-//                     [harness.<name>]; surfaced by `lui config` as
+//                     [harness.<name>]; surfaced by `lui ls` as
 //                     Available Settings. Must include an "enabled"
 //                     entry with the default-enabled state.
 //   apply(existing, ctx) → string
@@ -78,7 +78,7 @@ export function isHarnessEnabled(lui, harness) {
 }
 
 // Each harness's own `schema` entries, prefixed with `harness.<name>.`
-// and surfaced by `lui config` under "Available Settings".
+// and surfaced by `lui ls` under "Available Settings".
 /** @returns {SchemaEntry[]} */
 export function harnessSchemaDefaults() {
     const out = []

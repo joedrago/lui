@@ -1,10 +1,10 @@
 import process from "node:process"
 
 import { Lui } from "./lui.js"
-import { runConfigCommand, runConfigDump } from "./config.js"
+import { runConfigSet, runConfigUnset, runConfigDump } from "./config.js"
 import { runSetup } from "./setup.js"
 
-const SUBCOMMANDS = new Set(["run", "add", "cp", "args", "rm", "ssh", "websearch", "sandbox", "config", "setup"])
+const SUBCOMMANDS = new Set(["run", "add", "cp", "args", "rm", "ssh", "websearch", "sandbox", "ls", "set", "unset", "setup"])
 
 /** @returns {void} */
 function printHelp() {
@@ -16,13 +16,13 @@ USAGE
   lui run NAME                     run a model by name
 
   lui add NAME ENGINE ARGS...      create a model (ARGS go to the engine)
-  lui args NAME ARGS...            replace ARGS for a model
+  lui args NAME ARGS...            show / replace ARGS for a model
   lui cp OLDNAME NEWNAME           copy a model under a new name
   lui rm NAME                      delete a model
 
-  lui config                       settings + models + resolved commandlines
-  lui config set PATH VALUE        set a config value (appends for array paths)
-  lui config clear PATH            remove a config value (or whole array)
+  lui ls                           settings + models + resolved commandlines
+  lui set PATH VALUE               set a config value (appends for array paths)
+  lui unset PATH                   unset a config value (or whole array)
 
   lui ssh USER@HOST                configure a remote client
   lui websearch                    run only the websearch server
@@ -66,12 +66,19 @@ async function main() {
         return
     }
 
-    if (verb === "config") {
-        if (rest.length === 0) {
-            runConfigDump(lui)
-            return
-        }
-        runConfigCommand(lui, rest)
+    if (verb === "ls") {
+        if (rest.length > 0) fatal("ls takes no arguments")
+        runConfigDump(lui)
+        return
+    }
+
+    if (verb === "set") {
+        runConfigSet(lui, rest)
+        return
+    }
+
+    if (verb === "unset") {
+        runConfigUnset(lui, rest)
         return
     }
 

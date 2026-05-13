@@ -30,37 +30,37 @@ To manage models:
 
 ```
 lui add NAME ENGINE ARGS...    # register a model
-lui args NAME ARGS...          # replace this model's args (creates as llama-server if absent)
+lui args NAME ARGS...          # show / replace this model's args (creates as llama-server if absent)
 lui cp OLDNAME NEWNAME         # copy a model under a new name
 lui rm NAME                    # delete the entry
-lui config                     # settings, model list, and each model's resolved commandline
+lui ls                         # settings, model list, and each model's resolved commandline
 ```
 
-`lui config` is the inspect-everything command: it dumps all settings (defaults dimmed, overrides highlighted), every registered model with its full resolved engine commandline, and the sandbox commandline preview.
+`lui ls` is the inspect-everything command: it dumps all settings (defaults dimmed, overrides highlighted), every registered model with its full resolved engine commandline, and the sandbox commandline preview.
 
 The TUI quits on `q` or `Ctrl+C`.
 
 ## Persistent config
 
-Everything tunable lives in `~/.config/lui.toml`. Edit via `lui config`:
+Everything tunable lives in `~/.config/lui.toml`. Edit via `lui set` / `lui unset`:
 
 ```
-lui config set engine_port 8080
-lui config set web_port 8081
-lui config set public true
-lui config set websearch false
-lui config set debug_log /tmp/llama.log
-lui config set harness.opencode.enabled true
-lui config set harness.pi.enabled true
-lui config set engine.llama-server.binary /usr/local/bin/llama-server
-lui config set sandbox.allow_gpu true
-lui config set sandbox.allow ./project
-lui config clear sandbox.profile
+lui set engine_port 8080
+lui set web_port 8081
+lui set public true
+lui set websearch false
+lui set debug_log /tmp/llama.log
+lui set harness.opencode.enabled true
+lui set harness.pi.enabled true
+lui set engine.llama-server.binary /usr/local/bin/llama-server
+lui set sandbox.allow_gpu true
+lui set sandbox.allow ./project
+lui unset sandbox.profile
 ```
 
 Paths are dot-separated. A path that doesn't name a top-level table (`global`, `model`, `harness`, `engine`, `sandbox`) is automatically rooted under `global.`, so `engine_port` and `global.engine_port` mean the same thing.
 
-For list-valued paths (`sandbox.allow`, `sandbox.read`, `sandbox.write`, `sandbox.allow_domain`, `sandbox.extra`), `lui config set PATH VALUE` **appends** rather than replacing, and `lui config clear PATH` drops the whole list. Run `lui config` with no arguments for a full enumeration of every known setting and its current/default value.
+For list-valued paths (`sandbox.allow`, `sandbox.read`, `sandbox.write`, `sandbox.allow_domain`, `sandbox.extra`), `lui set PATH VALUE` **appends** rather than replacing, and `lui unset PATH` drops the whole list. Run `lui ls` for a full enumeration of every known setting and its current/default value.
 
 ## Connecting to a shared server
 
@@ -72,7 +72,7 @@ Register a `remote` model the same way you'd register any model, then run it. Th
 
 ```
 # On the server (the machine actually running llama.cpp):
-lui config set public true     # so /config + /data bind 0.0.0.0
+lui set public true            # so /config + /data bind 0.0.0.0
 lui run qwen
 
 # On this machine:
@@ -167,26 +167,26 @@ What that gets you:
 Everything lives under `[sandbox]` in `lui.toml`:
 
 ```
-lui config set sandbox.allow_cwd true        # default; r+w on cwd
-lui config set sandbox.allow_gpu false       # default; flip on for GPU tools
-lui config set sandbox.block_net true        # tighter sandbox: no network
-lui config set sandbox.dev_tools true        # default; auto-allow toolchains
-lui config set sandbox.rollback true         # nono --rollback (discard changes on exit)
-lui config set sandbox.silent true           # quiet nono's own output
-lui config set sandbox.profile mycustom      # override profile auto-detect
-lui config set sandbox.profile none          # opt out of -p entirely
-lui config set sandbox.bin /opt/nono/bin/nono
+lui set sandbox.allow_cwd true        # default; r+w on cwd
+lui set sandbox.allow_gpu false       # default; flip on for GPU tools
+lui set sandbox.block_net true        # tighter sandbox: no network
+lui set sandbox.dev_tools true        # default; auto-allow toolchains
+lui set sandbox.rollback true         # nono --rollback (discard changes on exit)
+lui set sandbox.silent true           # quiet nono's own output
+lui set sandbox.profile mycustom      # override profile auto-detect
+lui set sandbox.profile none          # opt out of -p entirely
+lui set sandbox.bin /opt/nono/bin/nono
 
-# Repeatable string arrays — `set` appends, `clear` drops the whole list:
-lui config set sandbox.allow ~/.foo          # extra r+w directory
-lui config set sandbox.read /etc             # read-only directory
-lui config set sandbox.write /tmp/out        # write-only directory
-lui config set sandbox.allow_domain api.example.com
-lui config set sandbox.extra --some-other-nono-flag
-lui config clear sandbox.allow               # wipe the list
+# Repeatable string arrays — `set` appends, `unset` drops the whole list:
+lui set sandbox.allow ~/.foo          # extra r+w directory
+lui set sandbox.read /etc             # read-only directory
+lui set sandbox.write /tmp/out        # write-only directory
+lui set sandbox.allow_domain api.example.com
+lui set sandbox.extra --some-other-nono-flag
+lui unset sandbox.allow               # wipe the list
 ```
 
-When nono blocks something, its denial output prints a `Fix: --read ... --read ...` hint. Translate each `--read` to `lui config set sandbox.read ...` (and `--allow` to `sandbox.allow`) and re-run.
+When nono blocks something, its denial output prints a `Fix: --read ... --read ...` hint. Translate each `--read` to `lui set sandbox.read ...` (and `--allow` to `sandbox.allow`) and re-run.
 
 ### Authoring a custom nono profile (optional)
 
@@ -199,7 +199,7 @@ nono profile init my-team --extends opencode --groups rust_runtime,python_runtim
 Then point lui at it:
 
 ```
-lui config set sandbox.profile my-team
+lui set sandbox.profile my-team
 lui sandbox opencode
 ```
 

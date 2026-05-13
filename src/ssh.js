@@ -98,7 +98,7 @@ function luiNeedsHarnessError(verb) {
     const all = harnesses.map((h) => h.name).join(", ")
     return (
         `lui ${verb}: no harnesses are enabled, which makes this subcommand a no-op.\n` +
-        `Enable at least one before re-running, e.g. \`lui config set harness.${harnesses[0].name}.enabled true\`.\n` +
+        `Enable at least one before re-running, e.g. \`lui set harness.${harnesses[0].name}.enabled true\`.\n` +
         `Available: ${all}.\n`
     )
 }

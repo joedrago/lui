@@ -1,5 +1,5 @@
 // Config IO at ~/.config/lui.toml. Atomic tmp+rename on save.
-// Also: `lui config` dump + `lui config set/clear` command handlers.
+// Also: `lui ls` dump + `lui set` / `lui unset` command handlers.
 
 /** @import { SchemaEntry } from "./types.js" */
 /** @import { Lui } from "./lui.js" */
@@ -21,12 +21,12 @@ export const CONFIG_PATH = path.join(os.homedir(), ".config", "lui.toml")
 // Top-level TOML tables lui knows about. `global` settings are the bare
 // keys at the file root; the rest are nested. `model` is user-data
 // (added/removed via `lui add/rm`), not a schema-controlled setting,
-// but it's still a valid path prefix for `lui config set model.X.Y ...`.
+// but it's still a valid path prefix for `lui set model.X.Y ...`.
 export const TOP_LEVEL_TABLES = ["global", "model", "harness", "engine", "sandbox"]
 
-// Schema entries surfaced by `lui config` under "Available Settings".
+// Schema entries surfaced by `lui ls` under "Available Settings".
 // Each is {path, default, isArray?}. `isArray` marks list-typed paths
-// where `set` appends and `clear` drops the whole list. The default
+// where `set` appends and `unset` drops the whole list. The default
 // values here are the single source of truth — Config.global is seeded
 // from them, and the "Available Settings" dump renders them in place.
 /** @returns {SchemaEntry[]} */
@@ -57,8 +57,8 @@ export class Config {
     constructor(data = {}) {
         // Drop anything not in the schema — retired settings, typos, or
         // values written by an older build with a different vocabulary
-        // don't survive a load. `lui config set` is gated against the
-        // same schema, so the in-memory shape stays honest.
+        // don't survive a load. `lui set` is gated against the same
+        // schema, so the in-memory shape stays honest.
         const clean = filterToSchema(data)
         /** @type {Record<string, any>} */
         this.global = { ...globalDefaults(), ...clean.global }
@@ -213,7 +213,7 @@ function tomlKey(k) {
     return tomlString(k)
 }
 
-// ─── `lui config` CLI ────────────────────────────────────────────────
+// ─── `lui ls` / `lui set` / `lui unset` CLI ──────────────────────────
 
 /** @returns {SchemaEntry[]} */
 function allSchemaDefaults() {
@@ -278,7 +278,7 @@ function fatal(msg, code = 2) {
 /** @param {string} pathStr @returns {string[]} */
 function resolveConfigPath(pathStr) {
     if (!pathStr || pathStr.includes("..") || pathStr.startsWith(".") || pathStr.endsWith(".")) {
-        fatal(`config: invalid path ${JSON.stringify(pathStr)}`)
+        fatal(`invalid path ${JSON.stringify(pathStr)}`)
     }
     const parts = pathStr.split(".")
     if (TOP_LEVEL_KEYS.has(parts[0])) return parts
@@ -341,41 +341,37 @@ function deleteNested(root, path) {
 }
 
 /** @param {Lui} lui @param {string[]} args */
-export function runConfigCommand(lui, args) {
-    const [op, ...rest] = args
-    if (op === "set") {
-        if (rest.length !== 2) fatal("config set PATH VALUE")
-        const path = resolveConfigPath(rest[0])
-        if (!isSchemaAllowed(path)) {
-            fatal(`config: unknown setting ${JSON.stringify(displayPath(path))} (run \`lui config\` to see available settings)`)
-        }
-        const value = parseConfigValue(rest[1])
-        if (isArrayPath(path)) {
-            const current = getNested(lui.config, path)
-            const arr = Array.isArray(current) ? current : []
-            arr.push(value)
-            setNested(lui.config, path, arr)
-            lui.config.save()
-            process.stdout.write(
-                `Added ${formatConfigValue(value)} to ${displayPath(path)} (now ${arr.length} item${arr.length === 1 ? "" : "s"})\n`
-            )
-        } else {
-            setNested(lui.config, path, value)
-            lui.config.save()
-            process.stdout.write(`Set ${displayPath(path)} = ${formatConfigValue(value)}\n`)
-        }
-        return
+export function runConfigSet(lui, args) {
+    if (args.length !== 2) fatal("set PATH VALUE")
+    const path = resolveConfigPath(args[0])
+    if (!isSchemaAllowed(path)) {
+        fatal(`unknown setting ${JSON.stringify(displayPath(path))} (run \`lui ls\` to see available settings)`)
     }
-    if (op === "clear") {
-        if (rest.length !== 1) fatal("config clear PATH")
-        const path = resolveConfigPath(rest[0])
-        const removed = deleteNested(lui.config, path)
+    const value = parseConfigValue(args[1])
+    if (isArrayPath(path)) {
+        const current = getNested(lui.config, path)
+        const arr = Array.isArray(current) ? current : []
+        arr.push(value)
+        setNested(lui.config, path, arr)
         lui.config.save()
-        if (removed) process.stdout.write(`Cleared ${displayPath(path)}\n`)
-        else process.stdout.write(`${displayPath(path)} was already unset\n`)
-        return
+        process.stdout.write(
+            `Added ${formatConfigValue(value)} to ${displayPath(path)} (now ${arr.length} item${arr.length === 1 ? "" : "s"})\n`
+        )
+    } else {
+        setNested(lui.config, path, value)
+        lui.config.save()
+        process.stdout.write(`Set ${displayPath(path)} = ${formatConfigValue(value)}\n`)
     }
-    fatal(`config: unknown operation ${JSON.stringify(op)} (try set, clear)`)
+}
+
+/** @param {Lui} lui @param {string[]} args */
+export function runConfigUnset(lui, args) {
+    if (args.length !== 1) fatal("unset PATH")
+    const path = resolveConfigPath(args[0])
+    const removed = deleteNested(lui.config, path)
+    lui.config.save()
+    if (removed) process.stdout.write(`Unset ${displayPath(path)}\n`)
+    else process.stdout.write(`${displayPath(path)} was already unset\n`)
 }
 
 /** @param {Lui} lui */

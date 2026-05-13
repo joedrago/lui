@@ -24,7 +24,7 @@ export async function runSetup(lui) {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
         process.stdout.write(
             "lui setup is interactive and needs a terminal.\n" +
-                "Run it from a TTY, or configure directly with `lui config set ...`.\n"
+                "Run it from a TTY, or configure directly with `lui set ...`.\n"
         )
         return
     }
@@ -146,17 +146,17 @@ function printInformation(_lui, enabledHarnesses) {
     w("\n")
 
     w("  " + styled("lui", STYLE.BRAND) + "\n")
-    w(row("inspect config", cmd("lui config"), W))
+    w(row("inspect config", cmd("lui ls"), W))
     w(row("run a model", cmd("lui run"), W))
-    w(row("disable websearch", cmd("lui config set websearch false"), W))
-    w(row("custom debug log", cmd("lui config set debug_log /tmp/lui.log"), W))
-    w(row("change engine port", cmd("lui config set engine_port 9000"), W))
-    w(row("change web port", cmd("lui config set web_port 9001"), W))
-    w(row("toggle a harness", cmd("lui config set harness.opencode.enabled false"), W))
-    w(row("llama-server binary", cmd("lui config set engine.llama-server.binary /opt/llama/llama-server"), W))
-    w(row("share publicly", cmd("lui config set public true"), W))
-    w(row("add sandbox r+w dir", cmd("lui config set sandbox.allow ~/projects"), W))
-    w(row("block sandbox net", cmd("lui config set sandbox.block_net true"), W))
+    w(row("disable websearch", cmd("lui set websearch false"), W))
+    w(row("custom debug log", cmd("lui set debug_log /tmp/lui.log"), W))
+    w(row("change engine port", cmd("lui set engine_port 9000"), W))
+    w(row("change web port", cmd("lui set web_port 9001"), W))
+    w(row("toggle a harness", cmd("lui set harness.opencode.enabled false"), W))
+    w(row("llama-server binary", cmd("lui set engine.llama-server.binary /opt/llama/llama-server"), W))
+    w(row("share publicly", cmd("lui set public true"), W))
+    w(row("add sandbox r+w dir", cmd("lui set sandbox.allow ~/projects"), W))
+    w(row("block sandbox net", cmd("lui set sandbox.block_net true"), W))
     w(row("sandbox a tool", cmd("lui sandbox opencode"), W))
     w("\n")
 

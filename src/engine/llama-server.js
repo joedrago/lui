@@ -50,7 +50,7 @@ const RESERVED_FLAGS = new Set(["--host", "--port"])
 export const engine = {
     name: "llama-server",
 
-    // Knobs that show up under "Available Settings" in `lui config`,
+    // Knobs that show up under "Available Settings" in `lui ls`,
     // prefixed by the framework with `engine.<name>.`.
     schema: [{ path: "binary", default: BINARY_NAME }],
 

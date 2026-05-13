@@ -36,7 +36,7 @@ export const STYLE = {
     // Config-key path in dumps ("global.engine_port", etc.).
     CONFIG_KEY: { fg: [230, 200, 140] },
 
-    // Engine name shown next to a model in `lui config`.
+    // Engine name shown next to a model in `lui ls`.
     ENGINE_NAME: { fg: "cyan" },
 
     // Clickable URL (bookmarklet setup, listen address).
@@ -49,7 +49,7 @@ export const STYLE = {
     HARNESS_NAME: { fg: "magenta", bold: true },
 
     // Argv segment categories. Engines tag each segment with one so
-    // `lui config` colors the spawn command consistently. The binary
+    // `lui ls` colors the spawn command consistently. The binary
     // segment (segment 0 of describe(), if present) is intentionally
     // unstyled — matches how the sandbox command renders `nono`, and
     // keeps a long resolved path from competing visually with the
