@@ -12,30 +12,29 @@ function printHelp() {
     process.stdout.write(`lui — a friendly TUI wrapper for LLM engines.
 
 USAGE
-  lui                              print this help
+  lui                                print this help
 
-  lui run                          show all models
-  lui run NAME                     run a model by name
+  lui run                            show all models
+  lui run NAME                       run a model by name
 
-  lui add NEWNAME ENGINE ARGS...   create a model
-  lui cp OLDNAME NEWNAME           copy a model under a new name
-  lui rm NAME                      delete a model
+  lui add NEWNAME ENGINE  ARGS...    create a model
+  lui cp  OLDNAME NEWNAME            copy a model under a new name
+  lui rm  NAME                       delete a model
 
-  lui args NAME                    show ARGS for a model
-  lui args NAME ARGS...            replace ARGS for a model
+  lui args NAME                      show ARGS for a model
+  lui args NAME ARGS...              replace ARGS for a model
 
-  lui set                          show config settings
-  lui set PATH VALUE               set a config value (appends for array paths)
-  lui unset                        show config settings
-  lui unset PATH                   unset a config value (or whole array)
+  lui set                            show config settings
+  lui set   PATH VALUE               set a config value (appends for array paths)
+  lui unset PATH                     unset a config value (or whole array)
 
-  lui ssh USER@HOST                configure a remote client
-  lui websearch                    run only the websearch server
+  lui ssh USER@HOST                  configure a remote client
+  lui websearch                      run only the websearch server
 
-  lui sandbox                      show sandbox commandline preview
-  lui sandbox HARNESS [ARGS...]    launch HARNESS under nono — every
-                                   token after HARNESS is passed
-                                   verbatim
+  lui sandbox                        show sandbox commandline preview
+  lui sandbox HARNESS [ARGS...]      launch HARNESS under nono — every
+                                     token after HARNESS is passed
+                                     verbatim to the harness
 
 Engines: ${Object.keys(engines).join(", ")}
 
