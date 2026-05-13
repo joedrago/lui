@@ -101,7 +101,7 @@ export class Lui {
             process.exit(2)
         }
         if (this.config.model[name]) {
-            process.stderr.write(`lui: model "${name}" already exists. Use \`lui set ${name} -- ...\` to replace its args.\n`)
+            process.stderr.write(`lui: model "${name}" already exists. Use \`lui args ${name} -- ...\` to replace its args.\n`)
             process.exit(2)
         }
         const model = { name, engine: engineName, args: [...args] }
@@ -113,17 +113,17 @@ export class Lui {
     }
 
     /** @param {string} name @param {string[]} args */
-    set(name, args) {
+    setArgs(name, args) {
         const existing = this.config.model[name]
         if (!existing) {
             process.stderr.write(`lui: model "${name}" not found. Use \`lui add ${name} ENGINE ARGS...\` to create it.\n`)
             process.exit(1)
         }
 
-        // Zero-arg `lui set NAME` is a print-only shortcut: emit the
+        // Zero-arg `lui args NAME` is a print-only shortcut: emit the
         // model's current argv in shell-copypaste form and exit
         // without touching the config. Lets you round-trip via
-        // `lui set NAME $(lui set NAME)` or paste between hosts.
+        // `lui args NAME $(lui args NAME)` or paste between hosts.
         if (args.length === 0) {
             process.stdout.write((existing.args || []).map(shellQuote).join(" ") + "\n")
             return

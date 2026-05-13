@@ -4,7 +4,7 @@ import { Lui } from "./lui.js"
 import { runConfigCommand, runConfigDump } from "./config.js"
 import { runSetup } from "./setup.js"
 
-const SUBCOMMANDS = new Set(["run", "add", "cp", "set", "rm", "ssh", "websearch", "sandbox", "config", "setup"])
+const SUBCOMMANDS = new Set(["run", "add", "cp", "args", "rm", "ssh", "websearch", "sandbox", "config", "setup"])
 
 /** @returns {void} */
 function printHelp() {
@@ -16,7 +16,7 @@ USAGE
   lui run NAME                     run a model by name
 
   lui add NAME ENGINE ARGS...      create a model (ARGS go to the engine)
-  lui set NAME ARGS...             replace ARGS for a model
+  lui args NAME ARGS...            replace ARGS for a model
   lui cp OLDNAME NEWNAME           copy a model under a new name
   lui rm NAME                      delete a model
 
@@ -82,10 +82,10 @@ async function main() {
         return
     }
 
-    if (verb === "set") {
-        if (rest.length < 1) fatal("set requires NAME")
+    if (verb === "args") {
+        if (rest.length < 1) fatal("args requires NAME")
         const [name, ...args] = rest
-        lui.set(name, args)
+        lui.setArgs(name, args)
         return
     }
 

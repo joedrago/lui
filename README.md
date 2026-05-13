@@ -30,7 +30,7 @@ To manage models:
 
 ```
 lui add NAME ENGINE ARGS...    # register a model
-lui set NAME ARGS...           # replace this model's args (creates as llama-server if absent)
+lui args NAME ARGS...          # replace this model's args (creates as llama-server if absent)
 lui cp OLDNAME NEWNAME         # copy a model under a new name
 lui rm NAME                    # delete the entry
 lui config                     # settings, model list, and each model's resolved commandline
