@@ -10,7 +10,8 @@ import os from "node:os"
 import { STYLE } from "../theme.js"
 import { stripAnsi } from "../ansi.js"
 import { resolveBinary, spawnProcess, describeSpawnError } from "../spawn.js"
-import { formatDurationSeconds, formatNumber } from "../util.js"
+import { formatDurationSeconds, formatNumber, formatBytes } from "../util.js"
+import { createDownloadTracker } from "../downloads.js"
 
 const BINARY_NAME = "llama-server"
 
@@ -213,6 +214,7 @@ export const engine = {
     },
 
     async stop(lui) {
+        lui.state?.downloads?.stop?.()
         await lui.state?.proc?.stop?.()
     },
 
@@ -255,7 +257,7 @@ export const engine = {
         s.avgGenTps = 0
         s.promptTpsSamples = 0
         s.genTpsSamples = 0
-        s.downloads = new Map()
+        s.downloads = createDownloadTracker()
         s.logLines = []
         s.exited = false
         s.exitMessage = ""
@@ -279,19 +281,16 @@ export const engine = {
         if (/^\s*CUDA Graph id \d+ reused\s*$/.test(line)) return
         if (/^\s*ggml_backend_cuda_graph_compute: CUDA graph warmup (reset|complete)\s*$/.test(line)) return
 
-        // Download progress is its own bar; doesn't go to log ring either.
-        if (line.includes("Downloading ")) {
-            const re = /Downloading (\S+\.\S+)\s.*?(\d{1,3})%/g
-            let m
-            let matched = false
-            while ((m = re.exec(line))) {
-                const name = m[1]
-                const pct = parseInt(m[2], 10) || 0
-                const prev = lui.state.downloads.get(name) ?? 0
-                if (pct >= prev) lui.state.downloads.set(name, pct)
-                matched = true
-            }
-            if (matched) return
+        // llama-server only prints in-line download progress when stdout
+        // is a TTY (common/download.cpp gates on isatty(1)); we pipe
+        // stdout, so progress never reaches us. Instead we sniff the
+        // "downloading from URL to PATH" log line and let the tracker
+        // poll the destination file size and HEAD the URL for total.
+        const dl = /^common_download_file_single_online: downloading from (\S+) to (.+?\.downloadInProgress) \(etag:/.exec(line)
+        if (dl) {
+            lui.state.downloads.add({ url: dl[1], path: dl[2] })
+            pushLog(lui.state, line)
+            return
         }
 
         if (!lui.engineReadyFired) parseLoadLine(line, lui)
@@ -727,9 +726,29 @@ function appendEnginePanel(v, lui) {
         p.line({ indent: 15 }).style(DIM).text(parts.join(" "))
     }
 
-    // Active downloads as bars.
-    for (const [name, pct] of [...s.downloads.entries()].sort()) {
-        p.bar({ label: `Downloading ${name}`, value: pct, max: 100, text: `${String(pct).padStart(3)}%`, indent: 13 })
+    // Active downloads as bars. Total may be 0 until the HEAD response
+    // lands (or stays 0 if HEAD failed) — show bytes-only in that case.
+    const entries = s.downloads.entries().sort(/** @param {[string, any]} x @param {[string, any]} y */ (x, y) => x[0].localeCompare(y[0]))
+    for (const [name, e] of entries) {
+        if (e.total > 0) {
+            const frac = Math.max(0, Math.min(1, e.downloaded / e.total))
+            const pct = Math.floor(frac * 100)
+            const cur = formatBytes(e.downloaded).padStart(9)
+            const tot = formatBytes(e.total).padStart(9)
+            p.bar({
+                label: `Downloading ${name}`,
+                value: frac,
+                text: `${cur} / ${tot} (${String(pct).padStart(3)}%)`,
+                indent: 13
+            })
+        } else {
+            p.bar({
+                label: `Downloading ${name}`,
+                value: 0,
+                text: formatBytes(e.downloaded).padStart(9),
+                indent: 13
+            })
+        }
     }
 }
 

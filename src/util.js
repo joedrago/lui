@@ -36,3 +36,17 @@ export function formatDurationSeconds(sec) {
 export function formatNumber(n) {
     return Number(n).toLocaleString("en-US")
 }
+
+/** @param {number} n @returns {string} */
+export function formatBytes(n) {
+    if (!Number.isFinite(n) || n <= 0) return "0 B"
+    const units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    let v = n
+    let i = 0
+    while (v >= 1024 && i < units.length - 1) {
+        v /= 1024
+        i += 1
+    }
+    const digits = v >= 100 ? 0 : v >= 10 ? 1 : 2
+    return `${v.toFixed(digits)} ${units[i]}`
+}
