@@ -81,9 +81,7 @@ export const engine = {
                 "--top-k",
                 "20",
                 "--min-p",
-                "0.00",
-                "--presence-penalty",
-                "1.5"
+                "0.0"
             ]
         }
     ],
@@ -728,7 +726,9 @@ function appendEnginePanel(v, lui) {
 
     // Active downloads as bars. Total may be 0 until the HEAD response
     // lands (or stays 0 if HEAD failed) — show bytes-only in that case.
-    const entries = s.downloads.entries().sort(/** @param {[string, any]} x @param {[string, any]} y */ (x, y) => x[0].localeCompare(y[0]))
+    const entries = s.downloads
+        .entries()
+        .sort(/** @param {[string, any]} x @param {[string, any]} y */ (x, y) => x[0].localeCompare(y[0]))
     for (const [name, e] of entries) {
         if (e.total > 0) {
             const frac = Math.max(0, Math.min(1, e.downloaded / e.total))
