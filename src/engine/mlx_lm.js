@@ -153,13 +153,10 @@ export const engine = {
         const binaryName = binarySeg.args[0]
         const binaryPath = resolveBinary(binaryName) ?? binaryName
         const argv = rest.flatMap((s) => s.args)
-        // TQDM_POSITION=-1 forces huggingface_hub's tqdm subclass to
-        // emit progress bars even when stderr isn't a TTY (see
-        // huggingface_hub/utils/tqdm.py:is_tqdm_disabled). Without
-        // this we only see the snapshot_download wrapper bar and miss
-        // the aggregated bytes bar (which is the actually-useful one
-        // for shard downloads).
-        const env = { ...process.env, TQDM_POSITION: "-1" }
+        // We render no download UI for mlx_lm, so kill huggingface_hub's
+        // tqdm output at the source — keeps the Server Log panel from
+        // filling with overwrite frames during multi-GB pulls.
+        const env = { ...process.env, HF_HUB_DISABLE_PROGRESS_BARS: "1" }
         lui.state.proc = spawnProcess({
             binary: binaryPath,
             argv,
@@ -216,11 +213,6 @@ export const engine = {
         s.promptProcessed = 0
         s.promptTotal = 0
 
-        // filename → percent (0-100) for huggingface_hub downloads.
-        // The "Fetching N files" wrapper bar is stored under the
-        // sentinel key OVERALL_KEY so the panel can render it first.
-        s.downloads = new Map()
-
         // Multi-line body suppression: when set we drop continuation
         // lines until the next logger-prefixed line or access-log line.
         s.swallowBody = false
@@ -233,12 +225,12 @@ export const engine = {
         const s = lui.state
         const lineTs = parseLineTimestamp(line) ?? Date.now()
 
-        // tqdm progress lines from huggingface_hub. These arrive as
-        // \r-overwriting updates (now split into separate parseLine
-        // events by spawn.js), so we extract the latest percentage
-        // and route to s.downloads. Both the "Fetching N files"
-        // wrapper and individual file bars are handled.
-        if (parseDownloadProgress(s, line)) return
+        // Drop huggingface_hub tqdm progress lines so they don't fill
+        // the log ring. We render no download UI for mlx_lm — the
+        // tqdm percentages don't reliably hit 100% (downloads finish
+        // before the final flush), so any bar built from them sticks
+        // at 97-ish and looks broken.
+        if (isTqdmLine(line)) return
 
         // Mid-body continuation of a previously-suppressed JSON dump.
         // Break out the moment we see a real logger line or the
@@ -368,56 +360,12 @@ export const engine = {
     }
 }
 
-const OVERALL_KEY = "__overall__"
-
-// tqdm shapes from huggingface_hub:
-//
-//   wrapper:  "Fetching 14 files:  35%|███       | 5/14 [..]"
-//   per-file: "model.safetensors:  18%|█▊        | 2.25G/12.5G [..]"
-//   truncated: "(...)f-00009.safetensors:  18%|█▊        | 2.25G/12.5G [..]"
-//
-// We try the wrapper first; anything else with the `NAME: NN%|...|`
-// shape is treated as a per-file bar. The per-file regex
-// deliberately accepts any name (including the "(...)" ellipsis tqdm
-// inserts when the desc is too long for the terminal) so we don't
-// silently miss progress for repos with long shard names. Either
-// match suppresses the line from the log ring and the panel renders
-// an active bar instead.
-/** @param {any} s @param {string} line @returns {boolean} */
-function parseDownloadProgress(s, line) {
-    const wrapper = /Fetching (\d+) files:\s+(\d+)%\|[^|]*\|\s*(\d+)\/(\d+)/.exec(line)
-    if (wrapper) {
-        const pct = parseInt(wrapper[2], 10) || 0
-        const cur = parseInt(wrapper[3], 10) || 0
-        const total = parseInt(wrapper[4], 10) || 0
-        s.downloads.set(OVERALL_KEY, { label: `Fetching ${total} files (${cur}/${total})`, pct })
-        if (pct >= 100) s.downloads.delete(OVERALL_KEY)
-        return true
-    }
-    // Reject "Fetching N files" first so the generic shape doesn't
-    // pick it up; the wrapper case above handles it explicitly.
-    const perFile = /^([^:\r\n]+?):\s+(\d+)%\|[^|]*\|\s*([\d.]+\s*[KMGT]?i?B(?:\/[\d.]+\s*[KMGT]?i?B)?)?/.exec(line)
-    if (perFile && !/^Fetching \d+ files/.test(perFile[1])) {
-        let name = perFile[1].replace(/^\(...\)|^\(\.\.\.\)/, "...")
-        // huggingface_hub's aggregated bytes bar starts life with
-        // desc="Downloading (incomplete total...)" and renames to
-        // "Download complete" at the end. Collapse both to one key so
-        // the rename doesn't double-list the bar, and shorten the
-        // verbose initial desc for display.
-        if (/^Downloading|^Download complete/.test(name)) name = "Downloading"
-        const pct = parseInt(perFile[2], 10) || 0
-        const sizes = perFile[3] || ""
-        if (pct >= 100) s.downloads.delete(name)
-        else {
-            const prev = s.downloads.get(name)?.pct ?? 0
-            if (pct >= prev) {
-                const label = sizes ? `${name}  ${sizes}` : name
-                s.downloads.set(name, { label, pct })
-            }
-        }
-        return true
-    }
-    return false
+// tqdm shapes from huggingface_hub we want to silence: the
+// "Fetching N files" wrapper and any "NAME:  NN%|..." per-file bar.
+// Both arrive split out of \r-overwriting updates by spawn.js.
+/** @param {string} line @returns {boolean} */
+function isTqdmLine(line) {
+    return /^[^:\r\n]+?:\s+\d+%\|[^|]*\|/.test(line)
 }
 
 // Probe the engine with the smallest possible chat completion so we
@@ -574,30 +522,6 @@ function appendEnginePanel(v, lui) {
     if (s.argSegments) {
         const parts = s.argSegments.flatMap(/** @param {import("../types.js").Segment} seg */ (seg) => seg.args)
         p.line({ indent: 15 }).style(DIM).text(parts.join(" "))
-    }
-
-    // Active huggingface_hub downloads. Wrapper bar first (when
-    // present) then per-file bars in stable sort order so the panel
-    // doesn't jitter as keys arrive.
-    const overall = s.downloads.get(OVERALL_KEY)
-    if (overall) {
-        p.bar({
-            label: overall.label,
-            value: overall.pct,
-            max: 100,
-            text: `${String(overall.pct).padStart(3)}%`,
-            indent: 13
-        })
-    }
-    const files = [...s.downloads.entries()].filter(([k]) => k !== OVERALL_KEY).sort(([a], [b]) => a.localeCompare(b))
-    for (const [, entry] of files) {
-        p.bar({
-            label: entry.label,
-            value: entry.pct,
-            max: 100,
-            text: `${String(entry.pct).padStart(3)}%`,
-            indent: 13
-        })
     }
 }
 

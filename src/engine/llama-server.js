@@ -266,8 +266,16 @@ export const engine = {
     },
 
     parseLine(rawLine, lui) {
-        const line = stripAnsi(rawLine)
+        let line = stripAnsi(rawLine)
         if (!line) return
+
+        // Newer llama-server builds prefix every log line with a
+        // timestamp and a single-letter severity, e.g.
+        // "0.01.383.150 D common_download_file_single_online: ...".
+        // Strip it so the downstream matchers (anchored on ^ or using
+        // startsWith) keep working against both old and new builds.
+        const ts = /^\d+\.\d+\.\d+\.\d+ [A-Z] /.exec(line)
+        if (ts) line = line.slice(ts[0].length)
 
         // Drop llama-server's own request/response body dumps — they echo
         // arbitrary prompt JSON that has historically clobbered our state
