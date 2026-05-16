@@ -125,7 +125,7 @@ export class Lui {
         const previousArgs = existing.args || []
 
         if (args.length === 0) {
-            process.stdout.write(`\nCurrent Args:\n${fmt(previousArgs)}\n\n`)
+            process.stdout.write(`\nCurrent Args:\nlui args ${name} ${fmt(previousArgs)}\n\n`)
             return
         }
 
@@ -138,7 +138,7 @@ export class Lui {
         exitOnErrors(probe.errors)
         existing.args = [...args]
         this.config.save()
-        process.stdout.write(`\nCurrent Args:\n${fmt(previousArgs)}\n\nUpdated Args:\n${fmt(existing.args)}\n\n`)
+        process.stdout.write(`\nCurrent Args:\nlui args ${name} ${fmt(previousArgs)}\n\nUpdated Args:\nlui args ${name} ${fmt(existing.args)}\n\n`)
     }
 
     /** @param {string} name */

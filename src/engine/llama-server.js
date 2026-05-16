@@ -237,7 +237,14 @@ export const engine = {
         s.cpuComputeMib = 0
         s.gpuMemMib = 0
         s.kvCacheMib = 0
+        s.rsBufMib = 0
         s.computeBufMib = 0
+
+        // True once the first non-zero `model buffer size` line has been
+        // observed. Used to gate buffer accumulators against the fit-probe
+        // phase, which uses no_alloc=true and emits non-zero size estimates
+        // for RS / compute buffers without actually allocating any memory.
+        s.realLoadStarted = false
         s.unifiedMemory = false
         s.cpuForcedCount = 0
         s.cpuForcedPrimary = ""
@@ -388,32 +395,56 @@ function parseLoadLine(line, lui) {
     }
     if (line.includes("CPU_Mapped model buffer size") || line.includes("CPU model buffer size")) {
         const mib = extractMib(line)
-        if (mib != null) s.cpuMemMib += mib
+        if (mib != null) {
+            s.cpuMemMib += mib
+            if (mib > 0) s.realLoadStarted = true
+        }
         return
     }
     if (line.includes("CPU_REPACK model buffer size")) {
         const mib = extractMib(line)
-        if (mib != null) s.cpuRepackMib += mib
+        if (mib != null) {
+            s.cpuRepackMib += mib
+            if (mib > 0) s.realLoadStarted = true
+        }
         return
     }
     if (line.includes("model buffer size") && !line.includes("CPU")) {
         const mib = extractMib(line)
-        if (mib != null) s.gpuMemMib += mib
+        if (mib != null) {
+            s.gpuMemMib += mib
+            if (mib > 0) s.realLoadStarted = true
+        }
         return
     }
     if (line.includes("KV buffer size") && !line.includes("CPU")) {
+        // Accumulate: speculative/MTP setups emit one KV report for the main
+        // model and another for the draft context.
+        if (!s.realLoadStarted) return
         const mib = extractMib(line)
-        if (mib != null) s.kvCacheMib = mib
+        if (mib != null) s.kvCacheMib += mib
         return
     }
-    if (line.includes("CPU compute buffer size")) {
+    if (line.includes("RS buffer size") && !line.includes("CPU")) {
+        // Recurrent-state buffer for hybrid/recurrent models (e.g. MTP draft).
+        if (!s.realLoadStarted) return
         const mib = extractMib(line)
-        if (mib != null) s.cpuComputeMib = mib
+        if (mib != null) s.rsBufMib += mib
         return
     }
-    if (line.includes("compute buffer size") && !line.includes("CPU")) {
+    // Compute buffers: accumulate across all contexts (target, draft, mmproj
+    // projector). The `= ` filter excludes destructor lines that print
+    // `compute buffer size is X MiB, matches expectation of Y MiB`.
+    if (line.includes("CPU compute buffer size =")) {
+        if (!s.realLoadStarted) return
         const mib = extractMib(line)
-        if (mib != null) s.computeBufMib = mib
+        if (mib != null) s.cpuComputeMib += mib
+        return
+    }
+    if (line.includes("compute buffer size =") && !line.includes("CPU")) {
+        if (!s.realLoadStarted) return
+        const mib = extractMib(line)
+        if (mib != null) s.computeBufMib += mib
         return
     }
     if (line.includes("done_getting_tensors:") && line.includes("using CPU instead")) {
@@ -488,6 +519,28 @@ function parseRuntimeLine(line, lui) {
         }
         return
     }
+    // Newer llama-server reports prefill progress on its `slot print_timing:`
+    // line (one tick per ~2048 prompt tokens) instead of the old
+    // `slot update_slots: ... prompt processing progress` line, which is no
+    // longer emitted. The tick also carries the current prompt-eval tps.
+    if (line.startsWith("slot print_timing:") && line.includes("prompt processing")) {
+        const idTask = extractSlotTask(line)
+        if (idTask) {
+            const slot = s.activeSlots.get(idTask[0])
+            if (slot) {
+                const pg = /progress\s*=\s*([0-9.]+)/.exec(line)
+                if (pg) slot.progress = Math.max(0, Math.min(1, parseFloat(pg[1])))
+                const tps = /([0-9.]+)\s+tokens per second/.exec(line)
+                if (tps) {
+                    const v = parseFloat(tps[1]) || 0
+                    slot.promptTps = v
+                    s.lastPromptTps = v
+                }
+            }
+        }
+        return
+    }
+    // Back-compat: older llama-server emitted progress on update_slots.
     if (line.startsWith("slot update_slots:") && line.includes("prompt processing progress")) {
         const idTask = extractSlotTask(line)
         if (idTask) {
@@ -499,7 +552,7 @@ function parseRuntimeLine(line, lui) {
         }
         return
     }
-    if (line.startsWith("slot release:") && line.includes("stop processing")) {
+    if (/^slot\s+release:/.test(line) && line.includes("stop processing")) {
         const idTask = extractSlotTask(line)
         if (idTask) {
             const slot = s.activeSlots.get(idTask[0])
@@ -618,7 +671,7 @@ function appendEnginePanel(v, lui) {
     const s = lui.state
     const p = v.panel("llama-server")
 
-    const gpuTotal = s.gpuMemMib + s.kvCacheMib + s.computeBufMib
+    const gpuTotal = s.gpuMemMib + s.kvCacheMib + s.rsBufMib + s.computeBufMib
     const cpuTotal = s.cpuMemMib + s.cpuRepackMib + s.cpuComputeMib
     if (gpuTotal > 0 || cpuTotal > 0) {
         const ln = p.line().style(STYLE.LABEL).text("Memory   : ").style()
@@ -639,6 +692,7 @@ function appendEnginePanel(v, lui) {
         const gpuParts = []
         if (s.gpuMemMib > 0) gpuParts.push(`${s.gpuMemMib.toFixed(0)} model`)
         if (s.kvCacheMib > 0) gpuParts.push(`${s.kvCacheMib.toFixed(0)} KV`)
+        if (s.rsBufMib > 0) gpuParts.push(`${s.rsBufMib.toFixed(0)} RS`)
         if (s.computeBufMib > 0) gpuParts.push(`${s.computeBufMib.toFixed(0)} compute`)
         const cpuParts = []
         if (s.cpuMemMib > 0) cpuParts.push(`${s.cpuMemMib.toFixed(0)} model`)
