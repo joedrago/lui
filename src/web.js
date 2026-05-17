@@ -299,7 +299,7 @@ function bookmarkletJs(port) {
 export function renderWebsearchSkill(port) {
     return `---
 name: lui-web-search
-description: Web search via browser bookmarklet. Extracts live search results from Google to answer questions requiring up-to-date information. Use when the user asks to search the web, look something up, find recent information, or you need data past your training cutoff. Returns JSON results with title, url, and snippet.
+description: Web search via browser bookmarklet. Extracts live search results from Google to answer questions requiring up-to-date information. Use when the user asks to search the web, look something up, google, find recent information, verify a claim, check current status, compare options, find what is new, look up a release or version, or you need any data past your training cutoff. When in doubt whether information is current, search. Returns JSON results with title, url, and snippet.
 license: BSD-2-Clause
 ---
 
@@ -371,6 +371,9 @@ body of a specific page, fetch that page separately.
 - User asks to "search the web", "look up", "google", "find recent", etc.
 - You need information that post-dates your training cutoff.
 - You need a canonical URL for documentation, a release, a spec, or an issue.
+- User asks to verify a claim, check current status, or compare options.
+- User asks "is X available", "does Y support Z", "what's new in", "latest version of".
+- When in doubt whether your knowledge is current or complete, search.
 
 Do not use this for fetching content from a URL the user already gave
 you — just fetch that URL directly.
