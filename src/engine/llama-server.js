@@ -724,7 +724,7 @@ function appendEnginePanel(v, lui) {
     if (gpuTotal > 0 || cpuTotal > 0) {
         const ln = p.line().style(STYLE.LABEL).text("Memory   : ").style()
         ln.style(STYLE.VALUE)
-            .text((gpuTotal / 1024).toFixed(1))
+            .text((gpuTotal / 1024).toFixed(2))
             .style()
             .text(" GiB VRAM")
 
@@ -732,7 +732,7 @@ function appendEnginePanel(v, lui) {
         // load-time accounting (cpu model + repack + compute) otherwise.
         // The breakdown line below still shows the accounting numbers.
         if (s.rssMib > 0) {
-            const [val, unit] = s.rssMib >= 1024 ? [(s.rssMib / 1024).toFixed(1), "GiB RAM"] : [String(s.rssMib), "MiB RAM"]
+            const [val, unit] = s.rssMib >= 1024 ? [(s.rssMib / 1024).toFixed(2), "GiB RAM"] : [String(s.rssMib), "MiB RAM"]
             ln.text(" · ").style(STYLE.VALUE).text(val).style().text(` ${unit}`)
         } else if (cpuTotal > 0) {
             ln.text(" · ").style(STYLE.VALUE).text(cpuTotal.toFixed(0)).style().text(" MiB RAM")
@@ -740,7 +740,7 @@ function appendEnginePanel(v, lui) {
         if (s.unifiedMemory && cpuTotal > 0) {
             ln.text(" ")
                 .style(DIM)
-                .text(`(${((gpuTotal + cpuTotal) / 1024).toFixed(1)} GiB total)`)
+                .text(`(${((gpuTotal + cpuTotal) / 1024).toFixed(2)} GiB total)`)
                 .style()
         }
 
