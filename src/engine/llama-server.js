@@ -5,6 +5,7 @@
 /** @import { Lui } from "../lui.js" */
 
 import { spawn } from "node:child_process"
+import fs from "node:fs"
 import os from "node:os"
 
 import { STYLE } from "../theme.js"
@@ -27,8 +28,15 @@ const DEFAULT_HINTS = [
     { flags: ["-ngl", "--gpu-layers", "--n-gpu-layers"], emit: () => ["-ngl", "-1"] },
     { flags: ["-np", "--parallel"], emit: () => ["-np", "1"] },
     { flags: ["-t", "--threads"], emit: () => ["-t", String(autoThreads())] },
-    { flags: ["--chat-template-kwargs"], emit: () => ["--chat-template-kwargs", '{"preserve_thinking":true}'] }
+    { flags: ["--chat-template-kwargs"], emit: () => ["--chat-template-kwargs", '{"preserve_thinking":true}'] },
+    // Default ctx-checkpoints cap. The upstream default (32) snapshots SSM/recurrent
+    // state into host memory every 8192 prefill tokens per slot. On hybrid models
+    // with large -c that ratchets host RSS into OOM territory under sustained use;
+    // 2 keeps enough rewind headroom for typical edits without unbounded growth.
+    { flags: ["-ctxcp", "--ctx-checkpoints", "--swa-checkpoints"], emit: () => ["-ctxcp", "2"] }
 ]
+
+const RSS_POLL_MS = 1000
 
 /** @returns {number} */
 function autoThreads() {
@@ -209,9 +217,16 @@ export const engine = {
             },
             addWarning: (m) => lui.addWarning(m)
         })
+
+        const pid = lui.state.proc?.child?.pid
+        if (pid) lui.state.rssTimer = startRssPolling(lui, pid)
     },
 
     async stop(lui) {
+        if (lui.state?.rssTimer) {
+            clearInterval(lui.state.rssTimer)
+            lui.state.rssTimer = null
+        }
         lui.state?.downloads?.stop?.()
         await lui.state?.proc?.stop?.()
     },
@@ -239,6 +254,14 @@ export const engine = {
         s.kvCacheMib = 0
         s.rsBufMib = 0
         s.computeBufMib = 0
+
+        if (s.rssTimer) clearInterval(s.rssTimer)
+
+        // Live process RSS in MiB, polled from /proc/<pid>/status on Linux.
+        // Stays at 0 on platforms without /proc (the panel falls back to the
+        // accounted CPU-buffer total in that case).
+        s.rssMib = 0
+        s.rssTimer = null
 
         // True once the first non-zero `model buffer size` line has been
         // observed. Used to gate buffer accumulators against the fit-probe
@@ -648,6 +671,31 @@ function binaryNameFromConfig(lui) {
     return lui.config.engine?.[engine.name]?.binary || BINARY_NAME
 }
 
+// Linux-only live process RSS. /proc/<pid>/status exposes VmRSS in kB
+// (matches what we used in our diagnostic loops). Returns null on non-Linux
+// or when /proc isn't readable, leaving the panel to fall back to the
+// accounted CPU-buffer total.
+/** @param {Lui} lui @param {number} pid @returns {NodeJS.Timeout | null} */
+function startRssPolling(lui, pid) {
+    const path = `/proc/${pid}/status`
+    if (!fs.existsSync(path)) return null
+    const tick = () => {
+        try {
+            const text = fs.readFileSync(path, "utf8")
+            const m = /^VmRSS:\s+(\d+)\s+kB/m.exec(text)
+            if (m) lui.state.rssMib = Math.round(parseInt(m[1], 10) / 1024)
+        } catch {
+            // process probably exited between ticks; stop trying
+            if (lui.state?.rssTimer) {
+                clearInterval(lui.state.rssTimer)
+                lui.state.rssTimer = null
+            }
+        }
+    }
+    tick()
+    return setInterval(tick, RSS_POLL_MS)
+}
+
 /** @param {Lui} lui @returns {Promise<void>} */
 async function probeVersion(lui) {
     return new Promise((resolve) => {
@@ -679,7 +727,14 @@ function appendEnginePanel(v, lui) {
             .text((gpuTotal / 1024).toFixed(1))
             .style()
             .text(" GiB VRAM")
-        if (cpuTotal > 0) {
+
+        // Prefer the live VmRSS reading when we have it; fall back to the
+        // load-time accounting (cpu model + repack + compute) otherwise.
+        // The breakdown line below still shows the accounting numbers.
+        if (s.rssMib > 0) {
+            const [val, unit] = s.rssMib >= 1024 ? [(s.rssMib / 1024).toFixed(1), "GiB RAM"] : [String(s.rssMib), "MiB RAM"]
+            ln.text(" · ").style(STYLE.VALUE).text(val).style().text(` ${unit}`)
+        } else if (cpuTotal > 0) {
             ln.text(" · ").style(STYLE.VALUE).text(cpuTotal.toFixed(0)).style().text(" MiB RAM")
         }
         if (s.unifiedMemory && cpuTotal > 0) {
