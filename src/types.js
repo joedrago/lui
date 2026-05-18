@@ -36,6 +36,7 @@
  * @property {string} configDir
  * @property {string[]} configCandidates
  * @property {string} [skillsDir]
+ * @property {"nested" | "flat"} [skillsLayout]
  * @property {SchemaEntry[]} [schema]
  * @property {(existing: string, ctx: HarnessContext) => string} apply
  * @property {(existing: string) => boolean} [needsBackup]

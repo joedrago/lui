@@ -19,6 +19,8 @@ export const harness = {
     name: "zerostack",
     configDir: process.platform === "darwin" ? "~/Library/Application Support/zerostack" : "~/.config/zerostack",
     configCandidates: ["config.json"],
+    skillsDir: "prompts",
+    skillsLayout: "flat",
     schema: [{ path: "enabled", default: false }],
 
     apply(existing, ctx) {

@@ -175,8 +175,30 @@ export async function applyHarness({ transport, harness, ctx, enabled, onBackup 
 
     // Skill add/remove runs regardless of `enabled` (sweep stale files).
     if (harness.skillsDir) {
-        const skillDir = join(dir, harness.skillsDir, "lui-web-search")
-        const skillPath = join(skillDir, "SKILL.md")
+        // skillsLayout controls how skill files are laid out:
+        //
+        //   "nested" (default) — each skill is a directory containing SKILL.md
+        //     Example: <configDir>/skills/lui-web-search/SKILL.md
+        //     Used by: opencode, pi
+        //
+        //   "flat" — each skill is a single .md file named after the skill
+        //     Example: <configDir>/prompts/lui-web-search.md
+        //     Used by: zerostack
+        const layout = harness.skillsLayout ?? "nested"
+
+        /** @type {string} */
+        let skillDir
+        /** @type {string} */
+        let skillPath
+
+        if (layout === "flat") {
+            skillDir = join(dir, harness.skillsDir)
+            skillPath = join(skillDir, "lui-web-search.md")
+        } else {
+            skillDir = join(dir, harness.skillsDir, "lui-web-search")
+            skillPath = join(skillDir, "SKILL.md")
+        }
+
         const wantSkill = enabled && ctx.websearch
         if (wantSkill) {
             await transport.mkdirp(skillDir)
@@ -185,7 +207,9 @@ export async function applyHarness({ transport, harness, ctx, enabled, onBackup 
             if (cur !== body) await transport.write(skillPath, body)
         } else if (await transport.exists(skillPath)) {
             await transport.remove(skillPath)
-            await transport.tryRmDir(skillDir)
+            if (layout !== "flat") {
+                await transport.tryRmDir(skillDir)
+            }
         }
     }
 
