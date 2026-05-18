@@ -134,6 +134,14 @@ function printInformation(_lui, enabledHarnesses) {
         w("\n")
     }
 
+    if (enabledHarnesses.has("zerostack")) {
+        w("  " + styled("zerostack", STYLE.HARNESS_NAME) + "\n")
+        w(row("install", cmd("cargo install zerostack"), W))
+        w(row("docs", url("https://github.com/gi-dellav/zerostack"), W))
+        w(row("enable sandbox", dim("alias zerostack='lui sandbox zerostack'"), W))
+        w("\n")
+    }
+
     w("  " + styled("llama-server", STYLE.ENGINE_NAME) + "\n")
     w(row("install (Win/Linux)", url("https://github.com/ggml-org/llama.cpp#quick-start"), W))
     w(row("install (macOS)", cmd("brew install llama.cpp"), W))

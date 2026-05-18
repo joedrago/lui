@@ -13,6 +13,7 @@ Useful links:
 
 - [opencode](https://opencode.ai) — agent harness
 - [pi](https://pi.dev) — agent harness
+- [zerostack](https://github.com/gi-dellav/zerostack) — agent harness
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) — engine
 
 ## Run
@@ -54,6 +55,7 @@ lui set websearch false
 lui set debug_log /tmp/llama.log
 lui set harness.opencode.enabled true
 lui set harness.pi.enabled true
+lui set harness.zerostack.enabled true
 lui set engine.llama-server.binary /usr/local/bin/llama-server
 lui set sandbox.allow_gpu true
 lui set sandbox.allow ./project

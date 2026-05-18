@@ -138,7 +138,9 @@ export class Lui {
         exitOnErrors(probe.errors)
         existing.args = [...args]
         this.config.save()
-        process.stdout.write(`\nCurrent Args:\nlui args ${name} ${fmt(previousArgs)}\n\nUpdated Args:\nlui args ${name} ${fmt(existing.args)}\n\n`)
+        process.stdout.write(
+            `\nCurrent Args:\nlui args ${name} ${fmt(previousArgs)}\n\nUpdated Args:\nlui args ${name} ${fmt(existing.args)}\n\n`
+        )
     }
 
     /** @param {string} name */

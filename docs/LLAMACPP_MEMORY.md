@@ -10,15 +10,15 @@ component generalizes, the absolute sizes do not.
 
 For a config of `-np 4 -ctxcp 2 -cram 8192`:
 
-| Item                          | Worst case | What drives it                                |
-|-------------------------------|------------|-----------------------------------------------|
-| Process + libraries           | ~1.2 GiB   | binary + ggml/Vulkan/ROCm shared libs (fixed) |
-| `CPU_Mapped` model buffer     | ~0.83 GiB  | `token_embd.weight` (file-backed mmap)        |
-| `Vulkan_Host` compute scratch | ~0.52 GiB  | pinned host staging for GPU transfers         |
-| Context checkpoints           | ~4.8 GiB   | `-ctxcp × -np × ~600 MiB SSM snapshot`        |
-| Prompt cache                  | ~8 GiB     | capped by `-cram`                             |
-| Per-request scratch / noise   | ~0.5 GiB   | sampler, HTTP, glibc overhead                 |
-| **Total ceiling**             | **~16 GiB**|                                               |
+| Item                          | Worst case  | What drives it                                |
+| ----------------------------- | ----------- | --------------------------------------------- |
+| Process + libraries           | ~1.2 GiB    | binary + ggml/Vulkan/ROCm shared libs (fixed) |
+| `CPU_Mapped` model buffer     | ~0.83 GiB   | `token_embd.weight` (file-backed mmap)        |
+| `Vulkan_Host` compute scratch | ~0.52 GiB   | pinned host staging for GPU transfers         |
+| Context checkpoints           | ~4.8 GiB    | `-ctxcp × -np × ~600 MiB SSM snapshot`        |
+| Prompt cache                  | ~8 GiB      | capped by `-cram`                             |
+| Per-request scratch / noise   | ~0.5 GiB    | sampler, HTTP, glibc overhead                 |
+| **Total ceiling**             | **~16 GiB** |                                               |
 
 Typical operation lands at 4–10 GiB. The ~16 GiB ceiling is what you'd hit
 only when every axis saturates at once (all 4 slots hold maxed-out
@@ -63,8 +63,7 @@ lives on the GPU and is rewindable by position alone.
 - **Why they exist**: for hybrid SSM/attention models, the recurrent
   state can't be reconstructed from KV alone (it's a function of every
   preceding token, and SSMs aren't randomly accessible). Checkpoints let
-  a slot rewind to a known prior position without reprocessing from token
-  0. With `-ctxcp 2 -cpent 8192` (the default checkpoint interval) you
+  a slot rewind to a known prior position without reprocessing from token 0. With `-ctxcp 2 -cpent 8192` (the default checkpoint interval) you
   can recover edits made up to ~16K tokens behind the conversation head;
   beyond that the slot falls back to full re-prefill (see
   `tools/server/server-context.cpp:2666`, the `do_reset` path).
@@ -76,23 +75,24 @@ lives on the GPU and is rewindable by position alone.
 
 Defined at `tools/server/server-task.cpp:1997`
 (`server_prompt_cache::alloc`). Stores **full** slot states (attention KV
-+ SSM, via `FLAGS_NONE` — not `PARTIAL_ONLY` like checkpoints) so a slot
-can be swapped to a different conversation and swapped back without a
-re-prefill.
 
-- **Per-entry size**: `actual_tokens × ~25 KiB` (q8_0 K + q4_0 V KV per
+- SSM, via `FLAGS_NONE` — not `PARTIAL_ONLY` like checkpoints) so a slot
+  can be swapped to a different conversation and swapped back without a
+  re-prefill.
+
+* **Per-entry size**: `actual_tokens × ~25 KiB` (q8_0 K + q4_0 V KV per
   token on this model) + ~600 MiB SSM. So a 50K-token saved state is
   ~1.85 GiB; a 256K save is ~7 GiB.
-- **Cap**: `-cram` in MiB. Entries get evicted oldest-first when the
+* **Cap**: `-cram` in MiB. Entries get evicted oldest-first when the
   cache total exceeds the cap, with a hard **"always keep at least one
   entry"** floor (`tools/server/server-task.cpp:2130`,
   `while (states.size() > 1 && size() > limit_size)`). So a single huge
   saved state can briefly exceed the cap if it's the only entry.
-- **When it's used**: any time a slot is reassigned to a task whose
+* **When it's used**: any time a slot is reassigned to a task whose
   prompt prefix differs significantly from the slot's current state.
   Heavy when a harness like opencode spawns subagents on a different
   context than the main conversation.
-- **Trade-off**: small cap → more re-prefills on subagent rotation; large
+* **Trade-off**: small cap → more re-prefills on subagent rotation; large
   cap → more RSS. 8 GiB holds one long main conversation plus a few
   subagents.
 
@@ -157,29 +157,29 @@ which then determines the multiplier on the checkpoint axis
 
 ## Flag quick reference
 
-| Flag        | Default     | Effect on host RAM                                                                                |
-|-------------|-------------|---------------------------------------------------------------------------------------------------|
-| `-c N`      | 4096        | mostly VRAM; mild host scratch growth                                                             |
-| `-np N`     | auto (1)    | multiplies checkpoint cost; gates concurrent slot saves                                           |
-| `-kvu`      | auto        | no direct host effect; makes `-np > 1` viable                                                     |
-| `-ctxcp N`  | **32**      | `N × -np × ~600 MiB` worst-case checkpoint cost                                                   |
-| `-cpent N`  | 8192        | checkpoint-creation interval in tokens; higher = fewer checkpoints created during long prefill    |
-| `-cram N`   | 8192 (MiB)  | hard cap on prompt-cache budget (with "keep ≥ 1" floor)                                           |
-| `-b N`      | 2048        | logical batch; minor host effect                                                                  |
-| `-ub N`     | 512         | ubatch size; `Vulkan_Host` compute scratch scales linearly                                        |
-| `-fa on`    | off         | flash attention; small host-side effect                                                           |
+| Flag       | Default    | Effect on host RAM                                                                             |
+| ---------- | ---------- | ---------------------------------------------------------------------------------------------- |
+| `-c N`     | 4096       | mostly VRAM; mild host scratch growth                                                          |
+| `-np N`    | auto (1)   | multiplies checkpoint cost; gates concurrent slot saves                                        |
+| `-kvu`     | auto       | no direct host effect; makes `-np > 1` viable                                                  |
+| `-ctxcp N` | **32**     | `N × -np × ~600 MiB` worst-case checkpoint cost                                                |
+| `-cpent N` | 8192       | checkpoint-creation interval in tokens; higher = fewer checkpoints created during long prefill |
+| `-cram N`  | 8192 (MiB) | hard cap on prompt-cache budget (with "keep ≥ 1" floor)                                        |
+| `-b N`     | 2048       | logical batch; minor host effect                                                               |
+| `-ub N`    | 512        | ubatch size; `Vulkan_Host` compute scratch scales linearly                                     |
+| `-fa on`   | off        | flash attention; small host-side effect                                                        |
 
 ## Typical operating ranges
 
 For `-c 256144 -np 4 -ctxcp 2 -cram 8192` on a 32 GiB host:
 
-| Workload                                  | Expected RSS  |
-|-------------------------------------------|---------------|
-| Just booted, idle                         | 2.5–3 GiB     |
-| One active conversation, light editing    | 4–6 GiB       |
-| Long conversation (100K+ tokens)          | 6–9 GiB       |
-| Heavy multi-subagent rotation             | 10–14 GiB     |
-| Pathological worst case                   | ~16 GiB       |
+| Workload                               | Expected RSS |
+| -------------------------------------- | ------------ |
+| Just booted, idle                      | 2.5–3 GiB    |
+| One active conversation, light editing | 4–6 GiB      |
+| Long conversation (100K+ tokens)       | 6–9 GiB      |
+| Heavy multi-subagent rotation          | 10–14 GiB    |
+| Pathological worst case                | ~16 GiB      |
 
 ## See also
 

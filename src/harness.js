@@ -42,10 +42,11 @@ import fs from "node:fs"
 import { renderWebsearchSkill } from "./web.js"
 import { harness as opencode } from "./harness/opencode.js"
 import { harness as pi } from "./harness/pi.js"
+import { harness as zerostack } from "./harness/zerostack.js"
 import { expandTilde } from "./util.js"
 
 /** @type {Harness[]} */
-export const harnesses = [opencode, pi]
+export const harnesses = [opencode, pi, zerostack]
 
 // Schema keys the framework reads generically from every harness. A
 // harness that omits one of these is a bug — fail loudly at import
