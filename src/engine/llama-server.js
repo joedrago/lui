@@ -657,6 +657,19 @@ function parseRuntimeLine(line, lui) {
         return
     }
     if (line.startsWith("slot print_timing:")) {
+        // Newer llama-server reports per-request generation rate inline as
+        // `n_decoded = N, tg = X.XX t/s` instead of the older multi-line
+        // `eval time = ... tokens per second` block. Parse it here so the
+        // Generate stat keeps updating on builds that no longer emit the
+        // legacy block. Fall back to s.lastGenTps for builds that do.
+        const tg = /tg\s*=\s*([0-9.]+)\s*t\/s/.exec(line)
+        if (tg) {
+            const tps = parseFloat(tg[1]) || 0
+            s.lastGenTps = tps
+            s.genTpsSamples += 1
+            const n = s.genTpsSamples
+            s.avgGenTps = s.avgGenTps * ((n - 1) / n) + tps / n
+        }
         const idTask = extractSlotTask(line)
         if (idTask) {
             const slot = s.activeSlots.get(idTask[0])
