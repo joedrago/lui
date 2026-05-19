@@ -330,11 +330,6 @@ export class Lui {
             process.stderr.write(`lui: engine.stop threw: ${/** @type {any} */ (e)?.stack || e}\n`)
         }
         await this.web?.close?.()
-        try {
-            this.config.save()
-        } catch (e) {
-            process.stderr.write(`lui: failed to save config: ${/** @type {Error} */ (e).message}\n`)
-        }
         this.printShutdownSummary()
         this.onShutdownResolve?.()
         process.exit(this.exitCode)
