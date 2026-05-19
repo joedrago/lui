@@ -931,10 +931,11 @@ function appendPerformancePanel(v, lui) {
             .style(STYLE.VALUE)
             .text(pct.toFixed(1).padStart(6))
             .style(TEXT)
-            .text("% ")
+            .text("%       ")
             .style(DIM)
             .text(`(${formatNumber(s.draftAccepted)} / ${formatNumber(s.draftTotal)} drafted)`)
     }
+    if (s.draftTotal > 0) p.line()
 
     for (const slot of [...s.recentCompleted].reverse()) {
         const time = slot.totalTimeMs > 0 ? ` in ${(slot.totalTimeMs / 1000).toFixed(1)}s` : ""
