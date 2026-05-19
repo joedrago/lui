@@ -285,6 +285,13 @@ export const engine = {
         s.avgGenTps = 0
         s.promptTpsSamples = 0
         s.genTpsSamples = 0
+
+        // Speculative-decoding acceptance, accumulated across every
+        // `slot update_slots: ... accepted X/Y draft tokens` line. Stays at 0
+        // when spec decode is off — the panel hides the row in that case.
+        s.draftAccepted = 0
+        s.draftTotal = 0
+
         s.downloads = createDownloadTracker()
         s.logLines = []
         s.exited = false
@@ -526,8 +533,26 @@ function parseRuntimeLine(line, lui) {
                 genTokens: 0,
                 totalTimeMs: 0,
                 progress: 0,
+                draftAccepted: 0,
+                draftTotal: 0,
                 processingStarted: Date.now()
             })
+        }
+        return
+    }
+    if (line.startsWith("slot update_slots:") && line.includes("draft tokens")) {
+        const idTask = extractSlotTask(line)
+        const m = /accepted\s+(\d+)\s*\/\s*(\d+)\s+draft tokens/.exec(line)
+        if (idTask && m) {
+            const accepted = parseInt(m[1], 10) || 0
+            const total = parseInt(m[2], 10) || 0
+            s.draftAccepted += accepted
+            s.draftTotal += total
+            const slot = s.activeSlots.get(idTask[0])
+            if (slot) {
+                slot.draftAccepted += accepted
+                slot.draftTotal += total
+            }
         }
         return
     }
@@ -898,10 +923,27 @@ function appendPerformancePanel(v, lui) {
         genLn.style(DIM).text("--")
     }
 
+    if (s.draftTotal > 0) {
+        const pct = (s.draftAccepted / s.draftTotal) * 100
+        p.line()
+            .style(STYLE.LABEL)
+            .text("Spec     : ")
+            .style(STYLE.VALUE)
+            .text(pct.toFixed(1).padStart(6))
+            .style(TEXT)
+            .text("% ")
+            .style(DIM)
+            .text(`(${formatNumber(s.draftAccepted)} / ${formatNumber(s.draftTotal)} drafted)`)
+    }
+
     for (const slot of [...s.recentCompleted].reverse()) {
         const time = slot.totalTimeMs > 0 ? ` in ${(slot.totalTimeMs / 1000).toFixed(1)}s` : ""
         const tps = slot.genTps > 0 ? ` (${slot.genTps.toFixed(1)} tok/s)` : ""
-        p.line({ indent: 13 }).style(DIM).text(`✓ slot ${slot.slotId} done ${slot.nTokens} tokens${time}${tps}`)
+        const spec =
+            slot.draftTotal > 0
+                ? ` · spec ${((slot.draftAccepted / slot.draftTotal) * 100).toFixed(0)}% (${slot.draftAccepted}/${slot.draftTotal})`
+                : ""
+        p.line({ indent: 13 }).style(DIM).text(`✓ slot ${slot.slotId} done ${slot.nTokens} tokens${time}${tps}${spec}`)
     }
 
     // The blank goes into the lines stream — bars[] always renders
