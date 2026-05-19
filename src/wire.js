@@ -62,12 +62,13 @@ export function View() {
         const p = { title: title ?? "", palette, lines: [], bars: [] }
         panels.push(p)
 
-        /** @param {{ align?: "left" | "right", indent?: number }} [opts] @returns {LineApi} */
+        /** @param {{ align?: "left" | "right", indent?: number, nowrap?: boolean }} [opts] @returns {LineApi} */
         function line(opts) {
             /** @type {ViewLine} */
             const obj = { text: "" }
             if (opts?.align) obj.align = opts.align
             if (opts?.indent) obj.indent = opts.indent
+            if (opts?.nowrap) obj.nowrap = true
             p.lines.push(obj)
 
             /** @type {LineApi} */

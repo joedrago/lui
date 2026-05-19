@@ -201,7 +201,7 @@ export class Lui {
             if (engineModule) {
                 const model = { name, engine: m.engine, args: m.args || [] }
                 const { segments } = engineModule.describe(model, this)
-                const cmdLine = p.line({ indent: 4 })
+                const cmdLine = p.line({ nowrap: true })
                 let first = true
                 for (const seg of segments) {
                     if (!seg.args.length) continue
@@ -209,7 +209,7 @@ export class Lui {
                     first = false
                     cmdLine
                         .style(seg.style ?? {})
-                        .text(seg.args.join(" "))
+                        .text(seg.args.map(shellQuote).join(" "))
                         .style()
                 }
             }
@@ -449,7 +449,7 @@ function emitPaintedLines(built, outerIndent = "") {
         const text = l.text || ""
         const available = cols - indent.length - RIGHT_MARGIN
 
-        if (!tty || available <= 0 || vwidth(text) <= available) {
+        if (!tty || available <= 0 || vwidth(text) <= available || l.nowrap) {
             const body = tty && compiled ? paint(text, compiled) : stripStyle(text)
             process.stdout.write(indent + body + "\n")
             continue

@@ -73,7 +73,7 @@
  * @property {(p: string) => Promise<void>} tryRmDir
  */
 
-/** @typedef {{ text: string, align?: "left" | "right", indent?: number }} ViewLine */
+/** @typedef {{ text: string, align?: "left" | "right", indent?: number, nowrap?: boolean }} ViewLine */
 
 /** @typedef {{ label: string, value: number, max?: number, text?: string, indent?: number }} ViewBar */
 
@@ -89,7 +89,7 @@
 
 /**
  * @typedef {Object} PanelApi
- * @property {(opts?: { align?: "left" | "right", indent?: number }) => LineApi} line
+ * @property {(opts?: { align?: "left" | "right", indent?: number, nowrap?: boolean }) => LineApi} line
  * @property {(spec: ViewBar) => PanelApi} bar
  */
 
