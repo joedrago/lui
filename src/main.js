@@ -16,6 +16,7 @@ USAGE
 
   lui run                            show all models
   lui run NAME                       run a model by name
+  lui run NAME ARGS...               replace ARGS, then run
 
   lui add NEWNAME ENGINE  ARGS...    create a model
   lui cp  OLDNAME NEWNAME            copy a model under a new name
@@ -68,12 +69,13 @@ async function main() {
     const lui = new Lui()
 
     if (verb === "run") {
-        if (rest.length > 1) fatal(`run takes at most one NAME, got: ${rest.join(" ")}`)
         if (rest.length === 0) {
             lui.printModels({ indent: "  " })
             return
         }
-        await lui.run(rest[0])
+        const [name, ...args] = rest
+        if (args.length > 0) lui.setArgs(name, args)
+        await lui.run(name)
         return
     }
 
