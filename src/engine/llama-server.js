@@ -506,9 +506,12 @@ function parseLoadLine(line, lui) {
         if (m) s.nParallel = Math.max(1, parseInt(m[1], 10) || 1)
         // fall through — no return; line may carry other parseable info
     }
-    if (line.includes("server is listening on")) {
-        const at = line.indexOf("on ")
-        if (at >= 0) s.listenUrl = line.slice(at + 3).trim()
+    // Readiness signal. Older builds printed "server is listening on
+    // http://...", newer ones print "llama_server: listening on
+    // http://..." — match the common "listening on" so both fire.
+    if (line.includes("listening on")) {
+        const at = line.indexOf("listening on ")
+        if (at >= 0) s.listenUrl = line.slice(at + "listening on ".length).trim()
         lui.markEngineReady()
     }
 }
