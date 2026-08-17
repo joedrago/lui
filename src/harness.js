@@ -6,7 +6,11 @@
 //
 //   name              kebab-case identifier; doubles as the
 //                     [harness.<name>] table key in lui.toml
-//   configDir         where the agent reads its config (~-prefixed)
+//   configDir         where the agent reads its config (~-prefixed).
+//                     A function instead of a string when the answer
+//                     depends on the OS: it receives the platform of
+//                     the machine being configured, which for
+//                     `lui ssh` is the *remote* one, not this host's
 //   configCandidates  basenames lui will look for in configDir, in
 //                     preference order; the first match is read, the
 //                     first entry is the write target if none exist
@@ -27,14 +31,18 @@
 //   needsBackup(existing) → boolean
 //                     return true on first write to a config lui didn't
 //                     author, so the original gets stashed as .luibackup
-//   sshPreflight(target, sshRun) → { ok, error? }
+//   sshPreflight(remote) → { ok, error? }
 //                     async sanity check before `lui ssh` writes to a
-//                     remote machine (e.g. is the agent installed there)
+//                     remote machine (e.g. is the agent installed
+//                     there). `remote` exposes platform-agnostic
+//                     `which`/`exists` probes plus the raw `run`, so a
+//                     preflight works against POSIX and Windows clients
+//                     alike — see the SshRemote typedef.
 //
 // The HarnessContext passed to apply():
 //   modelName, baseURL, ctxSize, webPort, websearch
 
-/** @import { Harness, HarnessContext, Transport, SchemaEntry } from "./types.js" */
+/** @import { Harness, HarnessContext, Transport, SchemaEntry, RemotePlatform } from "./types.js" */
 /** @import { Lui } from "./lui.js" */
 
 import fs from "node:fs"
@@ -64,6 +72,15 @@ for (const h of harnesses) {
             process.exit(1)
         }
     }
+}
+
+// `configDir` is a plain string for harnesses whose path is the same
+// everywhere, and a function of the target platform for the ones that
+// follow an OS convention. Callers must go through this rather than
+// reading `harness.configDir` directly.
+/** @param {Harness} harness @param {RemotePlatform} platform @returns {string} */
+export function harnessConfigDir(harness, platform) {
+    return typeof harness.configDir === "function" ? harness.configDir(platform) : harness.configDir
 }
 
 /** @param {Harness} harness @param {string} key @returns {any} */
@@ -125,6 +142,17 @@ export function deriveModelName(activeKey) {
     return tail.split(":")[0].replace(/-GGUF$/, "") || "lui"
 }
 
+// The transports carry a platform so path conventions follow the
+// machine being written to. Node reports more platforms than lui cares
+// about (freebsd, aix, ...); every non-macOS, non-Windows one wants the
+// XDG-style layout, which is what "linux" means here.
+/** @returns {RemotePlatform} */
+function localPlatform() {
+    if (process.platform === "darwin") return "darwin"
+    if (process.platform === "win32") return "win32"
+    return "linux"
+}
+
 // Minimal transport interface — methods applyHarness drives:
 //   resolve(home-prefixed path) → path the other methods accept
 //   exists(p), read(p), write(p, body), remove(p), mkdirp(p), tryRmDir(p)
@@ -133,6 +161,7 @@ export function deriveModelName(activeKey) {
 /** @type {Transport} */
 export const localTransport = {
     name: "local",
+    platform: localPlatform(),
     resolve(p) {
         return expandTilde(p)
     },
@@ -171,7 +200,7 @@ export const localTransport = {
 export async function applyHarness({ transport, harness, ctx, enabled, onBackup }) {
     /** @param {...string} parts */
     const join = (...parts) => parts.join("/")
-    const dir = transport.resolve(harness.configDir)
+    const dir = transport.resolve(harnessConfigDir(harness, transport.platform))
 
     // Skill add/remove runs regardless of `enabled` (sweep stale files).
     if (harness.skillsDir) {

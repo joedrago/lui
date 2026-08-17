@@ -31,17 +31,19 @@ export const harness = {
         return !lui
     },
 
-    async sshPreflight(target, sshRun) {
-        const probe =
-            'command -v opencode || bash -lc \'command -v opencode\' || { [ -x "$HOME/.opencode/bin/opencode" ] && echo "$HOME/.opencode/bin/opencode"; }'
+    async sshPreflight(remote) {
         try {
-            const out = await sshRun(target, probe)
-            if (out.trim()) return { ok: true }
-            return { ok: false, error: `opencode not found on ${target.user}@${target.host}. Install it there first.` }
+            if (await remote.which("opencode")) return { ok: true }
+            // opencode's installer drops the binary here and edits the
+            // shell profile to add it, which a non-interactive session
+            // never reads — so check the install path directly.
+            const installed = remote.platform === "win32" ? "~/.opencode/bin/opencode.exe" : "~/.opencode/bin/opencode"
+            if (await remote.exists(installed)) return { ok: true }
+            return { ok: false, error: `opencode not found on ${remote.spec}. Install it there first.` }
         } catch (e) {
             return {
                 ok: false,
-                error: `opencode preflight on ${target.user}@${target.host} failed: ${/** @type {Error} */ (e).message}`
+                error: `opencode preflight on ${remote.spec} failed: ${/** @type {Error} */ (e).message}`
             }
         }
     }

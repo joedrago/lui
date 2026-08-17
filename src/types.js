@@ -24,6 +24,8 @@
 
 /** @typedef {{ user: string, host: string }} SshTarget */
 
+/** @typedef {"darwin" | "linux" | "win32"} RemotePlatform */
+
 /** @typedef {{ lines: { label: string, value: string }[], fatal: string | null }} ShutdownSummary */
 
 /** @typedef {{ path: string, default: any, isArray?: boolean }} SchemaEntry */
@@ -33,14 +35,30 @@
 /**
  * @typedef {Object} Harness
  * @property {string} name
- * @property {string} configDir
+ * @property {string | ((platform: RemotePlatform) => string)} configDir
  * @property {string[]} configCandidates
  * @property {string} [skillsDir]
  * @property {"nested" | "flat"} [skillsLayout]
  * @property {SchemaEntry[]} [schema]
  * @property {(existing: string, ctx: HarnessContext) => string} apply
  * @property {(existing: string) => boolean} [needsBackup]
- * @property {(target: SshTarget, sshRun: (t: SshTarget, cmd: string, stdin?: string) => Promise<string>) => Promise<{ ok: boolean, error?: string }>} [sshPreflight]
+ * @property {(remote: SshRemote) => Promise<{ ok: boolean, error?: string }>} [sshPreflight]
+ */
+
+/**
+ * The far end of a `lui ssh` run, after lui has worked out what kind of
+ * shell lives there. `run` speaks that machine's native command syntax;
+ * `which` and `exists` are the platform-agnostic probes harnesses use
+ * in their preflight checks.
+ *
+ * @typedef {Object} SshRemote
+ * @property {SshTarget} target
+ * @property {RemotePlatform} platform
+ * @property {string} spec
+ * @property {Transport} transport
+ * @property {(command: string, stdin?: string) => Promise<string>} run
+ * @property {(name: string) => Promise<string | null>} which
+ * @property {(p: string) => Promise<boolean>} exists
  */
 
 /**
@@ -64,6 +82,7 @@
 /**
  * @typedef {Object} Transport
  * @property {string} name
+ * @property {RemotePlatform} platform
  * @property {(p: string) => string} resolve
  * @property {(p: string) => Promise<boolean>} exists
  * @property {(p: string) => Promise<string>} read

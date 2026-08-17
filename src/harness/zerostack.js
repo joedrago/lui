@@ -3,12 +3,12 @@
 // llama-server, then sets `provider`, `model`, and `context_window`.
 //
 // Zerostack uses the `dirs` crate for config resolution: on macOS
-// that's ~/Library/Application Support/zerostack, on Linux it's
-// ~/.config/zerostack (or $XDG_CONFIG_HOME/zerostack).
+// that's ~/Library/Application Support/zerostack, on Windows it's
+// %APPDATA%\zerostack, on Linux it's ~/.config/zerostack (or
+// $XDG_CONFIG_HOME/zerostack). The platform is whichever machine is
+// being configured — `lui ssh` passes the remote's, not this host's.
 
 /** @import { Harness } from "../types.js" */
-
-import process from "node:process"
 
 import { modify, applyEdits, parseTree, findNodeAtLocation } from "jsonc-parser"
 
@@ -17,7 +17,11 @@ const FORMAT = { tabSize: 2, insertSpaces: true, eol: "\n" }
 /** @type {Harness} */
 export const harness = {
     name: "zerostack",
-    configDir: process.platform === "darwin" ? "~/Library/Application Support/zerostack" : "~/.config/zerostack",
+    configDir: (platform) => {
+        if (platform === "darwin") return "~/Library/Application Support/zerostack"
+        if (platform === "win32") return "~/AppData/Roaming/zerostack"
+        return "~/.config/zerostack"
+    },
     configCandidates: ["config.json"],
     skillsDir: "prompts",
     skillsLayout: "flat",
@@ -40,16 +44,14 @@ export const harness = {
         return !lui
     },
 
-    async sshPreflight(target, sshRun) {
-        const probe = "command -v zerostack || bash -lc 'command -v zerostack'"
+    async sshPreflight(remote) {
         try {
-            const out = await sshRun(target, probe)
-            if (out.trim()) return { ok: true }
-            return { ok: false, error: `zerostack not found on ${target.user}@${target.host}. Install it there first.` }
+            if (await remote.which("zerostack")) return { ok: true }
+            return { ok: false, error: `zerostack not found on ${remote.spec}. Install it there first.` }
         } catch (e) {
             return {
                 ok: false,
-                error: `zerostack preflight on ${target.user}@${target.host} failed: ${/** @type {Error} */ (e).message}`
+                error: `zerostack preflight on ${remote.spec} failed: ${/** @type {Error} */ (e).message}`
             }
         }
     }

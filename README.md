@@ -107,10 +107,13 @@ The `-R` command targets wherever this lui's _engine_ actually lives — so if t
 
 On macOS/Linux, lui multiplexes its setup-time SSH calls over a single connection (`ControlMaster` with a socket under `/tmp`) so the configure step finishes in a couple of seconds rather than once per round-trip. Windows OpenSSH doesn't support multiplexing; it works there too, just slower.
 
+**Windows clients:** lui probes the client once before it writes anything and picks the shell dialect to match. A Windows client gets configured through PowerShell — `-EncodedCommand`, so the payload survives whatever sshd hands the command line to (cmd.exe, PowerShell, or a Git-for-Windows bash), with file contents moving as base64 so the console code page can't mangle them. Config paths follow the client's own OS conventions, not this machine's: zerostack lands in `%APPDATA%\zerostack` on a Windows client, `~/Library/Application Support/zerostack` on a macOS one, `~/.config/zerostack` elsewhere.
+
 **Requirements:**
 
 - Each enabled harness must already be installed on the client (e.g. opencode probes the default PATH, login-shell PATH, and `~/.opencode/bin/opencode`).
 - SSH access in `USER@HOST` form — no bare hostnames.
+- A Windows client needs `powershell` (or `pwsh`) on its PATH — the stock Windows PowerShell is enough.
 
 **Example:**
 
