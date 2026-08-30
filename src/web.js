@@ -9,6 +9,7 @@ import os from "node:os"
 import { spawn } from "node:child_process"
 
 import { View, CONFIG_VERSION } from "./wire.js"
+import { resolveMaxOutputTokens } from "./engine.js"
 
 const BSEARCH_TIMEOUT_MS = 120_000
 
@@ -99,10 +100,11 @@ function handleData(_req, res, lui) {
 }
 
 // /config exposes the engine's externally-reachable URL + its critical
-// state (context size, model name). Each remote-engine hop just
-// re-emits the base_url it learned from upstream, so a turtles→relay
-// →llm chain propagates llm's real URL all the way through. Web-port
-// and websearch are local concerns at every hop and don't travel.
+// state (context size, model name, output cap). Each remote-engine hop
+// just re-emits what it learned from upstream, so a turtles→relay→llm
+// chain propagates llm's real URL and limits all the way through.
+// Web-port and websearch are local concerns at every hop and don't
+// travel.
 /** @param {import("node:http").IncomingMessage} req @param {import("node:http").ServerResponse} res @param {Lui} lui */
 function handleConfig(req, res, lui) {
     const body = JSON.stringify({
@@ -110,7 +112,8 @@ function handleConfig(req, res, lui) {
         base_url: resolveBaseURL(req, lui),
         active_model: lui.activeModel?.name ?? null,
         context_size: lui.engineModule?.contextSize?.(lui.state, lui.activeModel) ?? null,
-        served_model: lui.engineModule?.servedModelName?.(lui.state, lui.activeModel) ?? null
+        served_model: lui.engineModule?.servedModelName?.(lui.state, lui.activeModel) ?? null,
+        max_output_tokens: resolveMaxOutputTokens(lui)
     })
     res.writeHead(200, { ...CORS, "content-type": "application/json" })
     res.end(body)

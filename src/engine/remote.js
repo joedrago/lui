@@ -4,13 +4,15 @@
 // /config endpoint (default :8081).
 //
 // Lifecycle:
-//   start()  fetches /config once (learns base_url + context_size),
+//   start()  fetches /config once (learns base_url + context_size +
+//            max_output_tokens),
 //            does one /data fetch to seed the panel cache, signals
 //            engine-ready, then polls /data on a 250ms tick.
 //   stop()   clears the poll timer.
 //
-// The harness baseURL it surfaces is exactly what upstream's /config
-// reported — for a llama-server upstream that's "this host I dialed"
+// Everything this engine reports to the harness layer — baseURL,
+// context size, served model, output cap — is exactly what upstream's
+// /config said — for a llama-server upstream that's "this host I dialed"
 // + the engine port; for a remote upstream it's whatever *that*
 // learned from its own upstream. The URL propagates verbatim through
 // any number of hops, so turtles → relay → llm writes a harness on
@@ -21,7 +23,7 @@
 import http from "node:http"
 
 import { STYLE } from "../theme.js"
-import { CONFIG_VERSION } from "../wire.js"
+import { CONFIG_VERSION, DEFAULT_MAX_OUTPUT_TOKENS } from "../wire.js"
 
 const POLL_MS = 250
 const CONFIG_TIMEOUT_MS = 5000
@@ -54,6 +56,7 @@ export const engine = {
         s.target = null
         s.baseURL = null
         s.ctxSize = 0
+        s.maxOutputTokens = 0
         s.remoteActiveModel = null
         s.servedModelName = null
         s.cachedView = null
@@ -87,6 +90,7 @@ export const engine = {
 
         lui.state.baseURL = cfg.base_url
         lui.state.ctxSize = cfg.context_size ?? 0
+        lui.state.maxOutputTokens = cfg.max_output_tokens ?? 0
         lui.state.remoteActiveModel = cfg.active_model ?? null
         lui.state.servedModelName = cfg.served_model ?? null
 
@@ -126,6 +130,18 @@ export const engine = {
     // harness on this hop.
     servedModelName(state) {
         return state?.servedModelName || null
+    },
+
+    // The generation cap is the model host's call, so this hop reports
+    // upstream's number and ignores its own `max_output_tokens`. Every
+    // hop re-announces it on its own /config, so the value reaches the
+    // end of an arbitrarily long chain unchanged.
+    // Never returns null: falling through to null would let this
+    // machine's own `max_output_tokens` decide, which is the one thing
+    // a remote hop must not do.
+    maxOutputTokens(lui) {
+        const n = lui.state?.maxOutputTokens
+        return typeof n === "number" && n > 0 ? n : DEFAULT_MAX_OUTPUT_TOKENS
     },
 
     // Where to actually reach the model. Parsed from the upstream's

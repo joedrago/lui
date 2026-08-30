@@ -30,7 +30,7 @@
 
 /** @typedef {{ path: string, default: any, isArray?: boolean }} SchemaEntry */
 
-/** @typedef {{ modelName: string, baseURL: string, ctxSize: number, webPort: number, websearch: boolean }} HarnessContext */
+/** @typedef {{ modelName: string, baseURL: string, ctxSize: number, maxOutputTokens: number, webPort: number, websearch: boolean }} HarnessContext */
 
 /**
  * @typedef {Object} Harness
@@ -76,6 +76,7 @@
  * @property {(state: any) => ShutdownSummary} [shutdownSummary]
  * @property {(state: any, model: Model | null) => number | null} [contextSize]
  * @property {(state: any, model: Model | null) => string | null} [servedModelName]
+ * @property {(lui: import("./lui.js").Lui) => number | null} [maxOutputTokens]
  * @property {(lui: import("./lui.js").Lui) => Endpoint | null} [endpoint]
  */
 

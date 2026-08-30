@@ -26,7 +26,7 @@ export const harness = {
                     id: ctx.modelName,
                     name: ctx.modelName,
                     contextWindow: ctx.ctxSize,
-                    maxTokens: 8192,
+                    maxTokens: ctx.maxOutputTokens,
                     supportsToolCalls: true
                 }
             ]

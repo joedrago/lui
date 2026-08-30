@@ -13,7 +13,12 @@
 // Protocol version reported by /config and required by the `remote`
 // engine when it dials another lui. Bump together with any breaking
 // change to the /config response shape.
-export const CONFIG_VERSION = 4
+export const CONFIG_VERSION = 5
+
+// Generation cap used when nothing else supplies one: the
+// `max_output_tokens` schema default, and the floor a `remote` hop
+// lands on if an upstream somehow announces no value.
+export const DEFAULT_MAX_OUTPUT_TOKENS = 8192
 
 const DEFAULT_KEY = "{}"
 

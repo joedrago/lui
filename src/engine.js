@@ -6,6 +6,7 @@
 
 /** @import { Engine, SchemaEntry } from "./types.js" */
 
+import { DEFAULT_MAX_OUTPUT_TOKENS } from "./wire.js"
 import { engine as llamaServer } from "./engine/llama-server.js"
 import { engine as mlxLm } from "./engine/mlx_lm.js"
 import { engine as remote } from "./engine/remote.js"
@@ -15,6 +16,19 @@ export const engines = {
     [llamaServer.name]: llamaServer,
     [mlxLm.name]: mlxLm,
     [remote.name]: remote
+}
+
+// The generation cap handed to harnesses, resolved host-first. An
+// engine that owns the model has no opinion, so the answer is this
+// machine's `max_output_tokens`; the `remote` engine overrides the
+// hook to re-report what its upstream announced, which is what makes
+// the setting travel outward instead of being re-decided per client.
+/** @param {import("./lui.js").Lui} lui @returns {number} */
+export function resolveMaxOutputTokens(lui) {
+    const fromEngine = lui.engineModule?.maxOutputTokens?.(lui)
+    if (typeof fromEngine === "number" && fromEngine > 0) return fromEngine
+    const local = lui.config?.global?.max_output_tokens
+    return typeof local === "number" && local > 0 ? local : DEFAULT_MAX_OUTPUT_TOKENS
 }
 
 // Each engine's own `schema` entries, prefixed with `engine.<name>.`

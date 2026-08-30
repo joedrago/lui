@@ -52,6 +52,7 @@ lui set engine_port 8080
 lui set web_port 8081
 lui set public true
 lui set websearch false
+lui set max_output_tokens 32768
 lui set debug_log /tmp/llama.log
 lui set harness.opencode.enabled true
 lui set harness.pi.enabled true
@@ -61,6 +62,8 @@ lui set sandbox.allow_gpu true
 lui set sandbox.allow ./project
 lui unset sandbox.profile
 ```
+
+`max_output_tokens` (default 8192) is the per-response generation cap lui writes into each harness's model entry — opencode's `limit.output`, pi's `maxTokens`. It's **host-side**: set it on the machine actually running the model, and it rides `/config` out to every attached lui. Setting it on a client running the `remote` engine has no effect; that hop honors whatever upstream announced.
 
 Paths are dot-separated. A path that doesn't name a top-level table (`global`, `model`, `harness`, `engine`, `sandbox`) is automatically rooted under `global.`, so `engine_port` and `global.engine_port` mean the same thing.
 
@@ -84,11 +87,12 @@ lui add llm remote server.local:8081
 lui run llm
 ```
 
-Chains transparently: `lui add bar remote relay:8081` on a third machine will write a harness pointing straight at the original server, since each `/config` hop just propagates the fully-qualified `base_url`.
+Chains transparently: `lui add bar remote relay:8081` on a third machine will write a harness pointing straight at the original server, since each `/config` hop just propagates the fully-qualified `base_url`. Context size and `max_output_tokens` propagate the same way, so the model host is the single place those get tuned.
 
 **Requirements:**
 
 - The upstream lui must have `public = true` so its HTTP server binds `0.0.0.0`.
+- Every hop must be running a lui that speaks the same `/config` protocol version — a mismatch fails loudly at `lui run` and tells you which side to upgrade.
 - This machine must be network-reachable to the _actual_ model host, not just the immediate upstream — the harness writes the real URL, not a per-hop relative one.
 
 ### `lui ssh USER@HOST` — share your local LLM with a remote client

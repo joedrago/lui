@@ -11,6 +11,7 @@ import process from "node:process"
 import { parse } from "smol-toml"
 
 import { engineSchemaDefaults } from "./engine.js"
+import { DEFAULT_MAX_OUTPUT_TOKENS } from "./wire.js"
 import { harnessSchemaDefaults } from "./harness.js"
 import { sandboxSchemaDefaults } from "./sandbox.js"
 import { styled } from "./ansi.js"
@@ -37,7 +38,13 @@ export function globalSchemaDefaults() {
         { path: "web_port", default: 8081 },
         { path: "websearch", default: true },
         { path: "public", default: false },
-        { path: "debug_log", default: null }
+        { path: "debug_log", default: null },
+
+        // Host-authoritative: the machine actually running the model
+        // picks this, and it rides /config out to every attached lui.
+        // Setting it on a client running the `remote` engine does
+        // nothing — that hop honors whatever upstream reported.
+        { path: "max_output_tokens", default: DEFAULT_MAX_OUTPUT_TOKENS }
     ]
 }
 

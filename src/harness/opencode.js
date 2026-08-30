@@ -29,7 +29,14 @@ export const harness = {
     apply(existing, ctx, config) {
         let text = existing.trim() ? existing : "{}\n"
         const effort = typeof config.reasoning_effort === "string" && config.reasoning_effort ? config.reasoning_effort : null
-        text = setProviderLui({ text, modelName: ctx.modelName, baseURL: ctx.baseURL, ctxSize: ctx.ctxSize, reasoningEffort: effort })
+        text = setProviderLui({
+            text,
+            modelName: ctx.modelName,
+            baseURL: ctx.baseURL,
+            ctxSize: ctx.ctxSize,
+            maxOutputTokens: ctx.maxOutputTokens,
+            reasoningEffort: effort
+        })
         text = setPermissionBash(text, ctx.webPort, ctx.websearch)
         return text
     },
@@ -60,13 +67,13 @@ export const harness = {
     }
 }
 
-/** @param {{ text: string, modelName: string, baseURL: string, ctxSize: number, reasoningEffort: string | null }} args @returns {string} */
-function setProviderLui({ text, modelName, baseURL, ctxSize, reasoningEffort }) {
+/** @param {{ text: string, modelName: string, baseURL: string, ctxSize: number, maxOutputTokens: number, reasoningEffort: string | null }} args @returns {string} */
+function setProviderLui({ text, modelName, baseURL, ctxSize, maxOutputTokens, reasoningEffort }) {
     /** @type {{ name: string, supportsToolCalls: boolean, limit: { context: number, input: number, output: number }, options?: { reasoningEffort: string } }} */
     const modelValue = {
         name: modelName,
         supportsToolCalls: true,
-        limit: { context: ctxSize, input: ctxSize, output: 8192 }
+        limit: { context: ctxSize, input: ctxSize, output: maxOutputTokens }
     }
     if (reasoningEffort) modelValue.options = { reasoningEffort }
     const luiValue = {

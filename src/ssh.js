@@ -67,6 +67,7 @@ export async function sshSetupShare(lui, spec) {
     }
     const sessionModel = { name: localConfig.active_model ?? null }
     const sessionCtxSize = typeof localConfig.context_size === "number" ? localConfig.context_size : null
+    const sessionMaxOutputTokens = typeof localConfig.max_output_tokens === "number" ? localConfig.max_output_tokens : null
     const sessionServedName = localConfig.served_model ?? null
 
     const remote = await connectRemote(target)
@@ -91,6 +92,7 @@ export async function sshSetupShare(lui, spec) {
             remoteWebPort,
             sessionModel,
             sessionCtxSize,
+            sessionMaxOutputTokens,
             sessionServedName
         })
         process.stdout.write(`  ${h.name} configured on ${remote.spec}\n`)
@@ -498,7 +500,7 @@ async function windowsWhich(target, probe, name) {
     }
 }
 
-/** @param {{ lui: Lui, remote: SshRemote, harness: Harness, remoteEnginePort: number, remoteWebPort: number, sessionModel: { name: string | null }, sessionCtxSize: number | null, sessionServedName: string | null }} args */
+/** @param {{ lui: Lui, remote: SshRemote, harness: Harness, remoteEnginePort: number, remoteWebPort: number, sessionModel: { name: string | null }, sessionCtxSize: number | null, sessionMaxOutputTokens: number | null, sessionServedName: string | null }} args */
 async function applyHarnessRemote({
     lui,
     remote,
@@ -507,6 +509,7 @@ async function applyHarnessRemote({
     remoteWebPort,
     sessionModel,
     sessionCtxSize,
+    sessionMaxOutputTokens,
     sessionServedName
 }) {
     // The client's harness always points at localhost: the reverse
@@ -518,9 +521,16 @@ async function applyHarnessRemote({
         webPort: remoteWebPort,
         websearch: lui.config.global.websearch,
         ctxSize: sessionCtxSize,
+        maxOutputTokens: sessionMaxOutputTokens,
         servedName: sessionServedName
     })
-    await applyHarness({ transport: remote.transport, harness, ctx, enabled: true, config: lui.config.harness?.[harness.name] ?? {} })
+    await applyHarness({
+        transport: remote.transport,
+        harness,
+        ctx,
+        enabled: true,
+        config: lui.config.harness?.[harness.name] ?? {}
+    })
 }
 
 /** @param {SshTarget} target @param {{ engineEndpoint: Endpoint, localWebPort: number, remoteEnginePort: number, remoteWebPort: number, websearch: boolean }} ports */

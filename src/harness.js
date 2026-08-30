@@ -42,7 +42,7 @@
 //                     alike — see the SshRemote typedef.
 //
 // The HarnessContext passed to apply():
-//   modelName, baseURL, ctxSize, webPort, websearch
+//   modelName, baseURL, ctxSize, maxOutputTokens, webPort, websearch
 
 /** @import { Harness, HarnessContext, Transport, SchemaEntry, RemotePlatform } from "./types.js" */
 /** @import { Lui } from "./lui.js" */
@@ -50,6 +50,8 @@
 import fs from "node:fs"
 
 import { renderWebsearchSkill } from "./web.js"
+import { resolveMaxOutputTokens } from "./engine.js"
+import { DEFAULT_MAX_OUTPUT_TOKENS } from "./wire.js"
 import { harness as opencode } from "./harness/opencode.js"
 import { harness as pi } from "./harness/pi.js"
 import { harness as zerostack } from "./harness/zerostack.js"
@@ -119,17 +121,23 @@ export function harnessSchemaDefaults() {
 // returns a real number once Ready, so callers pass a fallback for
 // early/offline use.
 //
+// `maxOutputTokens` is the model host's generation cap, already
+// resolved by the caller — locally it's this machine's setting, and
+// over a remote hop or an `lui ssh` push it's the number upstream
+// announced on /config. Clients never get a say.
+//
 // `servedName` is what the engine's OpenAI-compatible API expects in
 // the request body's `model` field — llama-server accepts anything so
 // the alias is fine there, but mlx_lm.server 404s a mismatch and
 // remote-engine hops surface the upstream's value. When null we fall
 // back to the lui alias.
-/** @param {{ activeModel: { name: string } | null, baseURL: string, webPort: number, websearch: boolean | null | undefined, ctxSize: number | null | undefined, servedName: string | null }} args @returns {HarnessContext} */
-export function harnessContext({ activeModel, baseURL, webPort, websearch, ctxSize, servedName }) {
+/** @param {{ activeModel: { name: string } | null, baseURL: string, webPort: number, websearch: boolean | null | undefined, ctxSize: number | null | undefined, maxOutputTokens: number | null | undefined, servedName: string | null }} args @returns {HarnessContext} */
+export function harnessContext({ activeModel, baseURL, webPort, websearch, ctxSize, maxOutputTokens, servedName }) {
     return {
         modelName: servedName || deriveModelName(activeModel?.name),
         baseURL,
         ctxSize: ctxSize ?? DEFAULT_CTX_SIZE,
+        maxOutputTokens: maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         webPort,
         websearch: websearch !== false
     }
@@ -292,6 +300,7 @@ export async function applyAllLocal(lui, { ctxSize } = {}) {
         webPort: lui.config.global.web_port,
         websearch: lui.config.global.websearch,
         ctxSize,
+        maxOutputTokens: resolveMaxOutputTokens(lui),
         servedName
     })
     /** @param {string} file @param {string} backup */
