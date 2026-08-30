@@ -520,7 +520,7 @@ async function applyHarnessRemote({
         ctxSize: sessionCtxSize,
         servedName: sessionServedName
     })
-    await applyHarness({ transport: remote.transport, harness, ctx, enabled: true })
+    await applyHarness({ transport: remote.transport, harness, ctx, enabled: true, config: lui.config.harness?.[harness.name] ?? {} })
 }
 
 /** @param {SshTarget} target @param {{ engineEndpoint: Endpoint, localWebPort: number, remoteEnginePort: number, remoteWebPort: number, websearch: boolean }} ports */

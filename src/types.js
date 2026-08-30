@@ -40,7 +40,7 @@
  * @property {string} [skillsDir]
  * @property {"nested" | "flat"} [skillsLayout]
  * @property {SchemaEntry[]} [schema]
- * @property {(existing: string, ctx: HarnessContext) => string} apply
+ * @property {(existing: string, ctx: HarnessContext, config: Record<string, any>) => string} apply
  * @property {(existing: string) => boolean} [needsBackup]
  * @property {(remote: SshRemote) => Promise<{ ok: boolean, error?: string }>} [sshPreflight]
  */

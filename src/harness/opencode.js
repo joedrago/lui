@@ -1,6 +1,13 @@
 // opencode harness: writes ~/.config/opencode/opencode.{jsonc,json}.
 // Inserts a `provider.lui` block pointing opencode at llama-server,
 // and a `permission.bash` curl allowlist for lui's web-search port.
+//
+// `reasoning_effort` (unset by default) writes
+// provider.lui.models.<model>.options.reasoningEffort. opencode feeds
+// model options to the AI SDK, whose openai-compatible provider maps
+// reasoningEffort to the request body's `reasoning_effort`, which
+// llama-server hands to the chat template. Qwen3.8 accepts low,
+// medium, xhigh; `none` disables thinking entirely.
 
 /** @import { Harness } from "../types.js" */
 
@@ -14,11 +21,15 @@ export const harness = {
     configDir: "~/.config/opencode",
     configCandidates: ["opencode.jsonc", "opencode.json"],
     skillsDir: "skills",
-    schema: [{ path: "enabled", default: false }],
+    schema: [
+        { path: "enabled", default: false },
+        { path: "reasoning_effort", default: null }
+    ],
 
-    apply(existing, ctx) {
+    apply(existing, ctx, config) {
         let text = existing.trim() ? existing : "{}\n"
-        text = setProviderLui({ text, modelName: ctx.modelName, baseURL: ctx.baseURL, ctxSize: ctx.ctxSize })
+        const effort = typeof config.reasoning_effort === "string" && config.reasoning_effort ? config.reasoning_effort : null
+        text = setProviderLui({ text, modelName: ctx.modelName, baseURL: ctx.baseURL, ctxSize: ctx.ctxSize, reasoningEffort: effort })
         text = setPermissionBash(text, ctx.webPort, ctx.websearch)
         return text
     },
@@ -49,8 +60,15 @@ export const harness = {
     }
 }
 
-/** @param {{ text: string, modelName: string, baseURL: string, ctxSize: number }} args @returns {string} */
-function setProviderLui({ text, modelName, baseURL, ctxSize }) {
+/** @param {{ text: string, modelName: string, baseURL: string, ctxSize: number, reasoningEffort: string | null }} args @returns {string} */
+function setProviderLui({ text, modelName, baseURL, ctxSize, reasoningEffort }) {
+    /** @type {{ name: string, supportsToolCalls: boolean, limit: { context: number, input: number, output: number }, options?: { reasoningEffort: string } }} */
+    const modelValue = {
+        name: modelName,
+        supportsToolCalls: true,
+        limit: { context: ctxSize, input: ctxSize, output: 8192 }
+    }
+    if (reasoningEffort) modelValue.options = { reasoningEffort }
     const luiValue = {
         name: "lui",
         npm: "@ai-sdk/openai-compatible",
@@ -59,11 +77,7 @@ function setProviderLui({ text, modelName, baseURL, ctxSize }) {
             toolParser: [{ type: "raw-function-call" }, { type: "json" }]
         },
         models: {
-            [modelName]: {
-                name: modelName,
-                supportsToolCalls: true,
-                limit: { context: ctxSize, input: ctxSize, output: 8192 }
-            }
+            [modelName]: modelValue
         }
     }
     const edits = modify(text, ["provider", "lui"], luiValue, { formattingOptions: FORMAT })
