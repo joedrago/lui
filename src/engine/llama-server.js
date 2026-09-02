@@ -49,6 +49,45 @@ function userSuppliedAny(args, flags) {
     return args.some((a) => flags.includes(a))
 }
 
+// Last-wins integer value for any of `flags`, mirroring llama.cpp's
+// argument parsing. null when absent or not a positive integer.
+/** @param {string[]} args @param {string[]} flags @returns {number | null} */
+function intArg(args, flags) {
+    let found = null
+    for (let i = 0; i < args.length - 1; i++) {
+        if (!flags.includes(args[i])) continue
+        const n = parseInt(args[i + 1], 10)
+        if (Number.isFinite(n) && n > 0) found = n
+    }
+    return found
+}
+
+// Per-slot context window — what the user thinks of as "the context size",
+// and what harnesses need to be told. llama-server's `-c` sizes the whole
+// KV pool, shared across `-np` slots: with `-kvu` any slot may grow into
+// all of it, without it llama.cpp hard-partitions into `-c / -np`. Either
+// way a slot's fair share is the pool over the slot count, clamped by the
+// ceiling llama.cpp reports for one sequence and by the cap it applies
+// when that ceiling exceeds the model's training context.
+//
+// Prefers the running engine's own numbers; falls back to the model's argv
+// for offline callers (`lui ssh`) that have no engine to read. Returns null
+// when neither is available.
+/** @param {any} state @param {string[]} args @returns {number | null} */
+function perSlotCtx(state, args) {
+    const live = state && state.ctxSize > 0
+    const total = live ? state.ctxSize : intArg(args, ["-c", "--ctx-size"])
+    if (!total) return null
+    const slots = (live ? state.nParallel : intArg(args, ["-np", "--parallel"])) || 1
+    let perSlot = Math.floor(total / Math.max(1, slots))
+    if (live) {
+        for (const cap of [state.ctxSeq, state.slotCtxCap]) {
+            if (cap > 0 && cap < perSlot) perSlot = cap
+        }
+    }
+    return perSlot > 0 ? perSlot : null
+}
+
 const LOG_RING_SIZE = 200
 const MAX_RECENT_REQUESTS = 3
 
@@ -94,11 +133,6 @@ export const engine = {
         }
     ],
 
-    // Best known context size. After Ready, state.ctxSize is the
-    // authoritative value (lifted from `llama_context: n_ctx = ...`).
-    // Before then — or in offline callers like `lui ssh` that have no
-    // running engine — fall back to parsing -c / --ctx-size from the
-    // model's argv. Returns null if neither is available.
     // Extra lines for `lui` shutdown summary (rendered between Uptime
     // and Reason) plus an optional bright-red abort message.
     shutdownSummary(state) {
@@ -123,16 +157,9 @@ export const engine = {
         return signal ? `killed by ${signal}` : `exited with code ${code}`
     },
 
+    // Per-slot context window — the number harnesses are told about.
     contextSize(state, model) {
-        if (state && state.ctxSize > 0) return state.ctxSize
-        const args = model?.args || []
-        for (let i = 0; i < args.length; i++) {
-            if ((args[i] === "-c" || args[i] === "--ctx-size") && i + 1 < args.length) {
-                const n = parseInt(args[i + 1], 10)
-                if (Number.isFinite(n) && n > 0) return n
-            }
-        }
-        return null
+        return perSlotCtx(state, model?.args || [])
     },
 
     // llama-server's OpenAI endpoint accepts any string as the model
@@ -272,6 +299,8 @@ export const engine = {
         s.cpuForcedCount = 0
         s.cpuForcedPrimary = ""
         s.ctxSize = 0
+        s.ctxSeq = 0
+        s.slotCtxCap = 0
         s.maxCtxSize = 0
         s.nParallel = 1
         s.llamaVersion = ""
@@ -496,15 +525,33 @@ function parseLoadLine(line, lui) {
         s.fitProbing = false
         return
     }
+    // Ceiling for a single sequence. Equals n_ctx under unified KV,
+    // n_ctx / n_seq_max otherwise. Must be tested before the n_ctx line
+    // below, whose substring match also catches this one.
+    if (line.includes("llama_context: n_ctx_seq")) {
+        const m = /n_ctx_seq\s*=\s*(\d+)/.exec(line)
+        if (m) s.ctxSeq = parseInt(m[1], 10) || 0
+        return
+    }
     if (line.includes("llama_context: n_ctx")) {
         const m = /n_ctx\s+=\s+(\d+)/.exec(line)
         if (m) s.ctxSize = parseInt(m[1], 10) || 0
         return
     }
-    if (line.includes("n_parallel")) {
-        const m = /n_parallel\s*=\s*(\d+)/.exec(line)
+    // Slot count. `llama_context: n_seq_max` and the server's
+    // `initializing slots, n_slots` both carry it; the `n_parallel` line
+    // only shows up when the count was auto-picked.
+    if (line.includes("llama_context: n_seq_max") || line.includes("n_slots =") || line.includes("n_parallel =")) {
+        const m = /n_(?:seq_max|slots|parallel)\s*=\s*(\d+)/.exec(line)
         if (m) s.nParallel = Math.max(1, parseInt(m[1], 10) || 1)
         // fall through — no return; line may carry other parseable info
+    }
+    // llama-server clamps a slot to the model's training context and says
+    // so. That clamp beats the arithmetic share.
+    if (line.includes("the slot context") && line.includes("capping")) {
+        const m = /training context of the model \((\d+)\)/.exec(line)
+        if (m) s.slotCtxCap = parseInt(m[1], 10) || 0
+        return
     }
     // Readiness signal. Older builds printed "server is listening on
     // http://...", newer ones print "llama_server: listening on
@@ -843,7 +890,7 @@ function appendEnginePanel(v, lui) {
     }
 
     if (s.ctxSize > 0) {
-        const perSlot = Math.floor(s.ctxSize / Math.max(1, s.nParallel))
+        const perSlot = perSlotCtx(s, []) ?? s.ctxSize
         let line
         if (s.nParallel > 1) {
             line = `${formatNumber(perSlot)} token context per slot · ${formatNumber(s.ctxSize)} total (${s.nParallel} slots)`
