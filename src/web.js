@@ -184,11 +184,34 @@ function handleBsearch({ res, pending, url }) {
 /** @param {{ req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse, pending: Map<string, PendingSearch>, url: URL }} args */
 function handleResults({ req, res, pending, url }) {
     const id = url.searchParams.get("id")
-    if (!id || !pending.has(id)) {
+    const q = (url.searchParams.get("q") || "").trim()
+
+    // The id is the only thing tying this POST to the search that opened the tab, and it
+    // arrives as a querystring param on a Google page — which Google is free to rewrite.
+    // A consent redirect or a param-normalizing extension drops it, the bookmarklet reads
+    // an empty id, and the whole round trip 404s. So the id is the fast path, not the
+    // guarantee.
+    //
+    // q is Google's own param and survives every rewrite, so matching on it recovers the
+    // search when the id is gone. And because the skill forbids parallel searches, a
+    // single pending entry can never be the wrong one to take.
+    let key = id && pending.has(id) ? id : null
+    if (!key && q) {
+        for (const [candidate, entry] of pending) {
+            if (entry.query === q) {
+                key = candidate
+                break
+            }
+        }
+    }
+    if (!key && pending.size === 1) key = [...pending.keys()][0]
+
+    if (!key) {
         res.writeHead(404, { ...CORS, "content-type": "text/plain" })
-        res.end("no pending search with that id (timed out or already received)")
+        res.end("no pending search with that id or query (timed out or already received)")
         return
     }
+
     let body = ""
     req.setEncoding("utf8")
     req.on("data", (c) => (body += c))
@@ -199,8 +222,8 @@ function handleResults({ req, res, pending, url }) {
         } catch {
             payload = { results: [], warnings: ["lui: failed to parse bookmarklet payload"] }
         }
-        const entry = pending.get(id)
-        pending.delete(id)
+        const entry = pending.get(key)
+        pending.delete(key)
         entry?.resolve(payload)
         res.writeHead(200, CORS)
         res.end("ok")
