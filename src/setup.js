@@ -152,6 +152,12 @@ function printInformation(_lui, enabledHarnesses) {
     w(row("docs", url("https://github.com/ml-explore/mlx-lm"), W))
     w("\n")
 
+    w("  " + styled("strata", STYLE.ENGINE_NAME) + "\n")
+    w(row("install", url("https://github.com/Niko1221/Strata"), W))
+    w(row("docs", url("https://github.com/Niko1221/Strata/blob/main/docs/AI_SETUP.md"), W))
+    w(row("add a model", cmd("lui add NAME strata --config /path/to/strata-<model>.json"), W))
+    w("\n")
+
     w("  " + styled("lui", STYLE.BRAND) + "\n")
     w(row("inspect config", cmd("lui set"), W))
     w(row("run a model", cmd("lui run"), W))

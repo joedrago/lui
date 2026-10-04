@@ -231,9 +231,11 @@ export const engine = {
         const binaryName = binarySeg.args[0]
         const binaryPath = resolveBinary(binaryName) ?? binaryName
         const argv = rest.flatMap((s) => s.args)
+        const env = { ...process.env, ...(model.env || {}) }
         lui.state.proc = spawnProcess({
             binary: binaryPath,
             argv,
+            env,
             parseLine: (line) => engine.parseLine?.(line, lui),
             debugLog: lui.config.global.debug_log,
             onExit: (code, signal) => lui.onEngineExit?.(code, signal),

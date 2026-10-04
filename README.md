@@ -32,6 +32,7 @@ To manage models:
 ```
 lui add NAME ENGINE ARGS...    # register a model
 lui args NAME ARGS...          # show / replace this model's args (creates as llama-server if absent)
+lui env NAME KEY=VALUE...      # show / set env var overrides for this model (KEY= removes it)
 lui cp OLDNAME NEWNAME         # copy a model under a new name
 lui rm NAME                    # delete the entry
 lui run                        # list every registered model with its resolved engine commandline

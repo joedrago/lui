@@ -9,12 +9,14 @@
 import { DEFAULT_MAX_OUTPUT_TOKENS } from "./wire.js"
 import { engine as llamaServer } from "./engine/llama-server.js"
 import { engine as mlxLm } from "./engine/mlx_lm.js"
+import { engine as strata } from "./engine/strata.js"
 import { engine as remote } from "./engine/remote.js"
 
 /** @type {Record<string, Engine>} */
 export const engines = {
     [llamaServer.name]: llamaServer,
     [mlxLm.name]: mlxLm,
+    [strata.name]: strata,
     [remote.name]: remote
 }
 

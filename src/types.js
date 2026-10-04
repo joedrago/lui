@@ -12,6 +12,7 @@
  * @property {string} name
  * @property {string} engine
  * @property {string[]} args
+ * @property {Record<string, string>} [env]
  */
 
 /** @typedef {{ name: string, style?: PaletteEntry, args: string[] }} Segment */

@@ -5,7 +5,7 @@ import { runConfigSet, runConfigUnset, runConfigDump } from "./config.js"
 import { engines } from "./engine.js"
 import { runSetup } from "./setup.js"
 
-const SUBCOMMANDS = new Set(["run", "add", "cp", "args", "rm", "ssh", "websearch", "sandbox", "set", "unset", "setup"])
+const SUBCOMMANDS = new Set(["run", "add", "cp", "args", "env", "rm", "ssh", "websearch", "sandbox", "set", "unset", "setup"])
 
 /** @returns {void} */
 function printHelp() {
@@ -24,6 +24,9 @@ USAGE
 
   lui args NAME                      show ARGS for a model
   lui args NAME ARGS...              replace ARGS for a model
+
+  lui env  NAME                      show env overrides for a model
+  lui env  NAME KEY=VALUE...         set env overrides (KEY= removes it)
 
   lui set                            show config settings
   lui set   PATH VALUE               set a config value (appends for array paths)
@@ -102,6 +105,13 @@ async function main() {
         if (rest.length < 1) fatal("args requires NAME")
         const [name, ...args] = rest
         lui.setArgs(name, args)
+        return
+    }
+
+    if (verb === "env") {
+        if (rest.length < 1) fatal("env requires NAME")
+        const [name, ...args] = rest
+        lui.env(name, args)
         return
     }
 

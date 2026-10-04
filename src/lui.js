@@ -287,7 +287,50 @@ export class Lui {
     resolveModel(name) {
         const m = this.config.model[name]
         if (!m) return null
-        return { name, engine: m.engine, args: m.args || [] }
+        return { name, engine: m.engine, args: m.args || [], env: m.env || {} }
+    }
+
+    // `lui env NAME` shows current overrides; `lui env NAME KEY=VALUE...`
+    // merges them in (an empty VALUE, i.e. `KEY=`, removes that key).
+    // These ride along in the model's own config table and get merged
+    // over process.env whenever that model's engine spawns its binary.
+    /** @param {string} name @param {string[]} args */
+    env(name, args) {
+        const existing = this.config.model[name]
+        if (!existing) {
+            process.stderr.write(`lui: model "${name}" not found. Use \`lui add ${name} ENGINE ARGS...\` to create it.\n`)
+            process.exit(1)
+        }
+        const env = { ...(existing.env || {}) }
+
+        for (const pair of args) {
+            const eq = pair.indexOf("=")
+            if (eq <= 0) {
+                process.stderr.write(`lui: invalid env assignment ${JSON.stringify(pair)} (expected KEY=VALUE)\n`)
+                process.exit(2)
+            }
+            const key = pair.slice(0, eq)
+            const value = pair.slice(eq + 1)
+            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+                process.stderr.write(`lui: invalid env var name ${JSON.stringify(key)}\n`)
+                process.exit(2)
+            }
+            if (value === "") delete env[key]
+            else env[key] = value
+        }
+
+        if (args.length > 0) {
+            existing.env = env
+            this.config.save()
+        }
+
+        const keys = Object.keys(env).sort()
+        if (!keys.length) {
+            process.stdout.write(`No env overrides for "${name}".\n`)
+            return
+        }
+        process.stdout.write(`Env overrides for "${name}":\n`)
+        for (const k of keys) process.stdout.write(`  ${k}=${env[k]}\n`)
     }
 
     /** @param {Model} model */

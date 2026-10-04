@@ -79,7 +79,7 @@ export class Config {
         this.engine = clean.engine
         /** @type {Record<string, any>} */
         this.sandbox = clean.sandbox
-        /** @type {Record<string, { engine: string, args: string[] }>} */
+        /** @type {Record<string, { engine: string, args: string[], env?: Record<string, string> }>} */
         this.model = clean.model
     }
 
@@ -124,19 +124,7 @@ export class Config {
 function serialize(cfg) {
     const out = []
 
-    // Belt-and-braces: catch any object-valued child of [global].
-    const globalNested = []
-    for (const [k, v] of Object.entries(cfg.global || {})) {
-        if (v && typeof v === "object" && !Array.isArray(v)) globalNested.push(k)
-    }
-    out.push(...emitTable("global", cfg.global, globalNested))
-
-    for (const groupKey of globalNested.sort()) {
-        const group = cfg.global[groupKey]
-        if (!group || Object.keys(group).length === 0) continue
-        out.push("")
-        out.push(...emitTable(`global.${groupKey}`, group))
-    }
+    out.push(...emitTableWithNested("global", cfg.global))
 
     out.push(...emitTopLevelTable(cfg, "harness"))
     out.push(...emitTopLevelTable(cfg, "engine"))
@@ -159,13 +147,33 @@ function emitTopLevelTable(cfg, rootKey) {
     if (allInnerAreTables) {
         for (const name of Object.keys(obj).sort()) {
             out.push("")
-            out.push(...emitTable(`${rootKey}.${tomlKey(name)}`, obj[name]))
+            out.push(...emitTableWithNested(`${rootKey}.${tomlKey(name)}`, obj[name]))
         }
     } else {
         out.push("")
-        out.push(...emitTable(rootKey, obj))
+        out.push(...emitTableWithNested(rootKey, obj))
     }
     return out
+}
+
+// Like emitTable, but also recurses into any object-valued (non-array)
+// children as their own `[header.key]` sub-tables — e.g. a model's
+// `env` map under `[model.foo.env]`. emitTable itself only emits
+// scalars/arrays at its own level and silently drops nested objects,
+// so every caller that might hand it a nested table goes through here
+// instead.
+/** @param {string} header @param {Record<string, any>} obj @returns {string[]} */
+function emitTableWithNested(header, obj) {
+    if (!obj || typeof obj !== "object") return [`[${header}]`]
+    const nestedKeys = Object.keys(obj).filter((k) => obj[k] && typeof obj[k] === "object" && !Array.isArray(obj[k]))
+    const lines = emitTable(header, obj, nestedKeys)
+    for (const k of nestedKeys.sort()) {
+        const sub = obj[k]
+        if (!sub || Object.keys(sub).length === 0) continue
+        lines.push("")
+        lines.push(...emitTableWithNested(`${header}.${tomlKey(k)}`, sub))
+    }
+    return lines
 }
 
 /** @param {string} header @param {Record<string, any>} obj @param {string[]} [skipNested] @returns {string[]} */

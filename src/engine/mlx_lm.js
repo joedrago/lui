@@ -156,7 +156,7 @@ export const engine = {
         // We render no download UI for mlx_lm, so kill huggingface_hub's
         // tqdm output at the source — keeps the Server Log panel from
         // filling with overwrite frames during multi-GB pulls.
-        const env = { ...process.env, HF_HUB_DISABLE_PROGRESS_BARS: "1" }
+        const env = { ...process.env, HF_HUB_DISABLE_PROGRESS_BARS: "1", ...(model.env || {}) }
         lui.state.proc = spawnProcess({
             binary: binaryPath,
             argv,
