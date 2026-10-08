@@ -283,6 +283,8 @@ export const engine = {
         s.kvCacheMib = 0
         s.rsBufMib = 0
         s.computeBufMib = 0
+        s.computeBufSeen = new Set()
+        s.moeCacheMib = 0
 
         if (s.rssTimer) clearInterval(s.rssTimer)
 
@@ -454,7 +456,14 @@ function parseLoadLine(line, lui) {
         if (v) s.unifiedMemory = v.trim().toLowerCase() === "true"
         return
     }
-    if (line.includes("CPU_Mapped model buffer size") || line.includes("CPU model buffer size")) {
+    // Pinned host buffers (`ROCm_Host`, `CUDA_Host`, `Vulkan_Host`) live in
+    // RAM even though their names don't say CPU — e.g. --load-mode none
+    // puts CPU-side MoE experts there.
+    if (
+        line.includes("CPU_Mapped model buffer size") ||
+        line.includes("CPU model buffer size") ||
+        (line.includes("model buffer size") && isHostBuffer(line))
+    ) {
         const mib = extractMib(line)
         if (mib != null) {
             s.cpuMemMib += mib
@@ -493,19 +502,29 @@ function parseLoadLine(line, lui) {
         if (mib != null) s.rsBufMib += mib
         return
     }
+    // GPU-side cache for host-resident MoE experts (--moe-cache-mib).
+    if (line.includes("MoE cache size =")) {
+        if (!s.realLoadStarted) return
+        const mib = extractMib(line)
+        if (mib != null) s.moeCacheMib += mib
+        return
+    }
     // Compute buffers: accumulate across all contexts (target, draft, mmproj
     // projector). The `= ` filter excludes destructor lines that print
     // `compute buffer size is X MiB, matches expectation of Y MiB`.
-    if (line.includes("CPU compute buffer size =")) {
+    // sched_reserve re-reports a context's buffers whenever it reserves
+    // again (the draft right after MTP init, the target mid-run), so a
+    // repeated buffer name + size is a re-reserve, not a new buffer.
+    if (line.includes("compute buffer size =")) {
         if (!s.realLoadStarted) return
         const mib = extractMib(line)
-        if (mib != null) s.cpuComputeMib += mib
-        return
-    }
-    if (line.includes("compute buffer size =") && !line.includes("CPU")) {
-        if (!s.realLoadStarted) return
-        const mib = extractMib(line)
-        if (mib != null) s.computeBufMib += mib
+        if (mib == null) return
+        const name = /(\S+)\s+compute buffer size =/.exec(line)?.[1] ?? ""
+        const key = `${name}=${mib}`
+        if (s.computeBufSeen.has(key)) return
+        s.computeBufSeen.add(key)
+        if (line.includes("CPU compute buffer size =") || isHostBuffer(line)) s.cpuComputeMib += mib
+        else s.computeBufMib += mib
         return
     }
     if (line.includes("done_getting_tensors:") && line.includes("using CPU instead")) {
@@ -756,6 +775,11 @@ function extractMib(line) {
     return m ? parseFloat(m[1]) : null
 }
 
+/** @param {string} line @returns {boolean} */
+function isHostBuffer(line) {
+    return /\b\w+_Host\b/.test(line)
+}
+
 /** @param {Lui} lui @returns {string} */
 function binaryNameFromConfig(lui) {
     return lui.config.engine?.[engine.name]?.binary || BINARY_NAME
@@ -809,7 +833,7 @@ function appendEnginePanel(v, lui) {
     const s = lui.state
     const p = v.panel("llama-server")
 
-    const gpuTotal = s.gpuMemMib + s.kvCacheMib + s.rsBufMib + s.computeBufMib
+    const gpuTotal = s.gpuMemMib + s.kvCacheMib + s.rsBufMib + s.computeBufMib + s.moeCacheMib
     const cpuTotal = s.cpuMemMib + s.cpuRepackMib + s.cpuComputeMib
     if (gpuTotal > 0 || cpuTotal > 0) {
         const ln = p.line().style(STYLE.LABEL).text("Memory   : ").style()
@@ -839,6 +863,7 @@ function appendEnginePanel(v, lui) {
         if (s.kvCacheMib > 0) gpuParts.push(`${s.kvCacheMib.toFixed(0)} KV`)
         if (s.rsBufMib > 0) gpuParts.push(`${s.rsBufMib.toFixed(0)} RS`)
         if (s.computeBufMib > 0) gpuParts.push(`${s.computeBufMib.toFixed(0)} compute`)
+        if (s.moeCacheMib > 0) gpuParts.push(`${s.moeCacheMib.toFixed(0)} expert cache`)
         const cpuParts = []
         if (s.cpuMemMib > 0) cpuParts.push(`${s.cpuMemMib.toFixed(0)} model`)
         if (s.cpuRepackMib > 0) cpuParts.push(`${s.cpuRepackMib.toFixed(0)} expert`)
