@@ -158,6 +158,12 @@ function printInformation(_lui, enabledHarnesses) {
     w(row("add a model", cmd("lui add NAME strata --config /path/to/strata-<model>.json"), W))
     w("\n")
 
+    w("  " + styled("radiance", STYLE.ENGINE_NAME) + "\n")
+    w(row("install", url("https://codeberg.org/StillDeadcode/radiance"), W))
+    w(row("docs", url("https://codeberg.org/StillDeadcode/radiance/src/branch/main/docs/GUIDE.md"), W))
+    w(row("add a model", cmd("lui add NAME radiance --model /path/to/model.rad"), W))
+    w("\n")
+
     w("  " + styled("lui", STYLE.BRAND) + "\n")
     w(row("inspect config", cmd("lui set"), W))
     w(row("run a model", cmd("lui run"), W))
